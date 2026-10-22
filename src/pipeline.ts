@@ -916,13 +916,20 @@ const ROLES: WorkspaceRole[] = ["owner", "admin", "member", "viewer"];
 
 /**
  * Accept a workspace bearer token by asking worker-f's session check through
- * the TROOTH_OS service binding. Answers the workspace's trooth_id and role,
- * or null (deny) when there is no binding, no token, or worker-f refuses.
- * The response is read tolerantly (trooth_id at the top level, under
- * company or under user; role as workspace_role or role); a role that is not a
- * workspace role reads as member, which can read but not sign.
+ * the TROOTH_OS service binding (GET /auth/session in worker-f app-api.ts,
+ * read 22 Oct 2026). That route answers { authenticated, companyId, userId,
+ * email, role } where role is the account type, "vendor" or "buyer". A
+ * worker-f workspace today has one account, the company's own, so a vendor
+ * account is the owner of its company; a buyer account has no company to sign
+ * for and is refused. The worker-f companyId is mapped to the Semanto
+ * trooth_id through semanto_companies.os_company_id (migration 0003), never
+ * guessed from a name. Deny (null) when there is no binding, no token, a
+ * refused session, an unmapped company, or a buyer account.
  */
-export function troothOsAuthorize(service: ServiceFetcher | undefined): (req: Request, trooth_id: string) => Promise<WorkspaceAuth | null> {
+export function troothOsAuthorize(
+  service: ServiceFetcher | undefined,
+  troothIdForCompany: (os_company_id: string) => Promise<string | null> = async () => null,
+): (req: Request, trooth_id: string) => Promise<WorkspaceAuth | null> {
   return async (req) => {
     if (!service) return null;
     const auth = req.headers.get("authorization");
@@ -940,15 +947,16 @@ export function troothOsAuthorize(service: ServiceFetcher | undefined): (req: Re
     } catch {
       return null;
     }
-    if (!isRecord(j)) return null;
-    const user = isRecord(j.user) ? j.user : {};
-    const company = isRecord(j.company) ? j.company : {};
-    const trooth_id = str(j.trooth_id) ?? str(company.trooth_id) ?? str(user.trooth_id);
+    if (!isRecord(j) || j.authenticated !== true) return null;
+    const companyId = str(j.companyId);
+    if (!companyId) return null;
+    const accountType = str(j.role) ?? "vendor";
+    if (accountType !== "vendor") return null;
+    const trooth_id = await troothIdForCompany(companyId);
     if (!trooth_id) return null;
-    const roleText = str(j.workspace_role) ?? str(user.workspace_role) ?? str(j.role) ?? str(user.role) ?? "member";
-    const role = (ROLES as string[]).includes(roleText) ? (roleText as WorkspaceRole) : "member";
-    const user_id = str(String(user.id ?? j.user_id ?? "")) ?? "unknown";
-    const name = str(user.name) ?? str(j.name) ?? str(user.email) ?? "Workspace member";
+    const role: WorkspaceRole = ROLES.includes("owner") ? "owner" : "member";
+    const user_id = str(j.userId) ?? "unknown";
+    const name = str(j.email) ?? "Workspace owner";
     return { trooth_id, role, user_id, name };
   };
 }

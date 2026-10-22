@@ -94,7 +94,7 @@ export function wire(env: Env): Wired {
   const deps: RouteDeps = {
     ports,
     readers: webBotAuthReaders({ http: readersHttp(), cache: new KvKeyCache(env.CACHE), nonces: new KvNonceStore(env.CACHE) }),
-    authorize: troothOsAuthorize(env.TROOTH_OS),
+    authorize: troothOsAuthorize(env.TROOTH_OS, async (os_company_id) => (await env.DB.prepare("SELECT trooth_id FROM semanto_companies WHERE os_company_id = ?").bind(os_company_id).first<{ trooth_id: string }>())?.trooth_id ?? null),
     workspace: pipeline,
     commerce,
     // KV-backed per-reader limit: not wired yet (founder step: limits per route).

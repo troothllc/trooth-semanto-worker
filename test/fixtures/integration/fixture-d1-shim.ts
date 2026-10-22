@@ -42,7 +42,7 @@ class ShimStatement {
 export class FixtureD1 {
   readonly db = new DatabaseSync(":memory:");
   constructor() {
-    for (const m of ["0001_semanto.sql", "0002_integration.sql"]) this.db.exec(readFileSync(fileURLToPath(new URL(`../../../migrations/${m}`, import.meta.url)), "utf8"));
+    for (const m of ["0001_semanto.sql", "0002_integration.sql", "0003_os_company.sql"]) this.db.exec(readFileSync(fileURLToPath(new URL(`../../../migrations/${m}`, import.meta.url)), "utf8"));
   }
   prepare(sql: string): ShimStatement {
     return new ShimStatement(this.db, sql);

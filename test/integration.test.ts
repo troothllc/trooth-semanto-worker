@@ -839,13 +839,16 @@ describe("4. /os authorization: worker-f's session check, denied by default", ()
       fetch: async (input, init) => {
         const auth = new Headers(init?.headers).get("authorization");
         calls.push(typeof input === "string" ? input : input.url);
-        if (auth !== "Bearer live-session") return new Response("{}", { status: 401 });
-        return new Response(JSON.stringify({ user: { id: "u-1", name: "Ada Owner", workspace_role: "owner", role: "vendor" }, company: { trooth_id: "acme" } }), { status: 200, headers: { "content-type": "application/json" } });
+        if (auth !== "Bearer live-session" && auth !== "Bearer buyer-session") return new Response(JSON.stringify({ authenticated: false }), { status: 401 });
+        const role = auth === "Bearer live-session" ? "vendor" : "buyer";
+        return new Response(JSON.stringify({ authenticated: true, companyId: "co-ada-acme-com", userId: "u-1", email: "ada@acme.com", role }), { status: 200, headers: { "content-type": "application/json" } });
       },
     };
-    const authorize = troothOsAuthorize(service);
+    const authorize = troothOsAuthorize(service, async (c) => (c === "co-ada-acme-com" ? "acme" : null));
     const req = (auth?: string) => new Request(`${OS}/acme/build`, { method: "POST", headers: auth ? { authorization: auth } : {} });
-    expect(await authorize(req("Bearer live-session"), "acme")).toEqual({ trooth_id: "acme", role: "owner", user_id: "u-1", name: "Ada Owner" });
+    expect(await authorize(req("Bearer live-session"), "acme")).toEqual({ trooth_id: "acme", role: "owner", user_id: "u-1", name: "ada@acme.com" });
+    expect(await authorize(req("Bearer buyer-session"), "acme")).toBeNull();
+    expect(await troothOsAuthorize(service, async () => null)(req("Bearer live-session"), "acme")).toBeNull();
     expect(await authorize(req("Bearer stale"), "acme")).toBeNull();
     expect(await authorize(req(), "acme")).toBeNull();
     expect(await troothOsAuthorize(undefined)(req("Bearer live-session"), "acme")).toBeNull();
