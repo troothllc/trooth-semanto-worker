@@ -234,12 +234,19 @@ function citationWords(c: Finding["citation"]): string {
 
 // ------------------------------------------------------------------ the weekly run
 
+/**
+ * The one weekly schedule. wrangler.toml carries the same cron
+ * (["15 * * * *", "30 1 * * *", "0 6 * * 1"]) and src/serve/routes.ts
+ * runScheduled maps it to the weekly gap job; test/integration.test.ts fails
+ * if the three disagree.
+ */
 export const WEEKLY_RUN = {
-  /** Mondays at 09:00 UTC. The hour is before the US working day so the report is in the inbox when it starts. */
-  cron: "0 9 * * 1",
+  /** Mondays at 06:00 UTC, before the US working day, so the report is in the inbox when it starts. */
+  cron: "0 6 * * 1",
+  hour_utc: 6,
   timezone: "UTC",
   kinds: ["b2b", "shopping", "local", "competitor"] as QuestionKind[],
-  wranglerSnippet: '[triggers]\ncrons = ["0 9 * * 1"]',
+  wranglerSnippet: '[triggers]\ncrons = ["15 * * * *", "30 1 * * *", "0 6 * * 1"]',
 } as const;
 
 export interface RunPlan {
@@ -247,14 +254,14 @@ export interface RunPlan {
   cron: string;
   timezone: "UTC";
   kinds: QuestionKind[];
-  /** The next Monday 09:00 UTC at or after `from`. */
+  /** The next weekly run (Monday 06:00 UTC) after `from`. */
   next_run_at: string;
   /** Alert when the new report has more "differs" or "unsupported_claim" than the last one. */
   alert_on: Classification[];
 }
 
-export function nextMondayNine(from: Date): Date {
-  const d = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate(), 9, 0, 0, 0));
+export function nextWeeklyRun(from: Date): Date {
+  const d = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate(), WEEKLY_RUN.hour_utc, 0, 0, 0));
   const day = d.getUTCDay();
   let add = (1 - day + 7) % 7;
   if (add === 0 && d.getTime() <= from.getTime()) add = 7;
@@ -263,7 +270,7 @@ export function nextMondayNine(from: Date): Date {
 }
 
 export function weeklyRunPlan(trooth_id: string, from: Date, kinds: QuestionKind[] = [...WEEKLY_RUN.kinds]): RunPlan {
-  return { trooth_id, cron: WEEKLY_RUN.cron, timezone: "UTC", kinds, next_run_at: nextMondayNine(from).toISOString(), alert_on: ["differs", "unsupported_claim"] };
+  return { trooth_id, cron: WEEKLY_RUN.cron, timezone: "UTC", kinds, next_run_at: nextWeeklyRun(from).toISOString(), alert_on: ["differs", "unsupported_claim"] };
 }
 
 // ------------------------------------------------------------------ before and after

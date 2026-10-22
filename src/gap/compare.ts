@@ -24,6 +24,7 @@
 // company; it is a count of what an assistant said.
 
 import type { Fact, Negative } from "../core/semanto";
+import { sameFactKey } from "../core/fact-keys";
 import { keyInfo, type KeyType, type Question } from "./prompts";
 import type { Citation, ProviderAnswer } from "./providers";
 
@@ -325,7 +326,7 @@ export function compareAnswer(question: Question, answer: ProviderAnswer, ctx: C
   const out: Finding[] = [];
   for (const key of question.keys) {
     const info = keyInfo(key);
-    const fact = ctx.facts.find((f) => f.key === key) ?? null;
+    const fact = ctx.facts.find((f) => sameFactKey(f.key, key)) ?? null;
     const claim = answer.answer_text ? extractClaim(info.type, answer.answer_text, info.terms, question.product) : null;
     const base = {
       provider: answer.provider,

@@ -455,7 +455,7 @@ describe("facts", () => {
     const contact = factCandidates({ url: "https://acme.com/contact", witnessed_at: WITNESSED, html: html["https://acme.com/contact"]!, body: bodyOf("https://acme.com/contact") });
     const find = (key: string, value: string) => contact.find((c) => c.key === key && c.value === value);
     expect(find("contact.address", "1 Coyote Canyon Road, Tucson, AZ 85701")?.evidence.anchor).toBe("Visit Acme Tucson Store at 1 Coyote Canyon Road, Tucson, AZ 85701.");
-    expect(find("contact.telephone", "+1 555 010 0100")).toBeDefined();
+    expect(find("contact.phone", "+1 555 010 0100")).toBeDefined();
     expect(find("contact.support_email", "support@acme.com")?.evidence.anchor).toBe("Call +1 555 010 0100 or write to support@acme.com.");
     expect(find("hours.opening_hours", "Monday to Friday 9:00 am - 5:00 pm")?.evidence.anchor).toBe("Our store is open Monday to Friday 9:00 am - 5:00 pm.");
     expect(find("identity.founding_date", "1949")?.evidence.anchor).toBe("Founded in 1949, Acme Inc is registered in Arizona.");

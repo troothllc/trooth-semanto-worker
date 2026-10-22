@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
 // Copyright (c) 2026 Trooth, LLC
 //
-// D1 access for the serving layer: one function per query against
-// migrations/0001_semanto.sql, no SQL anywhere else. Page bodies and the
+// D1 access: one function per query against migrations/0001_semanto.sql and
+// 0002_integration.sql, no SQL anywhere else. The serving layer's ports
+// (D1VersionStore, D1Keys, D1Receipts, D1Settings) and the pipeline's write
+// side (D1PipelineStore, D1CommerceStore, D1MonitorStore) live here. Page bodies and the
 // derived files live in R2 under semanto/<trooth_id>/v<version>/; this file
 // reads D1 metadata and the R2 bodies and assembles the port types. The
 // SemantoFile itself is stored whole in R2 as semanto.json next to the pages,
@@ -13,15 +15,33 @@
 import type { Fact, SemantoFile } from "../core/semanto";
 import { versionId } from "../core/semanto";
 import { estimateTokens } from "../core/tokens";
-import { digest, digestBytes } from "../core/hash";
-import { inclusionProof } from "../core/merkle";
-import { toHex } from "../core/encoding";
+import { digest } from "../core/hash";
 import { semantoId } from "../core/ids";
 import type { Jwks, PrivateJwk, PublicJwk } from "../core/keys";
 import type { DeliverySettings } from "../settings/delivery";
 import { withDefaults } from "../settings/delivery";
-import type { CompanyRecord, KeyPort, LogInclusion, LogPort, PageLiveState, ReceiptInput, ReceiptPort, SettingsPort, StoredPage, VersionStore, VersionSummary } from "../serve/ports";
+import type { CompanyRecord, KeyPort, PageLiveState, ReceiptInput, ReceiptPort, SettingsPort, StoredPage, VersionStore, VersionSummary } from "../serve/ports";
 import type { DetectionResult } from "../serve/detect";
+import { openPrivateJwk, sealPrivateJwk } from "./key-seal";
+import { fromBase64Url } from "../core/encoding";
+import type { SemantoHeader } from "../core/semanto";
+import { DEFAULT_CONFIG, type ChangeRow, type CompanyConfig, type CompanyKey, type PendingSigning, type PipelineStore, type StoredVersion, type VersionFiles } from "../pipeline-store";
+import type { Authorization } from "../identity/roles";
+import type { PreparedSigning } from "../identity/keys";
+import type { RevocationEntry } from "../ledger/revocation";
+import type { GapReport } from "../gap/report";
+import type { BasicCompany } from "../basic/tier";
+import type { FirstPublicationRecord } from "../basic/first-publication";
+import type { CommerceStore } from "../commerce/ports";
+import type { FeedCompany } from "../commerce/feeds";
+import { DEFAULT_OFFER_POLICY, type Offer, type OfferPolicy, type SignedOffer } from "../commerce/offers";
+import type { ProductRecord, SignedProductRecord } from "../commerce/product-record";
+import type { AttestationEntry } from "../commerce/sellers";
+import type { SignedRecall } from "../commerce/recalls";
+import type { StorePort as MonitorStorePort } from "../monitor/ports";
+import type { Alert, AlertRow, MonitorRun } from "../monitor/types";
+import { runToRow } from "../monitor/consistency";
+import { alertFromRow, alertToRow } from "../monitor/alerts";
 
 // ------------------------------------------------------------ row shapes
 
@@ -96,7 +116,6 @@ export const r2Key = {
   sitemap: (trooth_id: string, version: number) => `semanto/${trooth_id}/v${version}/sitemap.md`,
   /** The company's hosted private key, encrypted at rest by the identity module; this layer only reads it through KeyPort. */
   hostedKey: (trooth_id: string, kid: string) => `keys/${trooth_id}/${kid}.jwk`,
-  treeHead: (tree_size: number) => `log/heads/${tree_size}.jws`,
 };
 
 // ------------------------------------------------------------ companies
@@ -105,7 +124,7 @@ export async function selectCompany(db: D1Database, trooth_id: string): Promise<
   const row = await db
     .prepare(
       `SELECT c.trooth_id, c.domain, c.org, c.tier, c.legal_name, c.lei, c.current_version,
-              (SELECT k.custody FROM semanto_keys k WHERE k.trooth_id = c.trooth_id AND k.revoked_at IS NULL ORDER BY k.created_at DESC LIMIT 1) AS custody
+              COALESCE((SELECT k.custody FROM semanto_keys k WHERE k.trooth_id = c.trooth_id AND k.revoked_at IS NULL ORDER BY k.created_at DESC LIMIT 1), c.custody) AS custody
        FROM semanto_companies c WHERE c.trooth_id = ?1`,
     )
     .bind(trooth_id)
@@ -117,7 +136,7 @@ export async function selectCompanyByDomain(db: D1Database, domain: string): Pro
   const row = await db
     .prepare(
       `SELECT c.trooth_id, c.domain, c.org, c.tier, c.legal_name, c.lei, c.current_version,
-              (SELECT k.custody FROM semanto_keys k WHERE k.trooth_id = c.trooth_id AND k.revoked_at IS NULL ORDER BY k.created_at DESC LIMIT 1) AS custody
+              COALESCE((SELECT k.custody FROM semanto_keys k WHERE k.trooth_id = c.trooth_id AND k.revoked_at IS NULL ORDER BY k.created_at DESC LIMIT 1), c.custody) AS custody
        FROM semanto_companies c WHERE c.domain = ?1`,
     )
     .bind(domain)
@@ -301,27 +320,6 @@ export async function selectHostDetection(db: D1Database, trooth_id: string): Pr
   return r ? (JSON.parse(r.details_json) as DetectionResult) : null;
 }
 
-// ------------------------------------------------------------ log
-
-interface LogRow {
-  idx: number;
-  leaf_hash: string;
-}
-interface TreeHeadRow {
-  tree_size: number;
-  root_hash: string;
-  jws: string;
-}
-
-export async function selectLatestTreeHead(db: D1Database): Promise<TreeHeadRow | null> {
-  return db.prepare(`SELECT tree_size, root_hash, jws FROM semanto_tree_heads ORDER BY tree_size DESC LIMIT 1`).first<TreeHeadRow>();
-}
-
-export async function selectLogLeaves(db: D1Database, tree_size: number): Promise<LogRow[]> {
-  const { results } = await db.prepare(`SELECT idx, leaf_hash FROM semanto_log WHERE idx < ?1 ORDER BY idx`).bind(tree_size).all<LogRow>();
-  return results;
-}
-
 // ------------------------------------------------------------ receipts
 
 export async function insertReadReceipt(db: D1Database, id: string, r: ReceiptInput, ip_hash: string | null): Promise<void> {
@@ -425,23 +423,20 @@ export class D1Keys implements KeyPort {
     private db: D1Database,
     private store: R2Bucket,
     private witness: PrivateJwk,
+    /** HOSTED_KEY_SEAL_SECRET; hosted keys are stored sealed (src/db/key-seal.ts) and opened only with it. */
+    private sealSecret?: string,
   ) {}
   getCompanyJwks(trooth_id: string): Promise<Jwks> {
     return selectCompanyKeys(this.db, trooth_id);
   }
   async getCompanySigningKey(trooth_id: string): Promise<PrivateJwk | null> {
-    // The identity module owns key custody and encryption at rest. Until it is
-    // wired, no hosted private key is read and responses are witness-signed.
+    // Sealed at rest with AES-256-GCM (src/db/key-seal.ts). Without the seal
+    // secret nothing opens and responses are witness-signed.
     const kid = await selectHostedKid(this.db, trooth_id);
     if (!kid) return null;
     const b = await r2Bytes(this.store, r2Key.hostedKey(trooth_id, kid));
     if (!b) return null;
-    try {
-      const jwk = JSON.parse(new TextDecoder().decode(b)) as PrivateJwk;
-      return jwk.d ? jwk : null;
-    } catch {
-      return null;
-    }
+    return openPrivateJwk(b, this.sealSecret);
   }
   async getWitnessKey(): Promise<PrivateJwk> {
     return this.witness;
@@ -462,21 +457,6 @@ export class D1Keys implements KeyPort {
   }
 }
 
-export class D1Log implements LogPort {
-  constructor(private db: D1Database, private logUrl: string) {}
-  async getInclusion(index: number): Promise<LogInclusion | null> {
-    // The ledger module computes paths from its tiles. This skeleton reads the
-    // rows and leaves the path to the ledger's own function once wired.
-    const head = await selectLatestTreeHead(this.db);
-    if (!head || index >= head.tree_size) return null;
-    const leaves = await selectLogLeaves(this.db, head.tree_size);
-    const leaf = leaves.find((l) => l.idx === index);
-    if (!leaf) return null;
-    const path = (await inclusionProof(leaves.map((l) => digestBytes(l.leaf_hash)), index)).map((p) => `sha256:${toHex(p)}`);
-    return { log: this.logUrl, index, tree_size: head.tree_size, leaf_hash: leaf.leaf_hash, root_hash: head.root_hash, tree_head_jws: head.jws, inclusion_path: path };
-  }
-}
-
 export class D1Receipts implements ReceiptPort {
   constructor(private db: D1Database) {}
   async record(input: ReceiptInput): Promise<void> {
@@ -494,3 +474,382 @@ export class D1Settings implements SettingsPort {
     return upsertSettings(this.db, trooth_id, settings, new Date().toISOString());
   }
 }
+
+// ------------------------------------------------------------ the pipeline's write side (src/pipeline-store.ts)
+
+interface ConfigRow {
+  config_json: string;
+}
+
+async function r2Put(store: R2Bucket, key: string, bytes: Uint8Array | string, contentType: string): Promise<void> {
+  const body = typeof bytes === "string" ? new TextEncoder().encode(bytes) : bytes;
+  await store.put(key, body as unknown as ArrayBuffer, { httpMetadata: { contentType } });
+}
+
+/** The kid in a compact JWS's protected header. */
+function kidOf(jws: string): string {
+  try {
+    const h = JSON.parse(new TextDecoder().decode(fromBase64Url(jws.split(".")[0] ?? ""))) as { kid?: string };
+    return h.kid ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export class D1PipelineStore implements PipelineStore {
+  constructor(
+    private db: D1Database,
+    private store: R2Bucket,
+    /** HOSTED_KEY_SEAL_SECRET: hosted private keys are written sealed, never in the clear. */
+    private sealSecret?: string,
+  ) {}
+
+  getCompany(trooth_id: string): Promise<CompanyRecord | null> {
+    return selectCompany(this.db, trooth_id);
+  }
+
+  async putCompany(c: CompanyRecord): Promise<void> {
+    const now = new Date().toISOString();
+    await this.db
+      .prepare(
+        `INSERT INTO semanto_companies (trooth_id, domain, org, tier, legal_name, lei, custody, current_version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?8)
+         ON CONFLICT(trooth_id) DO UPDATE SET domain = excluded.domain, org = excluded.org, tier = excluded.tier, legal_name = excluded.legal_name, lei = excluded.lei, custody = excluded.custody, updated_at = excluded.updated_at`,
+      )
+      .bind(c.trooth_id, c.domain, c.org, c.tier, c.legal_name ?? null, c.lei ?? null, c.custody, now)
+      .run();
+  }
+
+  async listCompanies(which: "signed" | "all"): Promise<CompanyRecord[]> {
+    const where = which === "signed" ? "WHERE c.current_version IS NOT NULL" : "";
+    const { results } = await this.db
+      .prepare(
+        `SELECT c.trooth_id, c.domain, c.org, c.tier, c.legal_name, c.lei, c.current_version,
+                COALESCE((SELECT k.custody FROM semanto_keys k WHERE k.trooth_id = c.trooth_id AND k.revoked_at IS NULL ORDER BY k.created_at DESC LIMIT 1), c.custody) AS custody
+         FROM semanto_companies c ${where} ORDER BY c.trooth_id`,
+      )
+      .all<CompanyRow>();
+    return results.map(toCompany);
+  }
+
+  async getConfig(trooth_id: string): Promise<CompanyConfig> {
+    const r = await this.db.prepare(`SELECT config_json FROM semanto_company_config WHERE trooth_id = ?1`).bind(trooth_id).first<ConfigRow>();
+    return r ? { ...structuredClone(DEFAULT_CONFIG), ...(JSON.parse(r.config_json) as Partial<CompanyConfig>) } : structuredClone(DEFAULT_CONFIG);
+  }
+
+  async putConfig(trooth_id: string, config: CompanyConfig): Promise<void> {
+    await this.db
+      .prepare(`INSERT INTO semanto_company_config (trooth_id, config_json, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(trooth_id) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at`)
+      .bind(trooth_id, JSON.stringify(config), new Date().toISOString())
+      .run();
+  }
+
+  private async readStored(trooth_id: string, row: VersionRow): Promise<StoredVersion | null> {
+    const b = await r2Bytes(this.store, r2Key.file(trooth_id, row.version));
+    if (!b) return null;
+    const file = JSON.parse(new TextDecoder().decode(b)) as SemantoFile;
+    const { results } = await this.db.prepare(`SELECT page_id, original_tokens FROM semanto_pages WHERE trooth_id = ?1 AND version = ?2`).bind(trooth_id, row.version).all<{ page_id: string; original_tokens: number }>();
+    const original_tokens: Record<string, number> = {};
+    for (const r of results) original_tokens[r.page_id] = r.original_tokens;
+    const bodies: Record<string, Uint8Array> = {};
+    for (const p of file.header.pages_manifest) {
+      const body = await r2Bytes(this.store, r2Key.page(trooth_id, row.version, p.id));
+      if (body) bodies[p.id] = body;
+    }
+    return { file, bodies, original_tokens, signed_at: row.signed_at };
+  }
+
+  async latestVersion(trooth_id: string): Promise<StoredVersion | null> {
+    const row = await this.db
+      .prepare(`SELECT trooth_id, version, state, built_at, signed_at, withdrawn_at, root_hash, page_count, fact_count, ledger_index FROM semanto_versions WHERE trooth_id = ?1 ORDER BY version DESC LIMIT 1`)
+      .bind(trooth_id)
+      .first<VersionRow>();
+    return row ? this.readStored(trooth_id, row) : null;
+  }
+
+  async getVersion(trooth_id: string, version: number): Promise<StoredVersion | null> {
+    const row = await selectVersion(this.db, trooth_id, version);
+    return row ? this.readStored(trooth_id, row) : null;
+  }
+
+  async saveBuilt(trooth_id: string, v: StoredVersion, files: VersionFiles): Promise<void> {
+    const f = v.file;
+    const h = f.header;
+    const n = h.version;
+    await r2Put(this.store, r2Key.file(trooth_id, n), JSON.stringify(f), "application/json");
+    for (const [id, body] of Object.entries(v.bodies)) await r2Put(this.store, r2Key.page(trooth_id, n, id), body, "text/markdown; charset=utf-8");
+    await r2Put(this.store, r2Key.llms(trooth_id, n), files.llms.llmsTxt, "text/markdown; charset=utf-8");
+    await r2Put(this.store, r2Key.llmsFull(trooth_id, n), files.llms.llmsFull, "text/markdown; charset=utf-8");
+    await r2Put(this.store, r2Key.sitemap(trooth_id, n), files.llms.sitemapMd, "text/markdown; charset=utf-8");
+    await r2Put(this.store, r2Key.jsonld(trooth_id, n), files.jsonld, "application/ld+json");
+    const statements: D1PreparedStatement[] = [
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO semanto_versions (trooth_id, version, supersedes, state, built_at, not_before, not_after, root_hash, pages_root, facts_root, tiers_json, page_count, fact_count)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`,
+        )
+        .bind(trooth_id, n, h.supersedes, h.state, h.built_at, h.not_before, h.not_after, f.root_hash, h.pages_root, h.facts_root, JSON.stringify(h.tiers), h.pages_manifest.length, f.facts.length),
+    ];
+    h.pages_manifest.forEach((p, i) => {
+      statements.push(
+        this.db
+          .prepare(
+            `INSERT OR REPLACE INTO semanto_pages (trooth_id, version, page_id, url, title, hash, source_hash, bytes, tokens, original_tokens, witnessed_at, lang, part_n, part_of, status, noindex, nosnippet, canonical, robots_blocked, manifest_index)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)`,
+          )
+          .bind(trooth_id, n, p.id, p.url, p.title, p.hash, p.source_hash, p.bytes, p.tokens, v.original_tokens[p.id] ?? p.original_tokens ?? 0, p.witnessed_at, p.lang ?? null, p.part?.n ?? null, p.part?.of ?? null, p.status, p.index.noindex ? 1 : 0, p.index.nosnippet ? 1 : 0, p.index.canonical, p.index.robots_blocked ? 1 : 0, i),
+      );
+    });
+    for (const fact of f.facts) {
+      statements.push(
+        this.db
+          .prepare(
+            `INSERT OR REPLACE INTO semanto_facts (trooth_id, version, fact_id, key, statement, value_json, provenance, evidence_url, evidence_anchor, evidence_source, witnessed_at, schema_type, schema_property)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`,
+          )
+          .bind(trooth_id, n, fact.id, fact.key, fact.statement, fact.value === undefined ? null : JSON.stringify(fact.value), fact.provenance, fact.evidence.url, fact.evidence.anchor ?? null, fact.evidence.source ?? null, fact.evidence.witnessed_at, fact.schema?.type ?? null, fact.schema?.property ?? null),
+      );
+    }
+    await this.db.batch(statements);
+  }
+
+  async markSigned(trooth_id: string, file: SemantoFile, signed_at: string): Promise<void> {
+    const n = file.header.version;
+    await r2Put(this.store, r2Key.file(trooth_id, n), JSON.stringify(file), "application/json");
+    await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE semanto_versions SET state = 'signed', signed_at = ?3, root_hash = ?4, signature_jws = ?5, signature_kid = ?6, witness_jws = ?7, witness_kid = ?8, witnessed_at = ?9, ledger_index = ?10, ledger_tree_size = ?11, ledger_tree_head = ?12
+           WHERE trooth_id = ?1 AND version = ?2`,
+        )
+        .bind(trooth_id, n, signed_at, file.root_hash, file.signature?.jws ?? null, file.signature?.kid ?? null, file.witness?.jws ?? null, file.witness?.kid ?? null, file.witness?.at ?? null, file.ledger?.index ?? null, file.ledger?.tree_size ?? null, file.ledger?.tree_head ?? null),
+      this.db.prepare(`UPDATE semanto_companies SET current_version = ?2, updated_at = ?3 WHERE trooth_id = ?1`).bind(trooth_id, n, signed_at),
+    ]);
+  }
+
+  async changeState(trooth_id: string): Promise<Record<string, ChangeRow>> {
+    const { results } = await this.db.prepare(`SELECT url, etag, last_modified, raw_hash, lastmod, checked_at FROM semanto_change_state WHERE trooth_id = ?1`).bind(trooth_id).all<ChangeRow & { url: string }>();
+    const out: Record<string, ChangeRow> = {};
+    for (const r of results) out[r.url] = { etag: r.etag, last_modified: r.last_modified, raw_hash: r.raw_hash, lastmod: r.lastmod ?? null, checked_at: r.checked_at };
+    return out;
+  }
+
+  async putChangeState(trooth_id: string, url: string, row: ChangeRow): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO semanto_change_state (trooth_id, url, etag, last_modified, raw_hash, lastmod, checked_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(trooth_id, url) DO UPDATE SET etag = excluded.etag, last_modified = excluded.last_modified, raw_hash = excluded.raw_hash, lastmod = excluded.lastmod, checked_at = excluded.checked_at`,
+      )
+      .bind(trooth_id, url, row.etag, row.last_modified, row.raw_hash, row.lastmod ?? null, row.checked_at)
+      .run();
+  }
+
+  async authorizations(trooth_id: string, root_hash: string): Promise<Authorization[]> {
+    const { results } = await this.db.prepare(`SELECT record_json, at, root_hash FROM semanto_authorizations WHERE trooth_id = ?1 AND root_hash = ?2 ORDER BY at`).bind(trooth_id, root_hash).all<{ record_json: string; at: string; root_hash: string }>();
+    return results.map((r) => ({ record: JSON.parse(r.record_json) as Authorization["record"], at: r.at, root_hash: r.root_hash }));
+  }
+
+  async addAuthorization(trooth_id: string, a: Authorization): Promise<void> {
+    await this.db
+      .prepare(`INSERT OR IGNORE INTO semanto_authorizations (trooth_id, root_hash, subject, record_json, at) VALUES (?1, ?2, ?3, ?4, ?5)`)
+      .bind(trooth_id, a.root_hash, a.record.subject, JSON.stringify(a.record), a.at)
+      .run();
+  }
+
+  async clearAuthorizations(trooth_id: string, root_hash: string): Promise<void> {
+    await this.db.prepare(`DELETE FROM semanto_authorizations WHERE trooth_id = ?1 AND root_hash = ?2`).bind(trooth_id, root_hash).run();
+  }
+
+  async pending(trooth_id: string, version: number): Promise<PendingSigning | null> {
+    const r = await this.db.prepare(`SELECT kid, header_json, prepared_json, created_at FROM semanto_pending_signatures WHERE trooth_id = ?1 AND version = ?2`).bind(trooth_id, version).first<{ kid: string; header_json: string; prepared_json: string; created_at: string }>();
+    return r ? { trooth_id, version, kid: r.kid, header: JSON.parse(r.header_json) as SemantoHeader, prepared: JSON.parse(r.prepared_json) as PreparedSigning, created_at: r.created_at } : null;
+  }
+
+  async putPending(p: PendingSigning): Promise<void> {
+    await this.db
+      .prepare(`INSERT OR REPLACE INTO semanto_pending_signatures (trooth_id, version, kid, header_json, prepared_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)`)
+      .bind(p.trooth_id, p.version, p.kid, JSON.stringify(p.header), JSON.stringify(p.prepared), p.created_at)
+      .run();
+  }
+
+  async clearPending(trooth_id: string, version: number): Promise<void> {
+    await this.db.prepare(`DELETE FROM semanto_pending_signatures WHERE trooth_id = ?1 AND version = ?2`).bind(trooth_id, version).run();
+  }
+
+  async keys(trooth_id: string): Promise<CompanyKey[]> {
+    const { results } = await this.db.prepare(`SELECT kid, public_jwk, custody, nbf, exp, revoked_at, created_at FROM semanto_keys WHERE trooth_id = ?1 ORDER BY created_at`).bind(trooth_id).all<KeyRow & { created_at: string }>();
+    return results.map((r) => {
+      const jwk = JSON.parse(r.public_jwk) as PublicJwk;
+      return { public_jwk: { ...jwk, ...(r.nbf ? { nbf: r.nbf } : {}), ...(r.exp ? { exp: r.exp } : {}), ...(r.revoked_at ? { revoked_at: r.revoked_at } : {}) }, custody: r.custody, created_at: r.created_at };
+    });
+  }
+
+  async putKey(trooth_id: string, key: CompanyKey, privateJwk: PrivateJwk | null): Promise<void> {
+    if (privateJwk) {
+      if (!this.sealSecret) throw new Error("HOSTED_KEY_SEAL_SECRET is not set; a hosted key is never stored in the clear.");
+      await r2Put(this.store, r2Key.hostedKey(trooth_id, key.public_jwk.kid), await sealPrivateJwk(privateJwk, this.sealSecret), "application/json");
+    }
+    const { nbf, exp, revoked_at, ...pub } = key.public_jwk;
+    await this.db
+      .prepare(
+        `INSERT INTO semanto_keys (kid, trooth_id, public_jwk, custody, nbf, exp, revoked_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(kid) DO UPDATE SET public_jwk = excluded.public_jwk, nbf = excluded.nbf, exp = excluded.exp, revoked_at = excluded.revoked_at`,
+      )
+      .bind(key.public_jwk.kid, trooth_id, JSON.stringify(pub), key.custody, nbf ?? null, exp ?? null, revoked_at ?? null, key.created_at)
+      .run();
+  }
+
+  async connectorKeys(trooth_id: string): Promise<PublicJwk[]> {
+    const { results } = await this.db.prepare(`SELECT public_jwk FROM semanto_connector_keys WHERE trooth_id = ?1 AND revoked_at IS NULL`).bind(trooth_id).all<{ public_jwk: string }>();
+    return results.map((r) => JSON.parse(r.public_jwk) as PublicJwk);
+  }
+
+  async putConnectorKey(trooth_id: string, jwk: PublicJwk, source: string, created_at: string): Promise<void> {
+    await this.db
+      .prepare(`INSERT OR REPLACE INTO semanto_connector_keys (kid, trooth_id, public_jwk, source, created_at, revoked_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL)`)
+      .bind(jwk.kid, trooth_id, JSON.stringify(jwk), source, created_at)
+      .run();
+  }
+
+  async revocations(trooth_id: string | null): Promise<RevocationEntry[]> {
+    const q = trooth_id === null ? this.db.prepare(`SELECT kind, ref, reason, revoked_at FROM semanto_revocations ORDER BY revoked_at`) : this.db.prepare(`SELECT kind, ref, reason, revoked_at FROM semanto_revocations WHERE trooth_id = ?1 ORDER BY revoked_at`).bind(trooth_id);
+    const { results } = await q.all<RevocationEntry>();
+    return results;
+  }
+
+  async putRevocationList(trooth_id: string | null, jws: string, issued_at: string): Promise<void> {
+    await this.db.prepare(`INSERT INTO semanto_revocation_lists (trooth_id, jws, issued_at) VALUES (?1, ?2, ?3)`).bind(trooth_id, jws, issued_at).run();
+  }
+
+  async saveGapReport(report: GapReport): Promise<void> {
+    await this.db
+      .prepare(`INSERT OR REPLACE INTO semanto_gap_reports (id, trooth_id, kind, ran_at, report_json) VALUES (?1, ?2, ?3, ?4, ?5)`)
+      .bind(report.id, report.trooth_id, report.kind, report.ran_at, JSON.stringify(report))
+      .run();
+  }
+
+  async getBasic(trooth_id: string): Promise<BasicCompany | null> {
+    const r = await this.db.prepare(`SELECT state_json FROM semanto_basic WHERE trooth_id = ?1`).bind(trooth_id).first<{ state_json: string }>();
+    return r ? (JSON.parse(r.state_json) as BasicCompany) : null;
+  }
+
+  async putBasic(c: BasicCompany): Promise<void> {
+    await this.db
+      .prepare(`INSERT INTO semanto_basic (trooth_id, state_json, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(trooth_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at`)
+      .bind(c.trooth_id, JSON.stringify(c), new Date().toISOString())
+      .run();
+  }
+
+  async putFirstPublication(r: FirstPublicationRecord): Promise<void> {
+    await this.db
+      .prepare(`INSERT OR REPLACE INTO semanto_first_publications (trooth_id, record_id, url, content_hash, witnessed_at, jws, log_index) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`)
+      .bind(r.record.trooth_id, r.record.id, r.record.url, r.record.content_hash, r.record.witnessed_at, r.jws, r.log?.index ?? null)
+      .run();
+  }
+
+  async putBlob(key: string, bytes: Uint8Array, contentType: string): Promise<void> {
+    await r2Put(this.store, key, bytes, contentType);
+  }
+}
+
+// ------------------------------------------------------------ commerce (src/commerce/ports.ts) over semanto_products, semanto_offers, semanto_sellers, semanto_recalls
+
+export class D1CommerceStore implements CommerceStore {
+  constructor(
+    private db: D1Database,
+    private policy: OfferPolicy = DEFAULT_OFFER_POLICY,
+  ) {}
+
+  /** Answered from the company rows by withCompanies (src/pipeline.ts). */
+  async company(_trooth_id: string): Promise<FeedCompany | null> {
+    return null;
+  }
+  async offerPolicy(_trooth_id: string): Promise<OfferPolicy> {
+    return this.policy;
+  }
+  async records(trooth_id: string): Promise<SignedProductRecord[]> {
+    const { results } = await this.db.prepare(`SELECT record_json, jws FROM semanto_products WHERE trooth_id = ?1 AND withdrawn_at IS NULL AND jws IS NOT NULL ORDER BY sku`).bind(trooth_id).all<{ record_json: string; jws: string }>();
+    return results.map((r) => ({ record: JSON.parse(r.record_json) as ProductRecord, jws: r.jws, kid: kidOf(r.jws) }));
+  }
+  async record(trooth_id: string, record_id: string): Promise<SignedProductRecord | null> {
+    const r = await this.db.prepare(`SELECT record_json, jws FROM semanto_products WHERE trooth_id = ?1 AND record_id = ?2 AND jws IS NOT NULL`).bind(trooth_id, record_id).first<{ record_json: string; jws: string }>();
+    return r ? { record: JSON.parse(r.record_json) as ProductRecord, jws: r.jws, kid: kidOf(r.jws) } : null;
+  }
+  async offers(trooth_id: string, sku?: string): Promise<SignedOffer[]> {
+    const q = sku === undefined ? this.db.prepare(`SELECT offer_json, jws FROM semanto_offers WHERE trooth_id = ?1 ORDER BY as_of`).bind(trooth_id) : this.db.prepare(`SELECT offer_json, jws FROM semanto_offers WHERE trooth_id = ?1 AND sku = ?2 ORDER BY as_of`).bind(trooth_id, sku);
+    const { results } = await q.all<{ offer_json: string; jws: string }>();
+    return results.map((r) => ({ offer: JSON.parse(r.offer_json) as Offer, jws: r.jws, kid: kidOf(r.jws) }));
+  }
+  async attestations(brand_trooth_id: string): Promise<AttestationEntry[]> {
+    const { results } = await this.db.prepare(`SELECT attestation_json, withdrawn_at FROM semanto_sellers WHERE trooth_id = ?1`).bind(brand_trooth_id).all<{ attestation_json: string; withdrawn_at: string | null }>();
+    return results.map((r) => ({ attestation: JSON.parse(r.attestation_json) as AttestationEntry["attestation"], ...(r.withdrawn_at ? { withdrawn_at: r.withdrawn_at } : {}) }));
+  }
+  async recalls(trooth_id: string): Promise<SignedRecall[]> {
+    const { results } = await this.db.prepare(`SELECT notice_json, jws FROM semanto_recalls WHERE trooth_id = ?1 ORDER BY issued_at`).bind(trooth_id).all<{ notice_json: string; jws: string }>();
+    return results.map((r) => ({ notice: JSON.parse(r.notice_json) as SignedRecall["notice"], jws: r.jws, kid: kidOf(r.jws) }));
+  }
+  async putRecord(trooth_id: string, s: SignedProductRecord): Promise<void> {
+    const r = s.record;
+    await this.db
+      .prepare(`INSERT OR REPLACE INTO semanto_products (trooth_id, record_id, product_id, variant_id, gtin, sku, record_json, jws, signed_at, not_after, withdrawn_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)`)
+      .bind(trooth_id, r.id, r.product_id, r.variant_id ?? null, r.gtin ?? null, r.sku, JSON.stringify(r), s.jws, new Date().toISOString(), r.not_after ?? null)
+      .run();
+  }
+  async putOffer(trooth_id: string, s: SignedOffer): Promise<void> {
+    const o = s.offer;
+    await this.db
+      .prepare(`INSERT OR REPLACE INTO semanto_offers (trooth_id, offer_id, sku, variant_id, offer_json, jws, as_of, not_after) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`)
+      .bind(trooth_id, o.id, o.sku, o.variant_id ?? null, JSON.stringify(o), s.jws, o.as_of, o.not_after)
+      .run();
+  }
+  async putAttestation(brand_trooth_id: string, entry: AttestationEntry): Promise<void> {
+    await this.db
+      .prepare(`INSERT OR REPLACE INTO semanto_sellers (trooth_id, attestation_id, seller_domain, attestation_json, jws, not_after, withdrawn_at) VALUES (?1, ?2, ?3, ?4, '', ?5, ?6)`)
+      .bind(brand_trooth_id, entry.attestation.id, entry.attestation.seller_domain, JSON.stringify(entry.attestation), entry.attestation.not_after ?? null, entry.withdrawn_at ?? null)
+      .run();
+  }
+  async putRecall(trooth_id: string, s: SignedRecall): Promise<void> {
+    await this.db
+      .prepare(`INSERT OR REPLACE INTO semanto_recalls (trooth_id, notice_id, notice_json, jws, issued_at) VALUES (?1, ?2, ?3, ?4, ?5)`)
+      .bind(trooth_id, s.notice.id, JSON.stringify(s.notice), s.jws, s.notice.issued_at)
+      .run();
+  }
+}
+
+// ------------------------------------------------------------ monitor runs and alerts (src/monitor/ports.ts StorePort)
+
+export class D1MonitorStore implements MonitorStorePort {
+  constructor(private db: D1Database) {}
+  async saveRun(run: MonitorRun): Promise<void> {
+    const r = runToRow(run);
+    await this.db.prepare(`INSERT OR REPLACE INTO semanto_monitor_runs (id, trooth_id, ran_at, surfaces_json, mismatches_json, indexability_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)`).bind(r.id, r.trooth_id, r.ran_at, r.surfaces_json, r.mismatches_json, r.indexability_json).run();
+  }
+  async openAlerts(trooth_id: string): Promise<Alert[]> {
+    const { results } = await this.db.prepare(`SELECT id, trooth_id, kind, message, detail_json, created_at, sent_at, resolved_at FROM semanto_alerts WHERE trooth_id = ?1 AND resolved_at IS NULL`).bind(trooth_id).all<AlertRow>();
+    return results.map(alertFromRow);
+  }
+  async saveAlerts(alerts: Alert[]): Promise<void> {
+    if (!alerts.length) return;
+    await this.db.batch(
+      alerts.map((a) => {
+        const r = alertToRow(a);
+        return this.db.prepare(`INSERT OR IGNORE INTO semanto_alerts (id, trooth_id, kind, message, detail_json, created_at, sent_at, resolved_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`).bind(r.id, r.trooth_id, r.kind, r.message, r.detail_json, r.created_at, r.sent_at, r.resolved_at);
+      }),
+    );
+  }
+  async sentSince(trooth_id: string, sinceIso: string): Promise<number> {
+    const r = await this.db.prepare(`SELECT COUNT(*) AS n FROM semanto_alerts WHERE trooth_id = ?1 AND sent_at IS NOT NULL AND sent_at >= ?2`).bind(trooth_id, sinceIso).first<{ n: number }>();
+    return r?.n ?? 0;
+  }
+  async markSent(ids: string[], atIso: string): Promise<void> {
+    if (!ids.length) return;
+    await this.db.batch(ids.map((id) => this.db.prepare(`UPDATE semanto_alerts SET sent_at = ?2 WHERE id = ?1`).bind(id, atIso)));
+  }
+  async resolveAlerts(ids: string[], atIso: string): Promise<void> {
+    if (!ids.length) return;
+    await this.db.batch(ids.map((id) => this.db.prepare(`UPDATE semanto_alerts SET resolved_at = ?2 WHERE id = ?1 AND resolved_at IS NULL`).bind(id, atIso)));
+  }
+}
+
+// ------------------------------------------------------------ read receipts through src/readers (hashing the address with the daily salt)
+
+export { D1ReceiptStore } from "../readers/ports";

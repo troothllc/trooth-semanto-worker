@@ -1,0 +1,9 @@
+{
+  "_fixture": "A Business Profile listing for the fictional Acme Inc, for test/integration.test.ts. The phone differs from the one the signed site states; nothing here is a measurement.",
+  "name": "locations/fixture-acme",
+  "title": "Acme Inc",
+  "phoneNumbers": { "primaryPhone": "+1 555 010 0199" },
+  "storefrontAddress": { "regionCode": "US", "postalCode": "85701", "administrativeArea": "AZ", "locality": "Tucson", "addressLines": ["1 Coyote Canyon Road"] },
+  "websiteUri": "https://acme.com/",
+  "regularHours": { "periods": [{ "openDay": "MONDAY", "openTime": { "hours": 9 }, "closeDay": "MONDAY", "closeTime": { "hours": 17 } }] }
+}

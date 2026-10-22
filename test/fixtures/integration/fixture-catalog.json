@@ -1,0 +1,25 @@
+{
+  "_fixture": "The catalog document a commerce connector posts (adapters/wordpress-plugin/README.md), for the fictional Acme Inc. Every figure is made up.",
+  "source": "woocommerce",
+  "site": "https://acme.com/",
+  "trooth_id": "acme",
+  "currency": "USD",
+  "generated_at": "2026-10-22T12:00:00Z",
+  "plugin": "trooth-semanto/0.1.0",
+  "products": [
+    {
+      "id": "501",
+      "type": "simple",
+      "name": "Acme Anvil",
+      "url": "https://acme.com/products/anvil",
+      "sku": "ANV-100",
+      "gtin": "00012345678905",
+      "price": "49.00",
+      "regular_price": "49.00",
+      "sale_price": null,
+      "stock_status": "instock",
+      "stock": 12,
+      "modified_at": "2026-10-21T08:00:00Z"
+    }
+  ]
+}

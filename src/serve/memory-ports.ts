@@ -3,16 +3,17 @@
 //
 // In-memory implementation of the serving ports, for tests and local runs.
 // Holds whole SemantoFile objects plus page bytes; no network, no runtime.
+// The log is the real ledger over its in-memory store, so tests exercise the
+// same leaf format and proofs the Worker serves.
 
 import type { Fact, SemantoFile } from "../core/semanto";
 import { versionId } from "../core/semanto";
-import { utf8 } from "../core/encoding";
-import { leafHash, inclusionProof, rootFromLeafHashes } from "../core/merkle";
-import { toHex } from "../core/encoding";
-import { signObject, JWS_TYPES } from "../core/jws";
+import { TransparencyLog } from "../ledger/log";
+import { MemoryLogStore } from "../ledger/ports";
+import { LedgerLogPort } from "./ledger-port";
 import { toPublic, type Jwks, type PrivateJwk, type PublicJwk } from "../core/keys";
 import type { DeliverySettings } from "../settings/delivery";
-import type { CompanyRecord, JobPort, KeyPort, LogInclusion, LogPort, PageLiveState, Ports, ReceiptInput, ReceiptPort, ServeConfig, SettingsPort, StoredPage, VersionStore, VersionSummary } from "./ports";
+import type { CompanyRecord, JobPort, KeyPort, PageLiveState, Ports, ReceiptInput, ReceiptPort, ServeConfig, SettingsPort, StoredPage, VersionStore, VersionSummary } from "./ports";
 
 export interface MemoryVersion {
   file: SemantoFile;
@@ -111,27 +112,15 @@ export class MemoryVersionStore implements VersionStore {
   }
 }
 
-/** A small in-memory log: leaves are the RFC 6962 leaf hashes of root_hash text, tree heads signed by the witness key. */
-export class MemoryLog implements LogPort {
-  leaves: Uint8Array[] = [];
+/** The in-memory public log: src/ledger TransparencyLog over MemoryLogStore, with the ledger's leaf records and tree heads signed by the witness key. */
+export class MemoryLog extends LedgerLogPort {
   constructor(
-    private witness: PrivateJwk,
-    private logUrl: string,
-  ) {}
-
-  async append(root_hash: string): Promise<number> {
-    this.leaves.push(await leafHash(utf8(root_hash)));
-    return this.leaves.length - 1;
-  }
-
-  async getInclusion(index: number): Promise<LogInclusion | null> {
-    if (index < 0 || index >= this.leaves.length) return null;
-    const tree_size = this.leaves.length;
-    const root = `sha256:${toHex(await rootFromLeafHashes(this.leaves))}`;
-    const signed_at = new Date(0).toISOString();
-    const head = await signObject({ tree_size, root_hash: root, signed_at }, this.witness, JWS_TYPES.treeHead, { iat: new Date(0) });
-    const path = (await inclusionProof(this.leaves, index)).map((p) => `sha256:${toHex(p)}`);
-    return { log: this.logUrl, index, tree_size, leaf_hash: `sha256:${toHex(this.leaves[index]!)}`, root_hash: root, tree_head_jws: head.compact, inclusion_path: path };
+    witness: PrivateJwk,
+    logUrl: string,
+    now: () => Date = () => new Date(),
+    readonly store: MemoryLogStore = new MemoryLogStore(),
+  ) {
+    super(new TransparencyLog(store, witness, now), logUrl);
   }
 }
 
@@ -210,7 +199,7 @@ export function memoryPorts(store: MemoryVersionStore, witness: PrivateJwk, opts
   const config = opts.config ?? TEST_CONFIG;
   return {
     versions: store,
-    log: new MemoryLog(witness, config.ledger_url),
+    log: new MemoryLog(witness, config.ledger_url, opts.now ?? (() => new Date())),
     keys: new MemoryKeys(store, witness),
     receipts: new MemoryReceipts(),
     settings: new MemorySettings(),

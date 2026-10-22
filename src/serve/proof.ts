@@ -11,11 +11,12 @@
 // the company.
 
 import { digest, digestBytes, isDigest } from "../core/hash";
-import { toHex, utf8 } from "../core/encoding";
+import { toHex } from "../core/encoding";
 import { leafHash, inclusionProof, verifyInclusion } from "../core/merkle";
 import { verifyJws, JWS_TYPES } from "../core/jws";
 import { rootHash as computeRootHash, versionId, type SemantoFile, type SemantoHeader } from "../core/semanto";
 import type { PublicJwk } from "../core/keys";
+import { hashLeaf, type LogLeaf } from "../ledger/ports";
 import type { LogInclusion, VersionStore } from "./ports";
 import { stripBehindNotice } from "./errors";
 
@@ -38,6 +39,8 @@ export interface PageProof {
     log: string;
     index: number;
     tree_size: number;
+    /** The log's leaf record for this version: { kind: "semanto_version", trooth_id, ref: version_id, hash: root_hash, at }. */
+    leaf: LogLeaf;
     leaf_hash: string;
     root_hash: string;
     tree_head_jws: string;
@@ -74,6 +77,7 @@ export async function buildPageProof(file: SemantoFile, page_id: string, log: Lo
           log: log.log,
           index: log.index,
           tree_size: log.tree_size,
+          leaf: log.leaf,
           leaf_hash: log.leaf_hash,
           root_hash: log.root_hash,
           tree_head_jws: log.tree_head_jws,
@@ -93,6 +97,7 @@ export interface ProofVerification {
     header: CheckResult;
     signature: CheckResult;
     witness: CheckResult;
+    ledger_leaf: CheckResult;
     ledger_inclusion: CheckResult;
     ledger_tree_head: CheckResult;
   };
@@ -118,6 +123,7 @@ export async function verifyProof(proof: PageProof, pageBytes: Uint8Array, opts:
     header: "not_checked",
     signature: "not_checked",
     witness: "not_checked",
+    ledger_leaf: "not_checked",
     ledger_inclusion: "not_checked",
     ledger_tree_head: "not_checked",
   };
@@ -174,10 +180,20 @@ export async function verifyProof(proof: PageProof, pageBytes: Uint8Array, opts:
   if (proof.ledger) {
     const l = proof.ledger;
     try {
-      // The log's leaf for a version is the RFC 6962 leaf hash of the root_hash text.
-      const expectLeaf = hex(await leafHash(utf8(proof.root_hash)));
+      // The ledger's leaf: the canonical leaf record hashes to leaf_hash, and it is this version's semanto_version leaf.
+      const leaf = l.leaf;
+      const recomputed = leaf ? hex(await hashLeaf(leaf)) : null;
+      if (!leaf) fail("ledger_leaf", "the proof carries no log leaf record");
+      else if (recomputed !== l.leaf_hash) fail("ledger_leaf", "the log leaf record does not hash to leaf_hash");
+      else if (leaf.kind !== "semanto_version") fail("ledger_leaf", "the log leaf is not a semanto_version leaf");
+      else if (leaf.hash !== proof.root_hash) fail("ledger_leaf", "the log leaf names a different root_hash");
+      else checks.ledger_leaf = "ok";
+    } catch {
+      fail("ledger_leaf", "the log leaf record is malformed");
+    }
+    try {
       const path = l.inclusion_path.map(digestBytes);
-      const good = l.leaf_hash === expectLeaf && (await verifyInclusion(digestBytes(l.leaf_hash), l.index, l.tree_size, path, digestBytes(l.root_hash)));
+      const good = await verifyInclusion(digestBytes(l.leaf_hash), l.index, l.tree_size, path, digestBytes(l.root_hash));
       if (good) checks.ledger_inclusion = "ok";
       else fail("ledger_inclusion", "the log inclusion path does not reach the tree head");
     } catch {

@@ -139,3 +139,24 @@ export function globalFetchPort(): FetchPort {
     send: async (url, init) => toResult(await fetch(url, { method: init.method, headers: init.headers, body: init.body })),
   };
 }
+
+/** The Resend email port for the Worker: POST https://api.resend.com/emails with a bearer key (Resend API, 2026). */
+export function resendEmailPort(apiKey: string, f: typeof fetch = fetch): EmailPort {
+  return {
+    send: async (message) => {
+      try {
+        const res = await f("https://api.resend.com/emails", {
+          method: "POST",
+          headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+          body: JSON.stringify(message),
+        });
+        const text = await res.text();
+        if (!res.ok) return { ok: false, error: `Resend answered ${res.status}` };
+        const id = (JSON.parse(text || "{}") as { id?: string }).id ?? "";
+        return { ok: true, id };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : "the email could not be sent" };
+      }
+    },
+  };
+}

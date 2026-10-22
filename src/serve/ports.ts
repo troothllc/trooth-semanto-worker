@@ -12,6 +12,8 @@
 import type { SemantoFile, PageEntry, Fact } from "../core/semanto";
 import type { Jwks, PrivateJwk, PublicJwk } from "../core/keys";
 import type { DeliverySettings } from "../settings/delivery";
+import type { LogLeaf, StoredTreeHead } from "../ledger/ports";
+import type { ProblemCode } from "./errors";
 
 /** One company row, the subset the server reads. */
 export interface CompanyRecord {
@@ -71,12 +73,14 @@ export interface VersionStore {
   getLlms(trooth_id: string, kind: "llms" | "llms-full" | "sitemap"): Promise<Uint8Array | null>;
 }
 
-/** What the public log knows about one leaf. */
+/** What the public log knows about one leaf: the leaf record itself (src/ledger/ports.ts LogLeaf), its hash and its path. */
 export interface LogInclusion {
   log: string;
   index: number;
   tree_size: number;
-  /** The leaf hash as the log computed it (RFC 6962 leaf hash, printed as a digest). */
+  /** The leaf record, so a reader recomputes leaf_hash instead of trusting it. */
+  leaf: LogLeaf;
+  /** The RFC 6962 leaf hash of the canonical leaf record, printed as a digest. */
   leaf_hash: string;
   /** Root of the tree head the path proves against. */
   root_hash: string;
@@ -85,9 +89,36 @@ export interface LogInclusion {
   inclusion_path: string[];
 }
 
+/** GET /public/semanto/log/proof, docs/spec/log.md. */
+export interface LogInclusionProof {
+  index: number;
+  tree_size: number;
+  leaf_hash: string;
+  root_hash: string;
+  path: string[];
+}
+
+/** GET /public/semanto/log/consistency, docs/spec/log.md. */
+export interface LogConsistencyProof {
+  from: number;
+  to: number;
+  old_root: string;
+  new_root: string;
+  path: string[];
+}
+
+/** The public log as the server reads it. src/serve/ledger-port.ts implements it over src/ledger TransparencyLog. */
 export interface LogPort {
   /** Inclusion of leaf `index` against the latest tree head, or null when not yet logged. */
   getInclusion(index: number): Promise<LogInclusion | null>;
+  latestTreeHead(): Promise<StoredTreeHead | null>;
+  getTreeHead(treeSize: number): Promise<StoredTreeHead | null>;
+  /** Inclusion of leaf `index` in the tree of `treeSize` leaves, or null when out of range. */
+  inclusion(index: number, treeSize: number): Promise<LogInclusionProof | null>;
+  consistency(from: number, to: number): Promise<LogConsistencyProof | null>;
+  /** The checkpoint text (signed note) for a size, the latest when omitted. Null when no tree head exists. */
+  checkpoint(treeSize?: number): Promise<string | null>;
+  leaf(index: number): Promise<{ index: number; leaf: LogLeaf; leaf_hash: string } | null>;
 }
 
 export interface KeyPort {
@@ -110,7 +141,11 @@ export interface ReceiptInput {
   /** The Signature-Agent header value, a key directory url, when the request carried one. */
   agent_key_url: string | null;
   proof: "web_bot_auth" | "none";
+  /** The proven key id, when proof is web_bot_auth. */
+  keyid?: string | null;
   read_at: string;
+  /** The remote address, handed only to the receipt store, which hashes it with a daily salt and never keeps it (src/readers/receipts.ts). */
+  address?: string | null;
 }
 
 export interface ReceiptPort {
@@ -149,4 +184,43 @@ export interface Ports {
   config: ServeConfig;
   /** The clock, injectable so tests get stable signatures. */
   now(): Date;
+}
+
+// ---------------------------------------------------------------- the workspace (/os) side
+
+export type WorkspaceRole = "owner" | "admin" | "member" | "viewer";
+
+/** Who is calling an /os route, as the workspace session check answered (worker-f, through the TROOTH_OS service binding). */
+export interface WorkspaceAuth {
+  trooth_id: string;
+  role: WorkspaceRole;
+  user_id: string;
+  name: string;
+}
+
+/** The workspace actions, each served at POST /os/semanto/{trooth_id}/{action}. */
+export const WORKSPACE_ACTIONS = ["build", "sign", "gap-report", "monitor/run", "keys/rotate", "lei", "basic/claim", "basic/prove", "first-publication", "connectors"] as const;
+export type WorkspaceAction = (typeof WORKSPACE_ACTIONS)[number];
+
+/** What a workspace handler answers; routes.ts signs it and turns a problem into RFC 9457. */
+export interface WorkspaceResult {
+  status: number;
+  body?: unknown;
+  problem?: { code: ProblemCode; detail: string };
+  /** Extra headers (Basic's Trooth-Record-State, say), set before the response is signed. */
+  headers?: Record<string, string>;
+}
+
+export interface SignedRequest {
+  method: string;
+  url: string;
+  headers: Headers;
+  body: Uint8Array;
+}
+
+/** The pipeline behind the /os routes (src/pipeline.ts). */
+export interface WorkspaceHandlers {
+  handle(action: WorkspaceAction, ws: WorkspaceAuth, trooth_id: string, input: unknown): Promise<WorkspaceResult>;
+  /** POST /os/semanto/{trooth_id}/commerce/catalog: authenticated by an RFC 9421 connector signature, not a workspace session. */
+  catalog(trooth_id: string, request: SignedRequest): Promise<WorkspaceResult>;
 }

@@ -1,0 +1,5 @@
+{
+  "_fixture": "Answers a provider might give to the local question set for the fictional Acme Inc, for test/integration.test.ts. They test the comparison only; no provider was asked.",
+  "What is the phone number for Acme Inc?": { "answer_text": "You can call Acme Inc at +1 555 010 0199.", "citations": [{ "url": "https://example-directory.test/acme" }] },
+  "What is the address of Acme Inc?": { "answer_text": "Acme Inc is at 1 Coyote Canyon Road, Tucson, AZ 85701.", "citations": [{ "url": "https://acme.com/contact" }] }
+}

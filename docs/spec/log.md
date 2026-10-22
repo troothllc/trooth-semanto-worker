@@ -54,13 +54,14 @@ Inclusion proofs are RFC 6962 section 2.1.1 (`PATH(m, D[n])`) and consistency pr
 
 | Endpoint | Returns |
 | --- | --- |
-| `GET /public/semanto/log/tree-head` | the latest `{ tree_size, root_hash, signed_at, jws }` |
+| `GET /public/semanto/log/tree-head` | the latest `{ tree_size, root_hash, signed_at, jws }`; the checkpoint text when `Accept` names `text/plain` |
 | `GET /public/semanto/log/tree-head?size=<n>` | the tree head at size n |
 | `GET /public/semanto/log/checkpoint` and `?size=<n>` | the checkpoint text |
 | `GET /public/semanto/log/proof?index=<i>&size=<n>` | `{ index, tree_size, leaf_hash, root_hash, path }` |
 | `GET /public/semanto/log/consistency?from=<m>&to=<n>` | `{ from, to, old_root, new_root, path }` |
+| `GET /public/semanto/log/leaves/<i>` | `{ index, leaf, leaf_hash }`: the leaf record and its RFC 6962 leaf hash |
 
-The routes are listed in `docs/ARCHITECTURE.md` and are served by `src/index.ts` over the ledger module (to confirm at review: the handlers were not visible in `src/serve/routes.ts` at the time of writing).
+`size` defaults to the latest tree head (`to` likewise). An index or size outside the log answers a `log_entry_not_found` problem (404); a value that is not a whole number answers `invalid_request` (400). Every answer is signed by Trooth's witness key with the response signature of `docs/spec/response-signatures.md`. The routes are served by `src/serve/routes.ts` over `src/serve/ledger-port.ts` and the ledger (`TransparencyLog` over `D1LogStore` in the Worker), and are listed in `docs/ARCHITECTURE.md`.
 
 ## The per-page proof document
 
@@ -93,7 +94,7 @@ The routes are listed in `docs/ARCHITECTURE.md` and are served by `src/index.ts`
 }
 ```
 
-The version header is not in the proof; a reader fetches it beside the proof at `/public/semanto/{trooth_id}/versions/{version}` (or already holds the file). `ledger.leaf` is the leaf record so a reader can recompute `leaf_hash` instead of trusting it (to confirm at review: `src/serve/proof.ts` does not yet carry `leaf` and computes the expected leaf as the leaf hash of the `root_hash` text, which differs from the ledger's leaf record; the vectors and the verifier kits follow the ledger).
+The version header is not in the proof; a reader fetches it beside the proof at `/public/semanto/{trooth_id}/versions/{version}` (or already holds the file). `ledger.leaf` is the leaf record so a reader can recompute `leaf_hash` instead of trusting it. `src/serve/proof.ts` builds and checks it the ledger's way, as the vectors and the three verifier kits do.
 
 A verifier works outward, and reports the first step that fails:
 

@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
 // Copyright (c) 2026 Trooth, LLC
+//
+// The Worker's bindings, variables and secrets (Cloudflare Workers
+// configuration, wrangler.toml). Secrets are set with wrangler secret put and
+// never committed.
 
 export interface Env {
   /** D1: semanto metadata (companies, versions, pages, facts, settings, receipts, log checkpoints). */
@@ -26,6 +30,12 @@ export interface Env {
   /** Resend, for plain-language alerts. */
   RESEND_API_KEY?: string;
   ALERT_FROM?: string;
+  /** Secret (16 characters or more): the daily salt for hashing a reader's address in read receipts (src/readers/receipts.ts). Without it, receipts keep no address hash. */
+  RECEIPT_IP_SALT_SECRET?: string;
+  /** Secret (32 characters or more): seals hosted company private keys at rest (src/db/key-seal.ts). Without it, no hosted key is stored. */
+  HOSTED_KEY_SEAL_SECRET?: string;
+  /** Service binding to trooth-os-worker-f, whose session check accepts workspace bearer tokens for /os routes. Without it, every /os call is refused. */
+  TROOTH_OS?: Fetcher;
   ENVIRONMENT: "development" | "production";
 }
 

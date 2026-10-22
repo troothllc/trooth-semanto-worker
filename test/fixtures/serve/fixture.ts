@@ -16,7 +16,7 @@ import { digest } from "@/core/hash";
 import { estimateTokens } from "@/core/tokens";
 import { generateKeyPair, type PrivateJwk, type PublicJwk } from "@/core/keys";
 import { signObject, JWS_TYPES } from "@/core/jws";
-import { factId, factsRoot, pageId, pagesRoot, rootHash, tierHash, SCHEMA_URL, SEMANTO_CONTRACT, type Controls, type Fact, type PageEntry, type SemantoFile, type SemantoHeader } from "@/core/semanto";
+import { factId, factsRoot, pageId, pagesRoot, rootHash, tierHash, versionId, SCHEMA_URL, SEMANTO_CONTRACT, type Controls, type Fact, type PageEntry, type SemantoFile, type SemantoHeader } from "@/core/semanto";
 import { MemoryVersionStore, memoryPorts, type MemoryCompany, type MemoryVersion } from "@/serve/memory-ports";
 import type { Ports } from "@/serve/ports";
 
@@ -190,8 +190,9 @@ export async function buildEstate(now: () => Date = () => FIXED_NOW): Promise<Es
 
   // Version 2: three pages, signed, logged.
   const pre = await buildVersion({ pages: ACME_PAGES, version: 2, supersedes: 1, state: "signed", companyKey: k.privateJwk, witness: w.privateJwk, built_at: "2026-10-01T09:00:00.000Z", trooth_id: "acme-inc", domain: "acme.com", org: "Acme Inc", kid_url });
-  await ports.log.append(v1.file.root_hash);
-  const index = await ports.log.append(pre.file.root_hash);
+  // The ledger's leaf records (src/ledger/ports.ts): one semanto_version leaf per signed version.
+  await ports.log.append({ kind: "semanto_version", trooth_id: "acme-inc", ref: versionId(v1.file.root_hash), hash: v1.file.root_hash, at: "2026-09-01T10:00:00.000Z" });
+  const { index } = await ports.log.append({ kind: "semanto_version", trooth_id: "acme-inc", ref: versionId(pre.file.root_hash), hash: pre.file.root_hash, at: "2026-10-01T10:00:00.000Z" });
   const incl = await ports.log.getInclusion(index);
   pre.file.ledger = { log: incl!.log, index, tree_size: incl!.tree_size, tree_head: incl!.tree_head_jws };
 

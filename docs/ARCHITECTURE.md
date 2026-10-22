@@ -24,7 +24,8 @@ Semanto does not make AI believe a company; it makes what the company said impos
 | `src/basic` | Semanto Basic (free tier, domain proof only), first-publication proof, signed Content Signals | core, compiler |
 | `src/c2pa` | Mapping a Semanto manifest to C2PA assertions for images and PDFs | core |
 | `src/settings` | The delivery settings model and resolver | core |
-| `src/db` | D1 access, one function per query, no SQL in handlers | |
+| `src/db` | D1 access, one function per query, no SQL in handlers; hosted keys sealed at rest | |
+| `src/pipeline.ts` | The modules wired into one flow: compile, sign, witness, log, the workspace actions, the commerce catalog, the crons, readers and authorization | every module above |
 | `adapters/` | Host adapters: Cloudflare Worker, Vercel, Netlify, Fastly, Akamai, Gcore, nginx, Apache, WordPress, head tag, commerce platforms | the public API only |
 | `verifier/` | The open verifier kit: JavaScript, Python, Go, a CLI and shared test vectors | the published formats only |
 | `web/` | React components for the trooth-web dashboard (dropped into trooth-web at integration) | the public API only |
@@ -48,25 +49,42 @@ Semanto does not make AI believe a company; it makes what the company said impos
 
 ## Data model (D1)
 
-See `migrations/0001_semanto.sql`. Page bodies, parts, feeds and log tiles live in R2 under `semanto/<trooth_id>/v<version>/`. D1 holds metadata only.
+See `migrations/0001_semanto.sql` and `migrations/0002_integration.sql`. Page bodies, parts, feeds and log tiles live in R2 under `semanto/<trooth_id>/v<version>/`. D1 holds metadata only.
 
-## Public routes (served by `src/index.ts`)
+## Public routes (served by `src/serve/routes.ts`, wired in `src/index.ts`)
+
+Every response, problems included, is signed (RFC 9421, tag `trooth-semanto`) with Content-Digest, ETag and `Vary: Accept`. Format is chosen by Accept or path suffix only.
 
 ```
-GET  /public/semanto/{trooth_id}                       the semanto object (JSON) or the file by Accept
+GET  /public/semanto/log/tree-head[?size=]              latest (or sized) signed tree head as JSON; the checkpoint text when Accept is text/plain
+GET  /public/semanto/log/checkpoint[?size=]             the checkpoint text (signed note)
+GET  /public/semanto/log/proof?index=&size=             { index, tree_size, leaf_hash, root_hash, path }
+GET  /public/semanto/log/consistency?from=&to=          { from, to, old_root, new_root, path }
+GET  /public/semanto/log/leaves/{index}                 { index, leaf, leaf_hash }
+GET  /public/semanto/verify?url=&hash=                  one-call verification
+GET  /public/semanto/{trooth_id}                        the semanto object (JSON); text/markdown gives llms-full, ld+json gives facts
 GET  /public/semanto/{trooth_id}/versions
 GET  /public/semanto/{trooth_id}/versions/{n}
-GET  /public/semanto/{trooth_id}/pages/{smp_id}         page markdown, with its proof headers
-GET  /public/semanto/{trooth_id}/pages/{smp_id}/proof   inclusion proof against pages_root and the log
-GET  /public/semanto/{trooth_id}/facts.jsonld
-GET  /public/semanto/{trooth_id}/llms.txt | llms-full.txt | sitemap.md
-GET  /public/semanto/{trooth_id}/products | /offers/{sku} | /feeds/{merchant-center|acp|ucp}
-GET  /public/semanto/{trooth_id}/receipts
-GET  /public/semanto/log/tree-head | /log/proof?index=&size= | /log/consistency?from=&to=
-GET  /public/semanto/verify?url=&hash=                  one-call verification
-GET  /.well-known/trooth-keys.json                       (per company, served through the adapters)
-GET  /.well-known/trooth.semanto                         (per company, served through the adapters)
-POST /os/semanto/{trooth_id}/build | /sign | /settings | /gap-report | /monitor/run   (authenticated, workspace)
+GET  /public/semanto/{trooth_id}/pages/{smp_id}[.md|.jsonld|/index.md]    page markdown or JSON-LD, with its proof headers; html gives 303 to the page
+GET  /public/semanto/{trooth_id}/pages/{smp_id}/proof   inclusion proof against pages_root and the log (carries the ledger leaf record)
+GET  /public/semanto/{trooth_id}/by-path{path}          the page at a path on the company's domain, same negotiation and headers as /pages
+GET  /public/semanto/{trooth_id}/facts.jsonld | llms.txt | llms-full.txt | sitemap.md
+GET  /public/semanto/{trooth_id}/keys | keys.json | .well-known/trooth-keys.json    the company's JWK Set (the adapters mirror keys.json)
+GET  /public/semanto/{trooth_id}/.well-known/trooth.semanto
+GET  /public/semanto/{trooth_id}/resolve?path=&accept=  what an adapter should do for a path
+GET  /public/semanto/{trooth_id}/products | products/{smk_id} | offers | offers/{sku}
+GET  /public/semanto/{trooth_id}/feeds/{merchant-center|merchant-center.tsv|acp|ucp}
+GET  /public/semanto/{trooth_id}/.well-known/ucp
+OPTIONS *                                               CORS preflight
+
+GET|POST /os/semanto/{trooth_id}/settings               delivery settings (workspace session)
+POST /os/semanto/{trooth_id}/build | sign | gap-report | monitor/run | keys/rotate | lei | basic/claim | basic/prove | first-publication | connectors
+                                                        workspace session through worker-f (TROOTH_OS service binding); denied by default with a 401 problem
+POST /os/semanto/{trooth_id}/commerce/catalog           commerce connectors; RFC 9421 signature with tag trooth-connector against a connector key on file
 ```
+
+The pipeline behind the `/os` routes, the queue consumer and the crons is `src/pipeline.ts`: compile on the queue (`trooth-semanto-compile`), hourly change detection (`15 * * * *`), nightly tree head, RFC 3161 timestamp and revocation list (`30 1 * * *`), weekly gap reports (`0 6 * * 1`, the same value as `WEEKLY_RUN.cron`).
+
+Planned, not served by this Worker: `/public/semanto/{trooth_id}/receipts` (read receipts are stored; the dashboard reads them through the workspace API). `/.well-known/trooth-keys.json` and `/.well-known/trooth.semanto` on a company's own domain are served by the adapters from the hosted copies above.
 
 The company's own domain serves the same bytes through an adapter: a Cloudflare Worker, Vercel middleware, a Netlify edge function, a Fastly or Akamai or Gcore template, an nginx or Apache snippet, the WordPress plugin, or, where no code can run, a head tag pointing at the Trooth-hosted copy.

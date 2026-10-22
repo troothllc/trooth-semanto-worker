@@ -13,7 +13,7 @@
 //
 // An inclusion proof for leaf i in a tree of n leaves is the list of sibling
 // hashes from the leaf to the root. A consistency proof shows a tree of n
-// leaves is a prefix of a later tree of m leaves. Both are verified offline.
+// leaves is a prefix of a later tree of m leaves. Both are checked offline.
 
 import { concat, bytesEqual } from "./encoding";
 import { sha256 } from "./hash";

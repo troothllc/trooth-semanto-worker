@@ -132,7 +132,7 @@ export function generateJsonLd(file: SemantoFile, opts: JsonLdOptions = {}): Jso
   const founded = first(keys, "identity.founding_date");
   if (founded) t.set(org, orgPath, "foundingDate", str(founded), founded.id);
   if (file.header.identity.lei) t.set(org, orgPath, "leiCode", file.header.identity.lei, "header:identity.lei");
-  const tel = first(keys, "contact.telephone");
+  const tel = first(keys, "contact.phone");
   if (tel) t.set(org, orgPath, "telephone", str(tel), tel.id);
   const email = first(keys, "contact.email");
   if (email) t.set(org, orgPath, "email", str(email), email.id);

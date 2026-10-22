@@ -8,7 +8,11 @@
 // cross-origin. Format is chosen by Accept or path suffix through
 // negotiate-route.ts; User-Agent is never read. A read receipt input is
 // computed after the response is built and handed to ReceiptPort.record
-// without blocking the response (Workers waitUntil when present).
+// without blocking the response (Workers waitUntil when present). The public
+// log routes answer in the shapes docs/spec/log.md states, over the ledger.
+// Workspace routes (/os) are denied by default: without an authorize hook, or
+// without a session it accepts, they answer a 401 problem; the work itself is
+// done by src/pipeline.ts behind RouteDeps.workspace.
 
 import { Hono, type Context } from "hono";
 import { utf8 } from "../core/encoding";
@@ -21,7 +25,9 @@ import { behindNotice, problem, renderProblem, type Problem, type ProblemCode } 
 import { negotiateRoute } from "./negotiate-route";
 import { buildPageProof, verifyUrl } from "./proof";
 import { factsJsonLd, manifestMarkdown, pageJsonLd, wellKnownSemanto } from "./represent";
-import type { CompanyRecord, Ports, ReceiptInput, StoredPage } from "./ports";
+import type { CompanyRecord, Ports, ReceiptInput, StoredPage, WorkspaceAction, WorkspaceAuth, WorkspaceHandlers, WorkspaceResult } from "./ports";
+import type { CommerceStore } from "../commerce/ports";
+import { feedResponse, offerResponse, offersResponse, problemMarkdown, productResponse, productsResponse, ucpManifestResponse, type PlainResponse as CommerceResponse } from "../commerce/routes";
 import { resolve as resolveDelivery, validateSettings, withDefaults, DEFAULT_SETTINGS, type DeliverySettings } from "../settings/delivery";
 
 type Vars = { Variables: { receipt?: ReceiptInput } };
@@ -35,9 +41,18 @@ interface Signer {
 export interface RouteDeps {
   ports: Ports;
   /** Verify a Web Bot Auth request, when the readers module is wired. Without it, only the Signature-Agent header is recorded and proof is "none". */
-  readers?: { verify(req: Request): Promise<{ agent_key_url: string | null; proven: boolean }> };
-  /** Workspace authorization for /os routes, when the identity module is wired. Without it, every /os call is refused. */
-  authorize?: (req: Request, trooth_id: string) => Promise<boolean>;
+  readers?: { verify(req: Request): Promise<{ agent_key_url: string | null; proven: boolean; keyid?: string | null }> };
+  /**
+   * Workspace authorization for /os routes. Answers the caller's workspace
+   * (trooth_id and role), or null to refuse. `true` is accepted from simple
+   * hooks and reads as an admin of the company in the address. Without the
+   * hook, every /os call is refused with a 401 problem.
+   */
+  authorize?: (req: Request, trooth_id: string) => Promise<boolean | WorkspaceAuth | null>;
+  /** The pipeline behind the /os actions (src/pipeline.ts). */
+  workspace?: WorkspaceHandlers;
+  /** Product records, offers and feeds for the commerce public routes. */
+  commerce?: CommerceStore;
   /** Per-reader rate limit, when wired. */
   rateLimit?: (req: Request) => Promise<{ allowed: boolean; retry_after: number }>;
 }
@@ -90,12 +105,15 @@ export function createApp(deps: RouteDeps): ServeApp {
     const work = (async () => {
       let agent_key_url = hints.signatureAgent;
       let proven = false;
+      let keyid: string | null = null;
       if (deps.readers) {
         const r = await deps.readers.verify(c.req.raw);
         agent_key_url = r.agent_key_url ?? agent_key_url;
         proven = r.proven;
+        keyid = r.proven ? (r.keyid ?? null) : null;
       }
-      await ports.receipts.record({ ...input, agent_key_url, proof: proven ? "web_bot_auth" : "none", read_at: ports.now().toISOString() });
+      const address = c.req.header("cf-connecting-ip") ?? null;
+      await ports.receipts.record({ ...input, agent_key_url, proof: proven ? "web_bot_auth" : "none", ...(keyid ? { keyid } : {}), read_at: ports.now().toISOString(), ...(address ? { address } : {}) });
     })().catch(() => undefined);
     try {
       c.executionCtx.waitUntil(work);
@@ -152,13 +170,65 @@ export function createApp(deps: RouteDeps): ServeApp {
         status: 204,
         headers: {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-          "Access-Control-Allow-Headers": "Accept, If-None-Match, Signature, Signature-Input, Signature-Agent, Trooth-Contract",
+          "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Accept, Authorization, Content-Type, Content-Digest, If-None-Match, Signature, Signature-Input, Signature-Agent, Trooth-Contract",
           "Access-Control-Max-Age": "86400",
         },
       });
     }
     await next();
+  });
+
+  // ------------------------------------------------------------ the public log (docs/spec/log.md), before /:trooth_id
+
+  const witnessSigner = async (): Promise<Signer> => ({ key: await ports.keys.getWitnessKey(), by: "witness" });
+  const logPrefix = `${apiPrefix}/log`;
+  const intParam = (v: string | undefined): number | null => (v !== undefined && /^\d+$/.test(v) ? Number(v) : null);
+  const sendLog = async (c: Context<Vars>, value: unknown): Promise<Response> => send(c, { status: 200, rep: "json", body: json(value), version_id: null, links: {}, signer: await witnessSigner() });
+  const logMissing = (c: Context<Vars>, detail: string) => sendProblem(c, null, null, "log_entry_not_found", { detail });
+  const badLogQuery = (c: Context<Vars>, detail: string) => sendProblem(c, null, null, "invalid_request", { detail });
+
+  async function serveTreeHead(c: Context<Vars>, forceText: boolean): Promise<Response> {
+    const sizeQ = c.req.query("size");
+    const size = sizeQ === undefined ? undefined : intParam(sizeQ);
+    if (size === null) return badLogQuery(c, "size must be a whole number.");
+    const head = size === undefined ? await ports.log.latestTreeHead() : await ports.log.getTreeHead(size);
+    if (!head) return logMissing(c, size === undefined ? "The log has no signed tree head yet." : `No signed tree head of size ${size}.`);
+    const wantsText = forceText || prefersPlainText(requestHints(c).accept);
+    if (wantsText) {
+      const text = await ports.log.checkpoint(head.tree_size);
+      if (text === null) return logMissing(c, `No checkpoint of size ${head.tree_size}.`);
+      return send(c, { status: 200, rep: "text", body: utf8(text), version_id: null, links: {}, signer: await witnessSigner() });
+    }
+    return sendLog(c, { tree_size: head.tree_size, root_hash: head.root_hash, signed_at: head.signed_at, jws: head.jws });
+  }
+  app.get(`${logPrefix}/tree-head`, (c) => serveTreeHead(c, false));
+  app.get(`${logPrefix}/checkpoint`, (c) => serveTreeHead(c, true));
+
+  app.get(`${logPrefix}/proof`, async (c) => {
+    const index = intParam(c.req.query("index"));
+    if (index === null) return badLogQuery(c, "index is required and must be a whole number.");
+    const sizeQ = c.req.query("size");
+    const size = sizeQ === undefined ? ((await ports.log.latestTreeHead())?.tree_size ?? null) : intParam(sizeQ);
+    if (size === null) return sizeQ === undefined ? logMissing(c, "The log has no signed tree head yet.") : badLogQuery(c, "size must be a whole number.");
+    const proof = await ports.log.inclusion(index, size);
+    return proof ? sendLog(c, proof) : logMissing(c, `Leaf ${index} is not in a tree of ${size} leaves.`);
+  });
+
+  app.get(`${logPrefix}/consistency`, async (c) => {
+    const from = intParam(c.req.query("from"));
+    const toQ = c.req.query("to");
+    const to = toQ === undefined ? ((await ports.log.latestTreeHead())?.tree_size ?? null) : intParam(toQ);
+    if (from === null || to === null) return badLogQuery(c, "from and to must be whole numbers.");
+    const proof = await ports.log.consistency(from, to);
+    return proof ? sendLog(c, proof) : logMissing(c, `No consistency proof from ${from} to ${to}.`);
+  });
+
+  app.get(`${logPrefix}/leaves/:index`, async (c) => {
+    const index = intParam(c.req.param("index"));
+    if (index === null) return badLogQuery(c, "The leaf index must be a whole number.");
+    const leaf = await ports.log.leaf(index);
+    return leaf ? sendLog(c, leaf) : logMissing(c, `The log has no leaf ${index}.`);
   });
 
   // ------------------------------------------------------------ verify (before /:trooth_id)
@@ -357,6 +427,8 @@ export function createApp(deps: RouteDeps): ServeApp {
     return send(c, { status: 200, rep: "json", body: json(jwks), version_id: file ? versionId(file.root_hash) : null, links: links(company, file), signer: await signerFor(company) });
   }
   app.get(`${apiPrefix}/:trooth_id/keys`, serveKeys);
+  // The adapters fetch /keys.json and serve it as /.well-known/trooth-keys.json (adapters/shared/semanto-adapter.mjs API_PATHS.keys).
+  app.get(`${apiPrefix}/:trooth_id/keys.json`, serveKeys);
   app.get(`${apiPrefix}/:trooth_id/.well-known/trooth-keys.json`, serveKeys);
 
   app.get(`${apiPrefix}/:trooth_id/.well-known/trooth.semanto`, async (c) => {
@@ -367,6 +439,31 @@ export function createApp(deps: RouteDeps): ServeApp {
     const file = await ports.versions.getCurrent(trooth_id);
     return send(c, { status: 200, rep: "json", body: json(wellKnownSemanto(company, file, ports.config)), version_id: file ? versionId(file.root_hash) : null, links: links(company, file), signer: await signerFor(company) });
   });
+
+  // ------------------------------------------------------------ a page by its path on the company's domain (adapters' API_PATHS.byPath)
+
+  async function serveByPath(c: Context<Vars>): Promise<Response> {
+    const r = await load(c, c.req.param("trooth_id") ?? "");
+    if (r instanceof Response) return r;
+    const pathname = new URL(c.req.url).pathname;
+    const marker = `/${r.company.trooth_id}/by-path`;
+    const raw = pathname.slice(pathname.indexOf(marker) + marker.length) || "/";
+    const decision = negotiateRoute(raw, requestHints(c).accept);
+    const base = decision.basePath || "/";
+    const candidates = [`https://${r.company.domain}${base}`];
+    if (base.length > 1 && base.endsWith("/")) candidates.push(`https://${r.company.domain}${base.slice(0, -1)}`);
+    else if (base !== "/") candidates.push(`https://${r.company.domain}${base}/`);
+    let page: StoredPage | null = null;
+    for (const url of candidates) {
+      page = await ports.versions.getPageByUrl(r.company.trooth_id, url);
+      if (page) break;
+    }
+    if (!page) return sendProblem(c, r.company, r.file, "page_not_found", { detail: `The current signed version has no page at ${base} on ${r.company.domain}.` });
+    if (decision.rep === "html") return new Response(null, { status: 303, headers: { Location: page.entry.url, Vary: "Accept", "Access-Control-Allow-Origin": "*" } });
+    return servePage(c, r, page, decision.rep);
+  }
+  app.get(`${apiPrefix}/:trooth_id/by-path`, serveByPath);
+  app.get(`${apiPrefix}/:trooth_id/by-path/*`, serveByPath);
 
   // ------------------------------------------------------------ adapter helper: what to do for a path on the company's domain
 
@@ -390,10 +487,21 @@ export function createApp(deps: RouteDeps): ServeApp {
 
   const osPrefix = apiPrefix.replace(/\/public\//, "/os/");
 
+  /** Deny by default: no hook, no session or a refused session is a 401 problem; a session for another company is a 403 problem. */
+  async function workspaceFor(c: Context<Vars>, trooth_id: string): Promise<WorkspaceAuth | Response> {
+    if (!deps.authorize) return sendProblem(c, null, null, "unauthorized");
+    const answer = await deps.authorize(c.req.raw, trooth_id);
+    if (!answer) return sendProblem(c, null, null, "unauthorized");
+    if (answer === true) return { trooth_id, role: "admin", user_id: "workspace", name: "Workspace" };
+    if (answer.trooth_id !== trooth_id) return sendProblem(c, null, null, "forbidden", { detail: `This session belongs to ${answer.trooth_id}, not ${trooth_id}.` });
+    return answer;
+  }
+
   app.get(`${osPrefix}/:trooth_id/settings`, async (c) => {
     const trooth_id = c.req.param("trooth_id");
     if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");
-    if (!deps.authorize || !(await deps.authorize(c.req.raw, trooth_id))) return new Response(null, { status: 401 });
+    const ws = await workspaceFor(c, trooth_id);
+    if (ws instanceof Response) return ws;
     const company = await ports.versions.getCompany(trooth_id);
     if (!company) return sendProblem(c, null, null, "semanto_not_found");
     const settings = await settingsFor(trooth_id);
@@ -404,7 +512,9 @@ export function createApp(deps: RouteDeps): ServeApp {
   app.post(`${osPrefix}/:trooth_id/settings`, async (c) => {
     const trooth_id = c.req.param("trooth_id");
     if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");
-    if (!deps.authorize || !(await deps.authorize(c.req.raw, trooth_id))) return new Response(null, { status: 401 });
+    const ws = await workspaceFor(c, trooth_id);
+    if (ws instanceof Response) return ws;
+    if (ws.role !== "owner" && ws.role !== "admin") return sendProblem(c, null, null, "forbidden", { detail: "Only an owner or admin can change delivery settings." });
     const company = await ports.versions.getCompany(trooth_id);
     if (!company) return sendProblem(c, null, null, "semanto_not_found");
     let input: unknown;
@@ -421,9 +531,103 @@ export function createApp(deps: RouteDeps): ServeApp {
     return send(c, { status: 200, rep: "json", body: json(merged), version_id: file ? versionId(file.root_hash) : null, signer: await signerFor(company) });
   });
 
+
+  // ------------------------------------------------------------ workspace actions (src/pipeline.ts)
+
+  async function sendWorkspace(c: Context<Vars>, trooth_id: string, result: WorkspaceResult): Promise<Response> {
+    const company = await ports.versions.getCompany(trooth_id);
+    const file = company ? await ports.versions.getCurrent(trooth_id) : null;
+    if (result.problem) return sendProblem(c, company, file, result.problem.code, { detail: result.problem.detail });
+    return send(c, { status: result.status, rep: "json", body: json(result.body ?? null), version_id: file ? versionId(file.root_hash) : null, links: company ? links(company, file) : {}, signer: await signerFor(company), extra: result.headers });
+  }
+
+  async function readJson(c: Context<Vars>): Promise<unknown> {
+    const text = await c.req.text();
+    if (!text.trim()) return {};
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+
+  const actionRoute = (action: WorkspaceAction) =>
+    app.post(`${osPrefix}/:trooth_id/${action}`, async (c) => {
+      const trooth_id = c.req.param("trooth_id");
+      if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");
+      const ws = await workspaceFor(c, trooth_id);
+      if (ws instanceof Response) return ws;
+      if (!deps.workspace) return sendProblem(c, null, null, "conflict", { detail: "The pipeline is not wired in this deployment." });
+      const input = await readJson(c);
+      if (input === undefined) return sendProblem(c, null, null, "invalid_request", { detail: "The body is not JSON." });
+      return sendWorkspace(c, trooth_id, await deps.workspace.handle(action, ws, trooth_id, input));
+    });
+  for (const action of ["build", "sign", "gap-report", "monitor/run", "keys/rotate", "lei", "basic/claim", "basic/prove", "first-publication", "connectors"] as WorkspaceAction[]) actionRoute(action);
+
+  // The commerce connectors (WordPress plugin, Shopify, BigCommerce, Salesforce Commerce scripts) post here, signed with RFC 9421 (tag trooth-connector).
+  app.post(`${osPrefix}/:trooth_id/commerce/catalog`, async (c) => {
+    const trooth_id = c.req.param("trooth_id");
+    if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");
+    if (!deps.workspace) return sendProblem(c, null, null, "conflict", { detail: "The pipeline is not wired in this deployment." });
+    const body = new Uint8Array(await c.req.arrayBuffer());
+    return sendWorkspace(c, trooth_id, await deps.workspace.catalog(trooth_id, { method: c.req.method, url: c.req.url, headers: c.req.raw.headers, body }));
+  });
+
+  // ------------------------------------------------------------ commerce public routes (src/commerce/routes.ts)
+
+  async function sendCommerce(c: Context<Vars>, trooth_id: string, r: CommerceResponse): Promise<Response> {
+    const company = await ports.versions.getCompany(trooth_id);
+    const file = company ? await ports.versions.getCurrent(trooth_id) : null;
+    const type = r.headers["Content-Type"] ?? "";
+    const isProblem = type.startsWith("application/problem+json");
+    const wantsMarkdown = isProblem && negotiate(requestHints(c).accept, ["markdown", "json"], "json") === "markdown";
+    const out = wantsMarkdown ? problemMarkdown(r) : r;
+    const rep = wantsMarkdown ? "markdown" : isProblem ? "problem_json" : type.startsWith("text/tab-separated-values") ? "tsv" : "json";
+    const extra: Record<string, string> = {};
+    if (!isProblem && r.headers["Cache-Control"]) extra["Cache-Control"] = r.headers["Cache-Control"];
+    const settings = company ? await settingsFor(trooth_id) : null;
+    return send(c, { status: out.status, rep, body: utf8(out.body), version_id: file ? versionId(file.root_hash) : null, content_signals: settings?.content_signals ?? null, links: company ? links(company, file) : {}, signer: await signerFor(company), extra });
+  }
+
+  const commerceRoute = (path: string, handler: (store: CommerceStore, trooth_id: string, c: Context<Vars>) => Promise<CommerceResponse>) =>
+    app.get(`${apiPrefix}/:trooth_id${path}`, async (c) => {
+      const trooth_id = c.req.param("trooth_id");
+      if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");
+      if (!deps.commerce) return sendProblem(c, null, null, "semanto_not_found", { detail: "No commerce records are served here." });
+      return sendCommerce(c, trooth_id, await handler(deps.commerce, trooth_id, c));
+    });
+  commerceRoute("/products", (store, id) => productsResponse(store, id, ports.now()));
+  commerceRoute("/products/:record_id", (store, id, c) => productResponse(store, id, c.req.param("record_id") ?? ""));
+  commerceRoute("/offers", (store, id) => offersResponse(store, id, ports.now()));
+  commerceRoute("/offers/:sku", (store, id, c) => offerResponse(store, id, decodeURIComponent(c.req.param("sku") ?? ""), ports.now()));
+  commerceRoute("/feeds/:kind", (store, id, c) => {
+    const raw = c.req.param("kind") ?? "";
+    const tsv = raw.endsWith(".tsv");
+    return feedResponse(store, id, tsv ? raw.slice(0, -4) : raw, ports.now(), tsv ? "tsv" : "json");
+  });
+  commerceRoute("/.well-known/ucp", (store, id) => ucpManifestResponse(store, id));
+
   app.notFound((c) => sendProblem(c, null, null, "semanto_not_found", { detail: "No route here. The public routes are listed at https://trooth.co/docs/semanto." }));
 
   return app;
+}
+
+/** True when Accept names text/plain at least as strongly as application/json (the checkpoint is plain text; the tree head is JSON). */
+export function prefersPlainText(accept: string | null): boolean {
+  if (!accept) return false;
+  let text = -1;
+  let jsonQ = -1;
+  for (const part of accept.split(",")) {
+    const [media, ...params] = part.trim().toLowerCase().split(";");
+    let q = 1;
+    for (const p of params) {
+      const [k, v] = p.split("=").map((x) => x.trim());
+      if (k === "q" && v !== undefined && Number.isFinite(Number(v))) q = Number(v);
+    }
+    if (media === "text/plain") text = Math.max(text, q);
+    if (media === "application/json") jsonQ = Math.max(jsonQ, q);
+  }
+  return text > 0 && text >= jsonQ;
 }
 
 // ------------------------------------------------------------ scheduled and queue handlers

@@ -10,7 +10,7 @@ import {
 } from "@/gap/providers";
 import type { FetchPort, SerpPort, SerpAnswer, SerpEngine } from "@/gap/ports";
 import { compareAnswer, citationNote, normalizeHours, extractMoney, type CompareContext } from "@/gap/compare";
-import { buildGapReport, renderGapReportMarkdown, diffReports, renderDiffMarkdown, weeklyRunPlan, nextMondayNine, WEEKLY_RUN, runGapReport, type GapReport } from "@/gap/report";
+import { buildGapReport, renderGapReportMarkdown, diffReports, renderDiffMarkdown, weeklyRunPlan, nextWeeklyRun, WEEKLY_RUN, runGapReport, type GapReport } from "@/gap/report";
 import { buildCompetitorView, renderCompetitorHtml, renderCompetitorMarkdown, runCompetitorQuestions, type CompetitorRun } from "@/gap/competitor";
 
 const fixture = <T>(name: string): T => JSON.parse(readFileSync(new URL(`./fixtures/gap/${name}`, import.meta.url), "utf8")) as T;
@@ -269,12 +269,12 @@ describe("gap report", () => {
     expect(back.regressed).toHaveLength(1);
   });
   it("plans the weekly Monday run", () => {
-    expect(WEEKLY_RUN.cron).toBe("0 9 * * 1");
-    expect(nextMondayNine(new Date("2026-10-21T12:00:00Z")).toISOString()).toBe("2026-10-26T09:00:00.000Z");
-    expect(nextMondayNine(new Date("2026-10-26T09:00:00Z")).toISOString()).toBe("2026-11-02T09:00:00.000Z");
-    expect(nextMondayNine(new Date("2026-10-26T08:00:00Z")).toISOString()).toBe("2026-10-26T09:00:00.000Z");
+    expect(WEEKLY_RUN.cron).toBe("0 6 * * 1");
+    expect(nextWeeklyRun(new Date("2026-10-21T12:00:00Z")).toISOString()).toBe("2026-10-26T06:00:00.000Z");
+    expect(nextWeeklyRun(new Date("2026-10-26T06:00:00Z")).toISOString()).toBe("2026-11-02T06:00:00.000Z");
+    expect(nextWeeklyRun(new Date("2026-10-26T05:00:00Z")).toISOString()).toBe("2026-10-26T06:00:00.000Z");
     const plan = weeklyRunPlan("acme-inc", new Date("2026-10-21T12:00:00Z"));
-    expect(plan).toMatchObject({ trooth_id: "acme-inc", cron: "0 9 * * 1", next_run_at: "2026-10-26T09:00:00.000Z", alert_on: ["differs", "unsupported_claim"] });
+    expect(plan).toMatchObject({ trooth_id: "acme-inc", cron: "0 6 * * 1", next_run_at: "2026-10-26T06:00:00.000Z", alert_on: ["differs", "unsupported_claim"] });
   });
   it("runs end to end through adapters with in-memory ports", async () => {
     const fetchPort: FetchPort = async () => ({ status: 200, headers: { get: () => null }, text: async () => JSON.stringify(fixture("openai.fixture.json")) });

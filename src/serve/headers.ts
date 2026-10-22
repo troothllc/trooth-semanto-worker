@@ -29,13 +29,15 @@ import { SEMANTO_CONTRACT } from "../core/semanto";
 import type { PrivateJwk } from "../core/keys";
 import { contentSignalHeader, type ContentSignals } from "../settings/delivery";
 
-export type ServedRepresentation = "markdown" | "jsonld" | "json" | "problem_json";
+export type ServedRepresentation = "markdown" | "jsonld" | "json" | "problem_json" | "text" | "tsv";
 
 export const CONTENT_TYPES: Record<ServedRepresentation, string> = {
   markdown: "text/markdown; charset=utf-8",
   jsonld: "application/ld+json",
   json: "application/json",
   problem_json: "application/problem+json",
+  text: "text/plain; charset=utf-8",
+  tsv: "text/tab-separated-values; charset=utf-8",
 };
 
 export const CACHE_CONTROL = "public, max-age=300, stale-while-revalidate=3600";

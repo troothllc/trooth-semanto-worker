@@ -17,7 +17,10 @@
 // is the exact sentence or the JSON-LD path the value came from. A schema
 // mapping { type, property } is attached where one exists, so the JSON-LD
 // write-back can put the value back where Google reads it. Nothing is ever
-// invented: when a field is absent, no fact is produced.
+// invented: when a field is absent, no fact is produced. Keys are the shared
+// vocabulary of src/core/fact-keys.ts (contact.phone, contact.address,
+// hours.<day>, identity.legal_name), so the monitor and the gap report read
+// these facts under the same names.
 
 import { factId, type Fact } from "../core/semanto";
 import { parseHtml, walk, textOf, type ElementNode } from "./html";
@@ -241,7 +244,7 @@ function structuredFacts(nodes: Node[], ctx: { url: string; witnessed_at: string
       const founded = clean(p["foundingDate"]);
       if (founded) push("identity.founding_date", `${name ?? "The company"} gives its founding date as ${founded}`, founded, `${a}/foundingDate`, { type: schemaType, property: "foundingDate" });
       const tel = clean(p["telephone"]);
-      if (tel) push("contact.telephone", `${name ?? "The company"} lists telephone ${tel}`, tel, `${a}/telephone`, { type: schemaType, property: "telephone" });
+      if (tel) push("contact.phone", `${name ?? "The company"} lists telephone ${tel}`, tel, `${a}/telephone`, { type: schemaType, property: "telephone" });
       const email = clean(p["email"]);
       if (email) push("contact.email", `${name ?? "The company"} lists email ${email}`, email, `${a}/email`, { type: schemaType, property: "email" });
       const lei = clean(p["leiCode"]);
@@ -359,7 +362,7 @@ function textFacts(ctx: { url: string; witnessed_at: string; body: string }): Fa
       const digits = v.replace(/\D/g, "");
       if (digits.length < 10 || digits.length > 15) continue;
       if (/^(?:19|20)\d{2}[ .-]\d{2}[ .-]\d{2}/.test(v)) continue;
-      push("contact.telephone", `The page lists the phone number ${v}`, v, s, { type: "Organization", property: "telephone" });
+      push("contact.phone", `The page lists the phone number ${v}`, v, s, { type: "Organization", property: "telephone" });
       claimed.add(idx);
     }
     EMAIL_RE.lastIndex = 0;

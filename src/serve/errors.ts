@@ -21,7 +21,14 @@ export type ProblemCode =
   | "semanto_withdrawn"
   | "invalid_trooth_id"
   | "unsupported_contract_version"
-  | "rate_limited";
+  | "rate_limited"
+  | "unauthorized"
+  | "forbidden"
+  | "invalid_request"
+  | "conflict"
+  | "signature_invalid"
+  | "log_entry_not_found"
+  | "upstream_unavailable";
 
 export interface Problem {
   type: string;
@@ -119,6 +126,62 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
     terminal: false,
     what_happened: "This reader sent more requests than the limit allows in the current window.",
     what_to_do: "Wait for the number of seconds in Retry-After, then try again. Signed agents (Web Bot Auth) get a higher limit.",
+  },
+  unauthorized: {
+    status: 401,
+    title: "Sign in first",
+    retryable: false,
+    terminal: true,
+    what_happened: "This address is for a company's own workspace. The request carried no workspace session, or one that has ended.",
+    what_to_do: "Send the workspace token from trooth.co as Authorization: Bearer, or sign in again.",
+  },
+  forbidden: {
+    status: 403,
+    title: "Not allowed for this workspace",
+    retryable: false,
+    terminal: true,
+    what_happened: "The workspace session is valid, but it does not belong to this company, or its role cannot do this.",
+    what_to_do: "Use the workspace of the company named in the address, or ask an owner or admin.",
+  },
+  invalid_request: {
+    status: 400,
+    title: "The request is not in the right shape",
+    retryable: false,
+    terminal: true,
+    what_happened: "A field is missing or has a value this address does not accept.",
+    what_to_do: "Read the detail, correct the request and send it again.",
+  },
+  conflict: {
+    status: 409,
+    title: "Not possible in the current state",
+    retryable: true,
+    terminal: false,
+    what_happened: "The company's record is not in the state this step needs.",
+    what_to_do: "Read the detail for the step that comes first, do it, then try again.",
+  },
+  signature_invalid: {
+    status: 422,
+    title: "The signature does not check out",
+    retryable: false,
+    terminal: true,
+    what_happened: "The signature sent does not verify with the public key on file for this company.",
+    what_to_do: "Sign the exact signing input you were given, with the private key whose public half is on file, and send the 64-byte signature again.",
+  },
+  log_entry_not_found: {
+    status: 404,
+    title: "No such entry in the public log",
+    retryable: false,
+    terminal: true,
+    what_happened: "The log has no leaf, tree head or proof for the numbers asked for.",
+    what_to_do: "Read the latest tree head at /public/semanto/log/tree-head and ask within its size.",
+  },
+  upstream_unavailable: {
+    status: 502,
+    title: "A source Trooth reads did not answer",
+    retryable: true,
+    terminal: false,
+    what_happened: "Trooth asked an outside source (a registry or the company's site) and got no usable answer.",
+    what_to_do: "Try again in a few minutes.",
   },
 };
 

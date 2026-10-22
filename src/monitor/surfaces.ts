@@ -17,11 +17,13 @@
 // Keys: identity.legal_name, contact.phone, contact.address, contact.website,
 // hours.<day>, product.<key>.{name,price,availability,gtin,url,brand,
 // consumer_notice,inventory_quantity}, where <key> is the sku, else the gtin,
-// else the product id. Readers only read; nothing here judges.
+// else the product id. The keys are src/core/fact-keys.ts; signed facts are
+// read through canonicalFactKey. Readers only read; nothing here judges.
 
 import type { Fact } from "../core/semanto";
 import { digest } from "../core/hash";
 import { utf8 } from "../core/encoding";
+import { canonicalFactKey } from "../core/fact-keys";
 import type { FetchPort, FetchResult } from "./ports";
 import type { ConsumerNotice, LivePageRead, MicrodataItem, Offer, Price, Product, SignedFact, SignedRecord, Surface, SurfaceFact, SurfaceRead, SurfaceValue } from "./types";
 import { canonical, firstItem, firstString, jsonLdBlocks, jsonLdIds, jsonLdNodes, metaRobots, microdata, title, visibleText } from "./html";
@@ -103,7 +105,7 @@ export function signedFacts(record: SignedRecord, at: string): SignedFact[] {
   for (const f of record.facts) {
     if (f.value === undefined) continue;
     if (f.value === "not_published" || f.value === "not_read") continue;
-    out.push({ key: f.key, value: f.value as SurfaceValue, fact_id: f.id, evidence_url: f.evidence.url, witnessed_at: f.evidence.witnessed_at });
+    out.push({ key: canonicalFactKey(f.key), value: f.value as SurfaceValue, fact_id: f.id, evidence_url: f.evidence.url, witnessed_at: f.evidence.witnessed_at });
   }
   for (const p of record.products) {
     const key = productKey(p);
