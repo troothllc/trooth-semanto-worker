@@ -8,6 +8,6 @@ export { DeliverySettingsPanel, HOST_TEXT, type DeliverySettingsData, type Deliv
 export { ConsistencyMonitorPanel, KIND_TEXT, type ConsistencyMonitorPanelProps, type Mismatch, type MismatchKind, type Severity } from "./consistency-monitor-panel";
 export { GapReportPanel, CLASSIFICATION_TEXT, type GapReportPanelProps, type ProviderSummary, type Correction, type Classification, type GapCounts } from "./gap-report-panel";
 export { ReadReceiptsPanel, type ReadReceiptsPanelProps, type ReadReceiptDay, type ProvenAgent } from "./read-receipts-panel";
-export { KeyBindingPanel, BINDING_TEXT, type KeyBindingPanelProps, type KeyBindingData, type BindingLevel } from "./key-binding-panel";
+export { KeyBindingPanel, BINDING_TEXT, TWO_OFFICER_TEXT, type KeyBindingPanelProps, type KeyBindingData, type BindingLevel } from "./key-binding-panel";
 export { BasicUpgradeCard, type BasicUpgradeCardProps } from "./basic-upgrade-card";
 export { fmtDate, fmtDateTime, fmtCount, SURFACE_TEXT, SEVERITY_TEXT } from "./format";

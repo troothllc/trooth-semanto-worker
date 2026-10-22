@@ -1,0 +1,15 @@
+{
+  "kind": "witness",
+  "description": "A witness statement whose header nbf is not a date. A JWS time that does not parse is malformed, never ignored.",
+  "now": "2026-10-22T12:00:10Z",
+  "payload": {
+    "root_hash": "sha256:9175ea57c5eb516f5d6b2a748f469ec33f8e3e0ea9cde9beacad4db4226fbf76",
+    "witnessed_at": "2026-10-22T12:00:00Z"
+  },
+  "jws": "eyJhbGciOiJFZERTQSIsImtpZCI6IjFBbkJLd0ZEbDRDcEZhMUt2OXZ5dlB3cGhyUW5ZaDJEaGpsUk4wdTZwY3ciLCJ0eXAiOiJodHRwczovL3Ryb290aC5jby90eXBlcy93aXRuZXNzLXN0YXRlbWVudCIsImlhdCI6IjIwMjYtMTAtMjJUMTI6MDA6MDBaIiwibmJmIjoibm90IGEgZGF0ZSJ9..OBxfOdPo7-3jzMOueDeagBBpkEx9-DKUHiC72AyN2RmEm08E0JnPTYqmLT3_XL4P3W86GMQNTdsFBR9mF0NgAg",
+  "kid": "1AnBKwFDl4CpFa1Kv9vyvPwphrQnYh2DhjlRN0u6pcw",
+  "expect": {
+    "ok": false,
+    "reason": "malformed"
+  }
+}

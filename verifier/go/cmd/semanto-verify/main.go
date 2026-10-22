@@ -6,9 +6,15 @@
 // when every check passed.
 //
 //	semanto-verify file <semanto.json> [-pages <dir>] [-keys <keys.json>] [-now <iso>] [-revocations <file>]
-//	semanto-verify page <url> [-trooth <base>] [-now <iso>]
+//	semanto-verify page <url> [-trooth <base>] [-now <iso>] [-allow-unwitnessed] [-allow-unlogged]
 //	semanto-verify response <url> [-keys <keys.json>]
 //	semanto-verify log -from <n> -to <m> [-log <url>] [-keys <keys.json>]
+//
+// Flags may come before or after the file path or url. Keys are kept apart by
+// role: the company's JWK Set (from its domain) checks company signatures,
+// Trooth's checks witness statements, tree heads and revocation lists. `page`
+// is strict: the version header must be fetched, and a missing witness
+// statement or log entry fails unless allowed.
 package main
 
 import (
@@ -37,7 +43,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "semanto-verify: check a Semanto file, a page, a signed response or the public log.")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  semanto-verify file <semanto.json> [-pages <dir>] [-keys <keys.json>] [-now <iso>] [-revocations <file>]")
-	fmt.Fprintln(os.Stderr, "  semanto-verify page <url> [-trooth <base>] [-now <iso>]")
+	fmt.Fprintln(os.Stderr, "  semanto-verify page <url> [-trooth <base>] [-now <iso>] [-allow-unwitnessed] [-allow-unlogged]")
 	fmt.Fprintln(os.Stderr, "  semanto-verify response <url> [-keys <keys.json>]")
 	fmt.Fprintln(os.Stderr, "  semanto-verify log -from <n> -to <m> [-log <url>] [-keys <keys.json>]")
 	fmt.Fprintln(os.Stderr, "")
@@ -110,6 +116,9 @@ func printResult(title string, r semanto.Result) bool {
 		}
 		fmt.Printf("  %s %s: %s\n", mark, c.Name, c.Detail)
 	}
+	for _, n := range r.Notes {
+		fmt.Printf("  note %s\n", n)
+	}
 	if r.OK {
 		fmt.Println("Every check passed.")
 	} else {
@@ -137,15 +146,15 @@ func loadKeys(domain, keysPath, troothBase string) semanto.KeySet {
 	if troothBase == "" {
 		troothBase = troothAPI
 	}
-	var sets []any
-	for _, u := range []string{"https://" + domain + "/.well-known/trooth-keys.json", troothBase + "/.well-known/trooth-keys.json"} {
-		j, err := fetchJSON(u)
+	sets := map[string]any{"company": map[string]any{"keys": []any{}}, "trooth": map[string]any{"keys": []any{}}}
+	for _, src := range []struct{ role, url string }{{"company", "https://" + domain + "/.well-known/trooth-keys.json"}, {"trooth", troothBase + "/.well-known/trooth-keys.json"}} {
+		j, err := fetchJSON(src.url)
 		if err != nil {
-			fmt.Printf("  note %s could not be read (%v)\n", u, err)
+			fmt.Printf("  note %s could not be read (%v)\n", src.url, err)
 			continue
 		}
-		fmt.Printf("  ok   fetched the JWK Set at %s\n", u)
-		sets = append(sets, j)
+		fmt.Printf("  ok   fetched the %s JWK Set at %s\n", src.role, src.url)
+		sets[src.role] = j
 	}
 	return semanto.CollectKeys(sets)
 }
@@ -181,11 +190,11 @@ func cmdFile(args []string) int {
 	revPath := fs.String("revocations", "", "signed revocation list json")
 	offline := fs.Bool("offline", false, "never fetch keys")
 	trooth := fs.String("trooth", "", "Trooth API base")
-	_ = fs.Parse(args)
-	if fs.NArg() < 1 {
+	pos, _ := semanto.ParseInterspersed(fs, args)
+	if len(pos) < 1 {
 		usage()
 	}
-	path := fs.Arg(0)
+	path := pos[0]
 	doc := readJSON(path)
 	file := doc
 	if f, ok := doc["file"].(map[string]any); ok {
@@ -254,11 +263,13 @@ func cmdResponse(args []string, alsoProof bool) int {
 	keysPath := fs.String("keys", "", "keys json")
 	nowS := fs.String("now", "", "instant to judge validity at")
 	trooth := fs.String("trooth", "", "Trooth API base")
-	_ = fs.Parse(args)
-	if fs.NArg() < 1 {
+	allowUnwitnessed := fs.Bool("allow-unwitnessed", false, "accept a proof with no witness statement")
+	allowUnlogged := fs.Bool("allow-unlogged", false, "accept a proof with no log entry")
+	pos, _ := semanto.ParseInterspersed(fs, args)
+	if len(pos) < 1 {
 		usage()
 	}
-	target := fs.Arg(0)
+	target := pos[0]
 	status, headers, body, err := fetch(target, "text/markdown")
 	if err != nil {
 		fail(err)
@@ -306,11 +317,12 @@ func cmdResponse(args []string, alsoProof bool) int {
 							header, _ = vdoc["header"].(map[string]any)
 							fmt.Printf("  ok   fetched the version header at %s\n", versionURL)
 						} else {
-							fmt.Printf("  note %s could not be read (%v); the company signature is not checked.\n", versionURL, err)
+							// Strict: a header that cannot be fetched is a failure, not a skip.
+							fmt.Printf("  FAIL %s could not be read (%v); without the header the proof is not tied to a signed version.\n", versionURL, err)
 						}
 					}
 				}
-				pr := semanto.VerifyPageProof(proof, body, keys, now, header)
+				pr := semanto.VerifyPageProofWith(proof, body, keys, now, header, semanto.PageProofOptions{AllowUnwitnessed: *allowUnwitnessed, AllowUnlogged: *allowUnlogged})
 				ok = printResult("Proof at "+proofURL, pr) && ok
 				if header != nil {
 					fmt.Printf("State now: %s.\n\n", semanto.StateOf(map[string]any{"header": header, "root_hash": proof["root_hash"], "signature": proof["signature"]}, now, nil, 0))
@@ -332,7 +344,7 @@ func cmdLog(args []string) int {
 	keysPath := fs.String("keys", "", "keys json")
 	nowS := fs.String("now", "", "instant to judge validity at")
 	trooth := fs.String("trooth", troothAPI, "Trooth API base")
-	_ = fs.Parse(args)
+	_, _ = semanto.ParseInterspersed(fs, args)
 	if *from < 0 || *to < *from {
 		usage()
 	}
@@ -344,7 +356,8 @@ func cmdLog(args []string) int {
 		if err != nil {
 			fail(err)
 		}
-		keys = semanto.CollectKeys(j)
+		// Tree heads are Trooth's statements: only Trooth's keys check them.
+		keys = semanto.CollectKeys(map[string]any{"trooth": j})
 	}
 	now := parseNow(*nowS)
 	oldHead, err := fetchJSON(fmt.Sprintf("%s/tree-head?size=%d", *logURL, *from))

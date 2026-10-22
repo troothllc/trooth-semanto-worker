@@ -1,6 +1,6 @@
 {
   "kind": "web-bot-auth-request",
-  "description": "A request signed per draft-ietf-webbotauth-httpsig-protocol: tag web-bot-auth, @authority and signature-agent covered, keys at the Signature-Agent directory.",
+  "description": "A request signed per draft-ietf-webbotauth-httpsig-protocol: tag web-bot-auth, @authority and signature-agent covered, keys at the Signature-Agent directory. Exactly one web-bot-auth label.",
   "now": "2026-10-22T12:00:10Z",
   "now_epoch": 1792670410,
   "request": {

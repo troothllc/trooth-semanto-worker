@@ -102,6 +102,8 @@ export interface PipelineStore {
   saveBuilt(trooth_id: string, v: StoredVersion, files: VersionFiles): Promise<void>;
   /** Replace the version with its signed form and make it the company's current version. */
   markSigned(trooth_id: string, file: SemantoFile, signed_at: string): Promise<void>;
+  /** Semanto Basic: replace the version with its witnessed form (state read, no company signature) and serve it as the Basic record. */
+  markWitnessed(trooth_id: string, file: SemantoFile, witnessed_at: string): Promise<void>;
 
   changeState(trooth_id: string): Promise<Record<string, ChangeRow>>;
   putChangeState(trooth_id: string, url: string, row: ChangeRow): Promise<void>;
@@ -118,6 +120,10 @@ export interface PipelineStore {
   putKey(trooth_id: string, key: CompanyKey, privateJwk: PrivateJwk | null): Promise<void>;
   connectorKeys(trooth_id: string): Promise<PublicJwk[]>;
   putConnectorKey(trooth_id: string, jwk: PublicJwk, source: string, created_at: string): Promise<void>;
+  /** The worker-f user registered as the company's owner (semanto_companies.os_owner_user_id), or null. */
+  ownerUserId(trooth_id: string): Promise<string | null>;
+  /** Register the owner when there is none yet (the first to create or claim the company). Never replaces an owner. */
+  registerOwner(trooth_id: string, user_id: string): Promise<void>;
 
   revocations(trooth_id: string | null): Promise<RevocationEntry[]>;
   putRevocationList(trooth_id: string | null, jws: string, issued_at: string): Promise<void>;
@@ -126,6 +132,8 @@ export interface PipelineStore {
   getBasic(trooth_id: string): Promise<BasicCompany | null>;
   putBasic(c: BasicCompany): Promise<void>;
   putFirstPublication(r: FirstPublicationRecord): Promise<void>;
+  /** One first-publication record by its smb_ id, with its JWS, leaf and log position. */
+  getFirstPublication(record_id: string): Promise<FirstPublicationRecord | null>;
   /** Raw bytes kept beside the records (RFC 3161 tokens, revocation lists). R2 in the Worker. */
   putBlob(key: string, bytes: Uint8Array, contentType: string): Promise<void>;
 }
@@ -161,7 +169,7 @@ export class MemoryPipelineStore implements PipelineStore {
   async putCompany(company: CompanyRecord): Promise<void> {
     const c = this.versions.companies.get(company.trooth_id);
     if (c) {
-      c.record = { ...company, current_version: c.record.current_version, custody: c.record.custody };
+      c.record = { ...company, current_version: c.record.current_version, custody: c.record.custody, basic_version: c.record.basic_version ?? null };
       return;
     }
     this.versions.add({ record: { ...company }, versions: new Map(), live: new Map(), jwks: { keys: [] }, hostedKey: null });
@@ -213,6 +221,13 @@ export class MemoryPipelineStore implements PipelineStore {
     v.file = file;
     v.signed_at = signed_at;
     c.record = { ...c.record, current_version: file.header.version };
+  }
+  async markWitnessed(trooth_id: string, file: SemantoFile, _witnessed_at: string): Promise<void> {
+    const c = this.versions.companies.get(trooth_id);
+    const v = c?.versions.get(file.header.version);
+    if (!c || !v) throw new Error(`markWitnessed: no version ${file.header.version} for ${trooth_id}`);
+    v.file = file;
+    c.record = { ...c.record, basic_version: file.header.version };
   }
 
   async changeState(trooth_id: string): Promise<Record<string, ChangeRow>> {
@@ -271,6 +286,13 @@ export class MemoryPipelineStore implements PipelineStore {
   async connectorKeys(trooth_id: string): Promise<PublicJwk[]> {
     return (this.connectors.get(trooth_id) ?? []).map((c) => c.jwk);
   }
+  readonly owners = new Map<string, string>();
+  async ownerUserId(trooth_id: string): Promise<string | null> {
+    return this.owners.get(trooth_id) ?? null;
+  }
+  async registerOwner(trooth_id: string, user_id: string): Promise<void> {
+    if (!this.owners.has(trooth_id)) this.owners.set(trooth_id, user_id);
+  }
   async putConnectorKey(trooth_id: string, jwk: PublicJwk, source: string, created_at: string): Promise<void> {
     const list = (this.connectors.get(trooth_id) ?? []).filter((c) => c.jwk.kid !== jwk.kid);
     list.push({ jwk, source, created_at });
@@ -294,7 +316,10 @@ export class MemoryPipelineStore implements PipelineStore {
   }
   async putFirstPublication(r: FirstPublicationRecord): Promise<void> {
     this.firstPublications.push(r);
+  }  async getFirstPublication(record_id: string): Promise<FirstPublicationRecord | null> {
+    return this.firstPublications.find((r) => r.record.id === record_id) ?? null;
   }
+
   async putBlob(key: string, bytes: Uint8Array, contentType: string): Promise<void> {
     this.blobs.set(key, { bytes, contentType });
   }

@@ -12,7 +12,7 @@
 // renamed it to proxy.ts with the same export.
 
 import { NextResponse, type NextRequest } from "next/server";
-import { decide, proofHeaders } from "./shared/semanto-adapter.mjs";
+import { decide, proofHeaders, mergeVary } from "./shared/semanto-adapter.mjs";
 import { semantoConfig, semantoManifest, SEMANTO_ROUTE } from "./lib-semanto";
 
 export const config = {
@@ -32,6 +32,8 @@ export async function middleware(request: NextRequest) {
     return NextResponse.rewrite(url);
   }
   const res = NextResponse.next();
+  // The answer at this url depends on Accept (a markdown reader gets another), so every response varies on it, HTML included.
+  res.headers.set("Vary", mergeVary(res.headers.get("Vary")));
   if (decision.reason === "html" || decision.reason === "not_listed" || decision.reason === "mode") {
     for (const [k, v] of Object.entries(proofHeaders(manifest, pathname, cfg))) res.headers.set(k, v);
   }

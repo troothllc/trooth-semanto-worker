@@ -1,0 +1,27 @@
+{
+  "kind": "response",
+  "description": "The JSON-LD of /security. Trooth-Page-Hash is the digest of these JSON-LD bytes; Trooth-Signed-Page-Hash is the manifest hash of the signed markdown page, and the signature covers both.",
+  "now": "2026-10-22T12:00:10Z",
+  "now_epoch": 1792670410,
+  "response": {
+    "url": "https://api.trooth.co/public/semanto/acme/pages/smp_mh2iriw5u3rzy53s3mqowrgbh7.jsonld",
+    "status": 200,
+    "headers": {
+      "content-type": "application/ld+json",
+      "content-digest": "sha-256=:444AxlEL1Eh+dSn1qbiAlRNF6UgEsA6RWazTn9gFihY=:",
+      "trooth-contract": "1",
+      "trooth-semanto-version": "smv_sf26uv6f5niw6xllfj2i6ru6ym",
+      "trooth-page-hash": "sha256:e38e00c6510bd4487e7529f5a9b880951345e94804b00e9159acd39fd8058a16",
+      "trooth-signed-page-hash": "sha256:61f488a2dda6e39c7772db20eb44c13fe71ccb56113199f954d88042d5d2c410",
+      "vary": "Accept",
+      "cache-control": "public, max-age=300, stale-while-revalidate=3600",
+      "Signature-Input": "sig1=(\"@status\" \"content-type\" \"content-digest\" \"trooth-semanto-version\" \"trooth-page-hash\" \"trooth-signed-page-hash\");created=1792670400;expires=1792674300;keyid=\"F46vbrrcJTQOgzWl4D8es3IgEPELxv7-Tldk6tp2qhI\";alg=\"ed25519\";tag=\"trooth-semanto\"",
+      "Signature": "sig1=:jcwCZD31xZgHujrjiFUJuA319YzyEwcx6M/Frfl+Xq2sM/naxLLk//l6VtAXA+gmRYxmPsqu9zjBKvBCusOTBg==:"
+    },
+    "body": "{\"@context\":\"https://schema.org\",\"@type\":\"WebPage\",\"url\":\"https://acme.com/security\",\"name\":\"Security at Acme\",\"isBasedOn\":\"sha256:61f488a2dda6e39c7772db20eb44c13fe71ccb56113199f954d88042d5d2c410\"}"
+  },
+  "expect": {
+    "ok": true,
+    "keyid": "F46vbrrcJTQOgzWl4D8es3IgEPELxv7-Tldk6tp2qhI"
+  }
+}

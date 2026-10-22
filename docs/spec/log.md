@@ -48,6 +48,8 @@ LxwOGQofnBWw4LFRgj5REWmeauLzcTFOKOEcUTnpjOU=
 
 Line one is the log's origin (`trooth.co/semanto/log/v1`, one log, one origin, never reused). Line two is the tree size. Line three is the base64 of the root hash bytes. After a blank line, each signature line is an em dash, a space, the signer's name (`trooth.co`), a space, and base64 of a 4-byte key hash followed by the 64-byte Ed25519 signature over the body (the first three lines, each ending in a newline). The key hash is the first four bytes of `SHA-256(name || "\n" || 0x01 || public key)`, `0x01` being the note package's Ed25519 algorithm id, which lets a verifier pick the right key from a set. A second signature line appears for every cosigning witness.
 
+A verifier checks a checkpoint only with Trooth's key set, and also checks that the signature line names the signer `trooth.co` (`wrong_signer`) and that line one is exactly the origin `trooth.co/semanto/log/v1` (`wrong_origin`), so a checkpoint from another log, or signed under another name, never passes for this one. Tree heads and revocation lists are likewise checked only with Trooth's keys; a company key never signs them.
+
 ## Proofs
 
 Inclusion proofs are RFC 6962 section 2.1.1 (`PATH(m, D[n])`) and consistency proofs are section 2.1.2 (`PROOF(m, D[n])`), each a list of digests printed as `sha256:` plus 64 hex. They are checked with the procedures of sections 2.1.3 and 2.1.4.2, which the three verifier kits implement and test against the Certificate Transparency known roots.
@@ -62,6 +64,15 @@ Inclusion proofs are RFC 6962 section 2.1.1 (`PATH(m, D[n])`) and consistency pr
 | `GET /public/semanto/log/leaves/<i>` | `{ index, leaf, leaf_hash }`: the leaf record and its RFC 6962 leaf hash |
 
 `size` defaults to the latest tree head (`to` likewise). An index or size outside the log answers a `log_entry_not_found` problem (404); a value that is not a whole number answers `invalid_request` (400). Every answer is signed by Trooth's witness key with the response signature of `docs/spec/response-signatures.md`. The routes are served by `src/serve/routes.ts` over `src/serve/ledger-port.ts` and the ledger (`TransparencyLog` over `D1LogStore` in the Worker), and are listed in `docs/ARCHITECTURE.md`.
+
+## How the log is stored
+
+An append and a proof never read every leaf (`src/ledger/tiles.ts`):
+
+- The right edge of the tree, the compact range (one perfect subtree root per set bit of the size, as in Certificate Transparency and transparency-dev/merkle), is kept in the `semanto_log_frontier` table. An append pushes one leaf hash and merges equal heights: O(log n) hashes. The new root is the fold of the right edge. For a log that existed before this table, the edge is computed once from the leaves and stored.
+- Every hash is also written to R2 as tiles in the transparency.dev tlog layout: level-k tiles of 256 hashes hold the roots of perfect subtrees of 256^k leaves, at `semanto/log/tile/<level>/<index>`, with a partial tile at the right edge stored as `.p/<width>`. A node of any height is read from one tile level and at most 128 hashes are folded.
+- Inclusion and consistency proofs are computed from tiles with the RFC 6962 recursion exactly; every left part of a split is one aligned tile node.
+- Appends and tree head signing are serial: one Durable Object, `LogDO` (`src/ledger/log-do.ts`, binding `LOG`), runs them one at a time, so two Workers can never append at the same size. The leaf row, the new right edge and the size are written in one D1 batch. Without the binding (tests, local runs) the in-process store refuses an append that is not serialized.
 
 ## The per-page proof document
 
@@ -100,13 +111,13 @@ A verifier works outward, and reports the first step that fails:
 
 1. The page bytes hash to `page_hash` (`page_hash_mismatch`).
 2. The page is in `pages_root` at `inclusion.index` of `inclusion.size` (`pages_root_mismatch`).
-3. With the header: it hashes to `root_hash`, carries this `pages_root`, and lists this page id and hash at that index with this version number (`root_hash_mismatch`, `manifest_mismatch`); the company's signature over the header checks out with `typ` `semanto-version` (`unknown_key`, `bad_signature`, `wrong_type`, `expired`).
+3. With the header: it hashes to `root_hash`, carries this `pages_root`, and lists this page id and hash at that index with this version number (`root_hash_mismatch`, `manifest_mismatch`); the company's signature over the header checks out with `typ` `semanto-version` (`unknown_key`, `bad_signature`, `wrong_type`, `payload_mismatch`, `key_revoked`), with the company's keys only and the key judged at the signature's `iat`.
 4. Trooth's witness statement over `{ root_hash, witnessed_at }` checks out (`witness_<reason>`).
 5. The leaf record hashes to `leaf_hash` and names this `root_hash` (`log_leaf_mismatch`).
 6. The leaf is under `ledger.root_hash` at `index` of `tree_size` (`log_inclusion_failed`).
 7. The tree head JWS checks out with Trooth's key and names that size and root (`tree_head_<reason>`, `tree_head_mismatch`).
 
-Without the header, steps 3 is skipped and the verifier says so; the rest still run. `semanto-verify page <url>` in any kit fetches the page, the keys, the proof and the header and prints each step.
+Every step is required. Without the header the proof fails (`header_absent`); without the company's signature, `signature_absent`; without the witness, `witness_absent`; without the ledger section, `log_absent`. A reader that knowingly accepts a page with no witness or no log entry yet passes `allowUnwitnessed` or `allowUnlogged` (`--allow-unwitnessed`, `--allow-unlogged`), and the result lists what was absent. Steps 4 and 7 use Trooth's keys only. `semanto-verify page <url>` in any kit fetches the page, the keys, the proof and the header and prints each step.
 
 ## Validity and revocation
 

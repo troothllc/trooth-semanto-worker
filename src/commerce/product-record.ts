@@ -14,7 +14,7 @@
 import { canonicalize } from "../core/canonical";
 import { digest } from "../core/hash";
 import { semantoId, isSemantoId } from "../core/ids";
-import { signObject, verifyJws, JWS_TYPES, type CompactJws } from "../core/jws";
+import { signObject, verifyJws, JWS_TYPES, type CompactJws, type JwsFailure } from "../core/jws";
 import type { PrivateJwk, PublicJwk } from "../core/keys";
 import type { Evidence, ValidationIssue } from "../core/semanto";
 
@@ -228,7 +228,7 @@ export async function signProductRecord(input: ProductRecordInput, priv: Private
 
 export type ProductRecordVerification =
   | { ok: true; record: ProductRecord; kid: string }
-  | { ok: false; reason: "malformed" | "unknown_key" | "bad_signature" | "wrong_type" | "not_yet_valid" | "expired" | "id_mismatch" | "invalid_record"; issues?: ValidationIssue[] };
+  | { ok: false; reason: JwsFailure | "id_mismatch" | "invalid_record"; issues?: ValidationIssue[] };
 
 export async function verifyProductRecord(
   jws: string,

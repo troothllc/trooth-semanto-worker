@@ -8,9 +8,17 @@
 // one adapters/shared/sign-request.mjs builds and src/core/httpsig.ts
 // verifies: components "@method" "@target-uri" "content-digest" "content-type",
 // parameters created, expires, keyid (RFC 7638 thumbprint), alg="ed25519",
-// tag="trooth-connector". The key pair is made once on this site; the public
-// half is shown on the settings page for the owner to paste into the Trooth
-// dashboard, the private half stays in the options table and is never shown.
+// nonce (fresh per request, claimed once by the API), tag="trooth-connector".
+// The key pair is made once on this site; the public half is shown on the
+// settings page for the owner to paste into the Trooth dashboard, the private
+// half stays in the options table and is never shown.
+//
+// sign_forwarding() vouches for a reader's request this site forwards to the
+// API: Trooth-Forwarded-Authority (the host the reader addressed) and
+// Trooth-Forwarded-For (its address), signed with the same key over @method,
+// @target-uri, those two fields and the reader's Signature, Signature-Input
+// and Signature-Agent, in the Trooth-Connector-Signature fields
+// (src/readers/forwarded.ts verifies it).
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
@@ -76,6 +84,11 @@ final class Trooth_Semanto_Signer {
 		return '"' . str_replace( array( '\\', '"' ), array( '\\\\', '\\"' ), $s ) . '"';
 	}
 
+	/** A fresh nonce: 16 random bytes, base64url. */
+	public static function nonce(): string {
+		return self::b64url( random_bytes( 16 ) );
+	}
+
 	/**
 	 * The headers for a signed POST: Content-Type, Content-Digest, Signature-Input, Signature.
 	 *
@@ -88,7 +101,7 @@ final class Trooth_Semanto_Signer {
 		}
 		$created = $created ?? time();
 		$digest  = 'sha-256=:' . base64_encode( hash( 'sha256', $body, true ) ) . ':';
-		$params  = ';created=' . $created . ';expires=' . ( $created + $ttl ) . ';keyid=' . self::sf_string( $k['kid'] ) . ';alg="ed25519";tag=' . self::sf_string( self::TAG );
+		$params  = ';created=' . $created . ';expires=' . ( $created + $ttl ) . ';keyid=' . self::sf_string( $k['kid'] ) . ';alg="ed25519";nonce=' . self::sf_string( self::nonce() ) . ';tag=' . self::sf_string( self::TAG );
 		$inner   = '("@method" "@target-uri" "content-digest" "content-type")' . $params;
 		$base    = implode(
 			"\n",
@@ -108,6 +121,45 @@ final class Trooth_Semanto_Signer {
 			'Content-Digest'  => $digest,
 			'Signature-Input' => 'sig1=' . $inner,
 			'Signature'       => 'sig1=:' . base64_encode( $sig ) . ':',
+		);
+	}
+
+	/**
+	 * The two Trooth-Connector-Signature fields for a forwarded GET. $headers must
+	 * hold Trooth-Forwarded-Authority, Trooth-Forwarded-For, Signature,
+	 * Signature-Input and Signature-Agent. Null when this server cannot sign.
+	 *
+	 * @param array<string,string> $headers
+	 * @return array<string,string>|null
+	 */
+	public static function sign_forwarding( string $url, array $headers, ?int $created = null, int $ttl = 300 ): ?array {
+		$k = self::key();
+		if ( ! $k ) {
+			return null;
+		}
+		$lower = array();
+		foreach ( $headers as $name => $value ) {
+			$lower[ strtolower( $name ) ] = trim( preg_replace( "/[\r\n]+[ \t]+/", ' ', (string) $value ) );
+		}
+		$names = array( 'trooth-forwarded-authority', 'trooth-forwarded-for', 'signature', 'signature-input', 'signature-agent' );
+		foreach ( $names as $n ) {
+			if ( ! isset( $lower[ $n ] ) ) {
+				return null;
+			}
+		}
+		$created = $created ?? time();
+		$params  = ';created=' . $created . ';expires=' . ( $created + $ttl ) . ';keyid=' . self::sf_string( $k['kid'] ) . ';alg="ed25519";nonce=' . self::sf_string( self::nonce() ) . ';tag=' . self::sf_string( self::TAG );
+		$inner   = '("@method" "@target-uri" "trooth-forwarded-authority" "trooth-forwarded-for" "signature" "signature-input" "signature-agent")' . $params;
+		$lines   = array( '"@method": GET', '"@target-uri": ' . $url );
+		foreach ( $names as $n ) {
+			$lines[] = '"' . $n . '": ' . $lower[ $n ];
+		}
+		$lines[] = '"@signature-params": ' . $inner;
+		$pair    = sodium_crypto_sign_seed_keypair( self::b64url_decode( $k['d'] ) );
+		$sig     = sodium_crypto_sign_detached( implode( "\n", $lines ), sodium_crypto_sign_secretkey( $pair ) );
+		return array(
+			'Trooth-Connector-Signature-Input' => 'adapter=' . $inner,
+			'Trooth-Connector-Signature'       => 'adapter=:' . base64_encode( $sig ) . ':',
 		);
 	}
 

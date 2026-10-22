@@ -31,7 +31,13 @@ export interface KeyBindingData {
   level: BindingLevel;
   /** When the key may be used, from the JWK Set, when set. */
   exp: string | null;
+  /** The signing policy and how many accounts the workspace has. Two officers need two distinct accounts. */
+  signing?: { officers: "single" | "two_officer"; accounts: number };
 }
+
+/** Shown while a two-officer company has fewer than two accounts: it cannot sign yet (src/pipeline.ts TWO_OFFICER_NOTE). */
+export const TWO_OFFICER_TEXT =
+  "Two-officer signing needs two different people with their own accounts. Your workspace has one account today, so a version cannot be signed until a second person joins (team seats). Turn two-officer signing off in Settings to sign with one approval.";
 
 export interface KeyBindingPanelProps {
   binding: KeyBindingData;
@@ -66,6 +72,12 @@ export function KeyBindingPanel({ binding, onRotate, rotating = false }: KeyBind
           {rotating ? "Rotating" : "Rotate key"}
         </button>
       </div>
+
+      {binding.signing && binding.signing.officers === "two_officer" && binding.signing.accounts < 2 ? (
+        <p role="status" className="border-b border-hairline px-5 py-3 text-[13px] text-text-primary">
+          {TWO_OFFICER_TEXT}
+        </p>
+      ) : null}
 
       <dl className="divide-y divide-hairline text-[13.5px]">
         <div className="grid grid-cols-1 gap-x-6 gap-y-1 px-5 py-3 sm:grid-cols-[minmax(0,12rem)_minmax(0,1fr)]">
@@ -121,7 +133,7 @@ export function KeyBindingPanel({ binding, onRotate, rotating = false }: KeyBind
           </div>
         ) : null}
       </dl>
-      <p className="border-t border-hairline px-5 py-3 text-[12.5px] text-text-secondary">Rotating publishes a new key beside the old one, signs new versions with it, and retires the old key after every signature made with it has expired. Nothing already served stops working.</p>
+      <p className="border-t border-hairline px-5 py-3 text-[12.5px] text-text-secondary">Rotating publishes a new key beside the old one and signs new versions with it. A version signed with the old key still checks out after the old key retires, because a key is judged at the moment it signed. Nothing already served stops working.</p>
     </section>
   );
 }

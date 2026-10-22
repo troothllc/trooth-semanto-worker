@@ -87,7 +87,7 @@ export async function buildPageProof(file: SemantoFile, page_id: string, log: Lo
   };
 }
 
-export type CheckResult = "ok" | "failed" | "not_checked";
+export type CheckResult = "ok" | "failed" | "not_checked" | "absent";
 
 export interface ProofVerification {
   ok: boolean;
@@ -102,19 +102,33 @@ export interface ProofVerification {
     ledger_tree_head: CheckResult;
   };
   failures: string[];
+  /** Sentences a reader can weigh that do not fail the proof, such as a key revoked after signing. */
+  notes: string[];
 }
 
+type Resolver = (kid: string) => Promise<PublicJwk | null> | PublicJwk | null;
+
 export interface VerifyProofOptions {
-  /** The version header, when the reader fetched it; lets the proof be tied to root_hash and the company signature be checked. */
+  /** The version header. Required: without it the proof is not tied to root_hash and the result is not ok. */
   header?: SemantoHeader;
-  /** Resolve a kid to a public key: the company's JWKS and Trooth's witness keys. Without it, signatures are not checked. */
-  resolveKey?: (kid: string) => Promise<PublicJwk | null> | PublicJwk | null;
+  /** The company's keys only (its domain JWKS). The company signature resolves here and nowhere else. */
+  resolveCompanyKey?: Resolver;
+  /** Trooth's keys only. The witness statement and the signed tree head resolve here and nowhere else. */
+  resolveTroothKey?: Resolver;
   at?: Date;
+  /** Accept a proof with no witness statement (the witness check reads "absent" and does not fail). */
+  allowUnwitnessed?: boolean;
+  /** Accept a proof with no log entry (the ledger checks read "absent" and do not fail). */
+  allowUnlogged?: boolean;
 }
 
 /**
- * Recompute everything offline. A check is "not_checked" only when the input
- * it needs was not given; any check that runs and fails makes ok false.
+ * Recompute everything offline, strictly. The header and the company
+ * signature are required; the witness statement and the log entry are
+ * required unless the caller passes allowUnwitnessed or allowUnlogged, and a
+ * missing one is reported as "absent", never skipped. Company signatures
+ * resolve only against the company's keys and Trooth's statements only
+ * against Trooth's keys, so a company key can never pass as Trooth's witness.
  */
 export async function verifyProof(proof: PageProof, pageBytes: Uint8Array, opts: VerifyProofOptions = {}): Promise<ProofVerification> {
   const checks: ProofVerification["checks"] = {
@@ -128,17 +142,25 @@ export async function verifyProof(proof: PageProof, pageBytes: Uint8Array, opts:
     ledger_tree_head: "not_checked",
   };
   const failures: string[] = [];
+  const notes: string[] = [];
   const fail = (k: keyof typeof checks, why: string) => {
     checks[k] = "failed";
     failures.push(why);
   };
+  const missing = (k: keyof typeof checks, state: "absent" | "not_checked", why: string, allowed = false) => {
+    checks[k] = state;
+    if (allowed) notes.push(why);
+    else failures.push(why);
+  };
 
   if (proof.object !== "semanto.proof" || !isDigest(proof.page_hash) || !isDigest(proof.pages_root) || !isDigest(proof.root_hash)) {
     fail("page_hash", "the proof is not a semanto.proof with full digests");
-    return { ok: false, checks, failures };
+    return { ok: false, checks, failures, notes };
   }
 
+  // A page served behind its live copy carries a notice before the signed bytes (Trooth-Page-Hash covers the whole body; the notice is removed here and the rest must hash to page_hash).
   const bytes = stripBehindNotice(pageBytes);
+  if (bytes.length !== pageBytes.length) notes.push("the body carried the behind notice; it was removed before hashing");
   if ((await digest(bytes)) === proof.page_hash) checks.page_hash = "ok";
   else fail("page_hash", "the page bytes do not hash to page_hash");
 
@@ -158,23 +180,35 @@ export async function verifyProof(proof: PageProof, pageBytes: Uint8Array, opts:
     const rh = await computeRootHash(h);
     if (h.pages_root === proof.pages_root && rh === proof.root_hash && entry?.id === proof.page_id && entry.hash === proof.page_hash && h.version === proof.version) checks.header = "ok";
     else fail("header", "the header does not bind this page to root_hash");
+  } else {
+    missing("header", "absent", "the version header was not given, so the proof is not tied to a signed version");
   }
 
-  if (opts.resolveKey) {
-    if (proof.signature && opts.header) {
-      const r = await verifyJws(proof.signature, opts.resolveKey, { expectTyp: JWS_TYPES.semantoVersion, payload: opts.header, at: opts.at });
-      if (r.ok) checks.signature = "ok";
-      else fail("signature", `the company signature did not verify: ${r.reason}`);
-    }
-    if (proof.witness && proof.witnessed_at) {
-      const r = await verifyJws(proof.witness, opts.resolveKey, {
-        expectTyp: JWS_TYPES.witness,
-        payload: { root_hash: proof.root_hash, witnessed_at: proof.witnessed_at },
-        at: opts.at,
-      });
-      if (r.ok) checks.witness = "ok";
-      else fail("witness", `the witness statement did not verify: ${r.reason}`);
-    }
+  // The company signature: required, and resolved against the company's keys only.
+  if (!proof.signature) missing("signature", "absent", "the proof carries no company signature");
+  else if (!opts.header) missing("signature", "not_checked", "the company signature cannot be checked without the version header");
+  else if (!opts.resolveCompanyKey) missing("signature", "not_checked", "no company keys were given, so the company signature was not checked");
+  else {
+    const r = await verifyJws(proof.signature, opts.resolveCompanyKey, { expectTyp: JWS_TYPES.semantoVersion, payload: opts.header, at: opts.at });
+    if (r.ok) {
+      checks.signature = "ok";
+      notes.push(...r.notes.map((n) => `company signature: ${n}`));
+    } else fail("signature", `the company signature did not verify: ${r.reason}`);
+  }
+
+  // Trooth's witness statement: resolved against Trooth's keys only.
+  if (!proof.witness || !proof.witnessed_at) missing("witness", "absent", "the proof carries no witness statement", opts.allowUnwitnessed);
+  else if (!opts.resolveTroothKey) missing("witness", "not_checked", "no Trooth keys were given, so the witness statement was not checked", opts.allowUnwitnessed);
+  else {
+    const r = await verifyJws(proof.witness, opts.resolveTroothKey, {
+      expectTyp: JWS_TYPES.witness,
+      payload: { root_hash: proof.root_hash, witnessed_at: proof.witnessed_at },
+      at: opts.at,
+    });
+    if (r.ok) {
+      checks.witness = "ok";
+      notes.push(...r.notes.map((n) => `witness statement: ${n}`));
+    } else fail("witness", `the witness statement did not verify: ${r.reason}`);
   }
 
   if (proof.ledger) {
@@ -199,15 +233,21 @@ export async function verifyProof(proof: PageProof, pageBytes: Uint8Array, opts:
     } catch {
       fail("ledger_inclusion", "the log inclusion proof is malformed");
     }
-    if (opts.resolveKey) {
-      const r = await verifyJws(l.tree_head_jws, opts.resolveKey, { expectTyp: JWS_TYPES.treeHead, at: opts.at });
+    if (!opts.resolveTroothKey) missing("ledger_tree_head", "not_checked", "no Trooth keys were given, so the signed tree head was not checked", opts.allowUnlogged);
+    else {
+      // No expected payload is known beside the JWS, so the returned payload is compared field by field with the tree the proof names.
+      const r = await verifyJws(l.tree_head_jws, opts.resolveTroothKey, { expectTyp: JWS_TYPES.treeHead, at: opts.at });
       const p = r.ok ? (r.payload as { tree_size?: number; root_hash?: string }) : null;
       if (r.ok && p && p.tree_size === l.tree_size && p.root_hash === l.root_hash) checks.ledger_tree_head = "ok";
       else fail("ledger_tree_head", r.ok ? "the signed tree head names a different tree" : `the signed tree head did not verify: ${r.reason}`);
     }
+  } else {
+    for (const k of ["ledger_leaf", "ledger_inclusion", "ledger_tree_head"] as const) checks[k] = "absent";
+    if (opts.allowUnlogged) notes.push("the proof carries no log entry");
+    else failures.push("the proof carries no log entry");
   }
 
-  return { ok: failures.length === 0, checks, failures };
+  return { ok: failures.length === 0, checks, failures, notes };
 }
 
 // ---------------------------------------------------------------- one-call verify

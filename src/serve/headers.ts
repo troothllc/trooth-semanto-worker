@@ -13,17 +13,28 @@
 //   x-markdown-tokens, x-original-tokens: Cloudflare's names (Markdown for
 //     Agents, 26 Feb 2026) so a reader needs one code path.
 //   Trooth-Contract, Trooth-Semanto-Version, Trooth-Page-Hash: the proof
-//     headers. No X- prefix (RFC 6648).
+//     headers. Trooth-Page-Hash is ALWAYS the digest of the exact body bytes
+//     of this response, so a reader can check it against Content-Digest and
+//     the body. When the body is derived from a signed page (the page's
+//     JSON-LD, the page with the behind notice, its proof object),
+//     Trooth-Signed-Page-Hash carries the manifest hash of that page. No X-
+//     prefix (RFC 6648).
 //   Link: canonical, alternate and the Trooth relations (RFC 8288).
 //   Content-Signal: the company's signed content signals (contentsignals.org).
 //   Content-Digest (RFC 9530) then Signature-Input and Signature (RFC 9421)
-//     over SEMANTO_RESPONSE_COMPONENTS, tag "trooth-semanto", 300 seconds.
+//     over SEMANTO_RESPONSE_COMPONENTS plus every optional component the
+//     response carries (Trooth-Signed-Page-Hash, Trooth-Signed-By,
+//     Trooth-Semanto-State, Location, Content-Signal, Link), tag
+//     "trooth-semanto". The signature lives as long as a cache may serve the
+//     response: max-age plus stale-while-revalidate (3,900 seconds). The
+//     freshness of the statement is carried by the signed version's own
+//     validity, not by the transport signature.
 //     The company's hosted key signs when custody is hosted; otherwise
 //     Trooth's witness key signs and Trooth-Signed-By: witness says so.
 //   Access-Control-Allow-Origin * and Expose-Headers, so a page script or an
 //     agent in a browser can read every Trooth header.
 
-import { contentDigest, signMessage, SEMANTO_RESPONSE_COMPONENTS } from "../core/httpsig";
+import { contentDigest, signMessage, semantoResponseComponents } from "../core/httpsig";
 import { digest } from "../core/hash";
 import { SEMANTO_CONTRACT } from "../core/semanto";
 import type { PrivateJwk } from "../core/keys";
@@ -40,9 +51,12 @@ export const CONTENT_TYPES: Record<ServedRepresentation, string> = {
   tsv: "text/tab-separated-values; charset=utf-8",
 };
 
-export const CACHE_CONTROL = "public, max-age=300, stale-while-revalidate=3600";
+export const CACHE_MAX_AGE_SECONDS = 300;
+export const CACHE_STALE_WHILE_REVALIDATE_SECONDS = 3600;
+export const CACHE_CONTROL = `public, max-age=${CACHE_MAX_AGE_SECONDS}, stale-while-revalidate=${CACHE_STALE_WHILE_REVALIDATE_SECONDS}`;
 export const SIGNATURE_TAG = "trooth-semanto";
-export const SIGNATURE_TTL_SECONDS = 300;
+/** expires = created + max-age + stale-while-revalidate, so a response served at the end of its cache life still verifies. */
+export const SIGNATURE_TTL_SECONDS = CACHE_MAX_AGE_SECONDS + CACHE_STALE_WHILE_REVALIDATE_SECONDS;
 
 export const REL = {
   semanto: "https://trooth.co/rel/semanto",
@@ -57,6 +71,7 @@ export const EXPOSED_HEADERS = [
   "Content-Signal",
   "ETag",
   "Link",
+  "Location",
   "Retry-After",
   "Signature",
   "Signature-Input",
@@ -65,6 +80,7 @@ export const EXPOSED_HEADERS = [
   "Trooth-Semanto-State",
   "Trooth-Semanto-Version",
   "Trooth-Signed-By",
+  "Trooth-Signed-Page-Hash",
   "x-markdown-tokens",
   "x-original-tokens",
 ] as const;
@@ -89,15 +105,25 @@ export interface ResponseSpec {
   body: Uint8Array;
   /** The smv_ id of the version the bytes belong to; "none" when there is no signed version (problems before a first signature). */
   version_id: string | null;
-  /** The digest the proof is about. Defaults to the digest of the bytes served. */
+  /**
+   * The manifest hash of the signed page this body is derived from. Sent as
+   * Trooth-Signed-Page-Hash when it differs from the digest of the body;
+   * Trooth-Page-Hash is always the digest of the body.
+   */
   page_hash?: string | null;
+  /** A signed redirect: Location is set and covered by the signature. */
+  location?: string | null;
   markdown_tokens?: number | null;
   original_tokens?: number | null;
   content_signals?: ContentSignals | null;
   links?: LinkTargets;
   signer: { key: PrivateJwk; by: "company" | "witness" };
-  /** The live page changed after the last signature; the last signed bytes are served. */
-  state?: "behind" | null;
+  /**
+   * Trooth-Semanto-State: "behind" when the live page changed after the last
+   * signature (the last signed bytes are served); "witnessed-not-signed" for a
+   * Semanto Basic record, which Trooth witnessed and the company did not sign.
+   */
+  state?: "behind" | "witnessed-not-signed" | null;
   retry_after_seconds?: number | null;
   /** Clock, so the signature's created and expires are stable in tests. */
   now: Date;
@@ -154,7 +180,9 @@ export async function buildResponse(spec: ResponseSpec, request: { ifNoneMatch?:
   if (spec.original_tokens !== undefined && spec.original_tokens !== null) h["x-original-tokens"] = String(spec.original_tokens);
   h["Trooth-Contract"] = String(SEMANTO_CONTRACT);
   h["Trooth-Semanto-Version"] = spec.version_id ?? "none";
-  h["Trooth-Page-Hash"] = spec.page_hash ?? servedDigest;
+  h["Trooth-Page-Hash"] = servedDigest;
+  if (spec.page_hash && spec.page_hash !== servedDigest) h["Trooth-Signed-Page-Hash"] = spec.page_hash;
+  if (spec.location) h["Location"] = spec.location;
   const link = spec.links ? formatLink(spec.links) : null;
   if (link) h["Link"] = link;
   if (spec.content_signals) h["Content-Signal"] = contentSignalHeader(spec.content_signals);
@@ -167,7 +195,7 @@ export async function buildResponse(spec: ResponseSpec, request: { ifNoneMatch?:
 
   h["Content-Digest"] = await contentDigest(spec.body);
   const signed = await signMessage({ kind: "response", status, headers: h }, spec.signer.key, {
-    components: [...SEMANTO_RESPONSE_COMPONENTS],
+    components: semantoResponseComponents(h),
     created: Math.floor(spec.now.getTime() / 1000),
     ttlSeconds: SIGNATURE_TTL_SECONDS,
     tag: SIGNATURE_TAG,

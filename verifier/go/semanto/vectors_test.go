@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -45,19 +46,30 @@ type outcome struct {
 	keyid     string
 	agent     string
 	versionID string
+	notes     []string
 }
 
 func run(t *testing.T, v map[string]any, keys KeySet, semanto map[string]any) outcome {
 	now := getStr(v, "now")
+	// A vector may carry its own keys (a rotated or revoked key) and its own page bytes (a forged page).
+	if own := getMap(v, "keys"); own != nil {
+		keys = CollectKeys(own)
+	}
 	switch getStr(v, "kind") {
 	case "semanto-file":
-		pagesDoc := readVector(t, "pages.json")
+		byURL := getMap(v, "pages_by_url")
+		if byURL == nil {
+			byURL = getMap(readVector(t, "pages.json"), "by_url")
+		}
 		pages := map[string][]byte{}
-		for url, md := range getMap(pagesDoc, "by_url") {
+		for url, md := range byURL {
 			pages[url] = []byte(md.(string))
 		}
 		r := VerifySemanto(getMap(v, "file"), pages, keys, at(t, now), nil)
-		return outcome{r.OK, r.Reason, r.State, "", "", r.VersionID}
+		return outcome{r.OK, r.Reason, r.State, "", "", r.VersionID, r.Notes}
+	case "tree-head":
+		r := VerifyTreeHead(getMap(v, "tree_head"), keys, at(t, now))
+		return outcome{ok: r.OK, reason: r.Reason}
 	case "page-proof":
 		r := VerifyPageProof(getMap(v, "proof"), []byte(getStr(v, "page_markdown")), keys, at(t, now), getMap(v, "header"))
 		return outcome{ok: r.OK, reason: r.Reason, versionID: r.VersionID}
@@ -146,6 +158,17 @@ func TestVectors(t *testing.T) {
 			}
 			if id := getStr(expect, "version_id"); id != "" && got.versionID != id {
 				t.Fatalf("%s: version_id %q want %q", name, got.versionID, id)
+			}
+			if n := getStr(expect, "note"); n != "" {
+				found := false
+				for _, x := range got.notes {
+					if strings.Contains(x, n) {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("%s: no note containing %q in %v", name, n, got.notes)
+				}
 			}
 		})
 	}
@@ -240,8 +263,9 @@ func TestTamperingInEachLayer(t *testing.T) {
 	if r := VerifyPageProof(getMap(wrongLeaf, "proof"), []byte(getStr(v, "page_markdown")), keys, now, getMap(v, "header")); r.Reason != "log_leaf_mismatch" {
 		t.Errorf("wrong leaf: %+v", r)
 	}
-	if r := VerifyPageProof(getMap(v, "proof"), []byte(getStr(v, "page_markdown")), keys, now, nil); !r.OK {
-		t.Errorf("no header should still pass the hash checks: %+v", r)
+	// Strict: without the version header the proof is not tied to a signed version.
+	if r := VerifyPageProof(getMap(v, "proof"), []byte(getStr(v, "page_markdown")), keys, now, nil); r.OK || r.Reason != "header_absent" {
+		t.Errorf("no header must fail with header_absent: %+v", r)
 	}
 	resp := readVector(t, "response.json")
 	rr := getMap(resp, "response")
@@ -290,5 +314,12 @@ func TestStateOf(t *testing.T) {
 	later := map[string]any{"revocations": []any{map[string]any{"kind": "version", "ref": smv, "revoked_at": "2026-10-23T00:00:00Z"}}}
 	if s := StateOf(file, at(t, "2026-10-22T12:00:10Z"), later, 0); s != "current" {
 		t.Errorf("future revocation: %s", s)
+	}
+}
+
+// Review finding 19: the kit's registry matches src/core/jws.ts JWS_TYPES, marketplaceCatalog included.
+func TestJWSTypesIncludeEveryCoreType(t *testing.T) {
+	if JWSTypes["marketplaceCatalog"] != "https://trooth.co/types/marketplace-catalog" || len(JWSTypes) != 13 {
+		t.Fatalf("JWSTypes: %v", JWSTypes)
 	}
 }

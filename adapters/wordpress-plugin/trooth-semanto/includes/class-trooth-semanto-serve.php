@@ -66,6 +66,13 @@ final class Trooth_Semanto_Serve {
 				$request_headers[ $name ] = (string) wp_unslash( $_SERVER[ $key ] ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
 			}
 		}
+		// For a signed reader the client vouches for the host it addressed and its address (Trooth-Forwarded-Authority, Trooth-Forwarded-For).
+		if ( ! empty( $_SERVER['HTTP_HOST'] ) ) {
+			$request_headers['Host'] = strtolower( (string) wp_unslash( $_SERVER['HTTP_HOST'] ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		}
+		if ( ! empty( $_SERVER['REMOTE_ADDR'] ) ) {
+			$request_headers['Client-Address'] = (string) wp_unslash( $_SERVER['REMOTE_ADDR'] ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		}
 		$res = $this->client->get( $decision['url'], $request_headers );
 		if ( is_wp_error( $res ) ) {
 			$this->problem( 503, 'The signed copy could not be fetched right now. Try again in a minute.' );
@@ -83,11 +90,12 @@ final class Trooth_Semanto_Serve {
 		}
 		status_header( $status );
 		foreach ( $headers as $name => $value ) {
+			if ( 'Vary' === $name ) {
+				continue;
+			}
 			header( $name . ': ' . $value, true );
 		}
-		if ( ! isset( $headers['Vary'] ) ) {
-			header( 'Vary: Accept', true );
-		}
+		header( 'Vary: ' . self::merge_vary( $headers['Vary'] ?? '' ), true );
 		if ( ! isset( $headers['Cache-Control'] ) ) {
 			header( 'Cache-Control: public, max-age=60, must-revalidate', true );
 		}
@@ -122,6 +130,18 @@ final class Trooth_Semanto_Serve {
 		exit;
 	}
 
+	/** The Vary value with Accept added once to whatever was there. */
+	public static function merge_vary( string $existing ): string {
+		$parts = array_filter( array_map( 'trim', explode( ',', $existing ) ) );
+		foreach ( $parts as $p ) {
+			if ( 0 === strcasecmp( $p, 'Accept' ) || '*' === $p ) {
+				return implode( ', ', $parts );
+			}
+		}
+		$parts[] = 'Accept';
+		return implode( ', ', $parts );
+	}
+
 	public function add_proof_headers(): void {
 		if ( is_admin() || headers_sent() ) {
 			return;
@@ -130,6 +150,8 @@ final class Trooth_Semanto_Serve {
 		if ( $decision['serve'] ) {
 			return;
 		}
+		// The HTML answer depends on Accept too (a markdown reader gets another answer at this url), so caches must key on it.
+		header( 'Vary: Accept', false );
 		foreach ( Trooth_Semanto_Negotiate::proof_headers( $this->client->manifest(), self::request_path(), $this->client->api_root() ) as $name => $value ) {
 			header( $name . ': ' . $value, 'Link' !== $name );
 		}

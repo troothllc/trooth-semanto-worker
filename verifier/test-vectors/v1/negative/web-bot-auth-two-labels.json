@@ -1,0 +1,21 @@
+{
+  "kind": "web-bot-auth-request",
+  "description": "The Web Bot Auth request with a second web-bot-auth label (a decoy with a fresh nonce and a signature of zeros) in front of the real one. More than one web-bot-auth label is refused.",
+  "now": "2026-10-22T12:00:10Z",
+  "now_epoch": 1792670410,
+  "request": {
+    "method": "GET",
+    "url": "https://acme.com/security",
+    "headers": {
+      "host": "acme.com",
+      "accept": "text/markdown",
+      "signature-agent": "\"https://agent.fixture.example\"",
+      "Signature-Input": "a=(\"@authority\" \"signature-agent\");created=1792670400;expires=1792670460;keyid=\"j-oBnmAqa6Bm0NxoqL4f5Z1sVznUw0ZL43LRvCx4LCw\";alg=\"ed25519\";nonce=\"fixture-nonce-0002\";tag=\"web-bot-auth\", sig1=(\"@authority\" \"signature-agent\");created=1792670400;expires=1792670460;keyid=\"j-oBnmAqa6Bm0NxoqL4f5Z1sVznUw0ZL43LRvCx4LCw\";alg=\"ed25519\";nonce=\"fixture-nonce-0001\";tag=\"web-bot-auth\"",
+      "Signature": "a=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==:, sig1=:qOjisuuTpkn+Y5eVzVufsAYzjdZ/qzQOu0y7Xjrb+u8cVDexYlquyor1CwY4YcDbeoDcvCA/ocGAaff9zhY6Bw==:"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "reason": "more_than_one_label"
+  }
+}

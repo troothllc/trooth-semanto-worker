@@ -42,6 +42,21 @@ max_retries = 3
 binding = "TROOTH_OS"
 service = "trooth-os-worker-f"
 
+# Durable Objects: NonceDO claims Web Bot Auth and connector nonces atomically (src/readers/nonce-do.ts);
+# LogDO is the one writer for the public log, so appends are serialized (src/ledger/log-do.ts).
+[[durable_objects.bindings]]
+name = "NONCES"
+class_name = "NonceDO"
+
+[[durable_objects.bindings]]
+name = "LOG"
+class_name = "LogDO"
+
+# The migration that creates both classes (SQLite-backed storage). Migrations apply to every environment.
+[[migrations]]
+tag = "v1-nonce-and-log-durable-objects"
+new_sqlite_classes = ["NonceDO", "LogDO"]
+
 [env.production]
 name = "trooth-semanto-worker"
 workers_dev = false
@@ -81,3 +96,11 @@ max_retries = 3
 [[env.production.services]]
 binding = "TROOTH_OS"
 service = "trooth-os-worker-f"
+
+[[env.production.durable_objects.bindings]]
+name = "NONCES"
+class_name = "NonceDO"
+
+[[env.production.durable_objects.bindings]]
+name = "LOG"
+class_name = "LogDO"

@@ -14,7 +14,7 @@ import { canonicalize } from "../core/canonical";
 import { fromBase64Url, fromUtf8 } from "../core/encoding";
 import { digest } from "../core/hash";
 import { semantoId, isSemantoId } from "../core/ids";
-import { signObject, verifyJws, JWS_TYPES } from "../core/jws";
+import { signObject, verifyJws, JWS_TYPES, type JwsFailure } from "../core/jws";
 import type { PrivateJwk, PublicJwk } from "../core/keys";
 import type { ValidationIssue } from "../core/semanto";
 
@@ -198,7 +198,7 @@ export async function reSignOffer(previous: Offer, changes: Partial<OfferInput>,
 
 export type OfferVerification =
   | { ok: true; offer: Offer; kid: string }
-  | { ok: false; reason: "malformed" | "unknown_key" | "bad_signature" | "wrong_type" | "not_yet_valid" | "expired" | "id_mismatch" | "invalid_offer"; issues?: ValidationIssue[] };
+  | { ok: false; reason: JwsFailure | "id_mismatch" | "invalid_offer"; issues?: ValidationIssue[] };
 
 /**
  * Verify the signature and the id. The JWS exp is the offer's not_after, so an

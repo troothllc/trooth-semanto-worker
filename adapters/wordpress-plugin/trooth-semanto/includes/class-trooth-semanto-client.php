@@ -40,13 +40,26 @@ final class Trooth_Semanto_Client {
 		$key    = self::TRANSIENT_PREFIX . md5( $url . '|' . ( $request_headers['Accept'] ?? '' ) );
 		$cached = get_transient( $key );
 		$fresh  = is_array( $cached ) && isset( $cached['fetched'] ) && ( time() - (int) $cached['fetched'] ) < self::TTL;
-		if ( $fresh ) {
+		// A reader that signed its request (Web Bot Auth) always reaches the API, so its read can be proven and recorded.
+		$signed_reader = ! empty( $request_headers['Signature-Input'] ) && ! empty( $request_headers['Signature'] ) && ! empty( $request_headers['Signature-Agent'] );
+		if ( $fresh && ! $signed_reader ) {
 			return $this->answer_from( $cached, $request_headers );
 		}
 		$headers = array();
 		foreach ( array( 'Accept', 'Accept-Language', 'Signature-Input', 'Signature', 'Signature-Agent' ) as $h ) {
 			if ( ! empty( $request_headers[ $h ] ) ) {
 				$headers[ $h ] = $request_headers[ $h ];
+			}
+		}
+		if ( $signed_reader ) {
+			// Vouch for the host the reader addressed and its address, signed with the connector key.
+			$headers['Trooth-Forwarded-Authority'] = strtolower( (string) ( $request_headers['Host'] ?? wp_parse_url( home_url(), PHP_URL_HOST ) ) );
+			$headers['Trooth-Forwarded-For']       = (string) ( $request_headers['Client-Address'] ?? '' );
+			$fwd = Trooth_Semanto_Signer::available() ? Trooth_Semanto_Signer::sign_forwarding( $url, $headers ) : null;
+			if ( $fwd ) {
+				$headers = array_merge( $headers, $fwd );
+			} else {
+				unset( $headers['Trooth-Forwarded-Authority'], $headers['Trooth-Forwarded-For'] );
 			}
 		}
 		if ( is_array( $cached ) && ! empty( $cached['etag'] ) ) {

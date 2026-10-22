@@ -14,12 +14,22 @@
 //   handleRequest(options)                  -> the whole adapter in one call for
 //                                              hosts with a Fetch API
 //
+// A reader that signed its request (Web Bot Auth) reaches the API with its
+// Signature fields unchanged, and, when the adapter holds a connector key
+// (TROOTH_CONNECTOR_KEY), with Trooth-Forwarded-Authority and
+// Trooth-Forwarded-For signed by that key, so the API can prove the reader
+// against the host it addressed (src/readers/forwarded.ts). Every response the
+// adapter touches, HTML included, carries Vary: Accept merged with any Vary
+// already there.
+//
 // Negotiation follows RFC 9110 section 12.5.1 with the outcomes Cloudflare's
 // Markdown for Agents documents (changelog, 26 February 2026): the same table as
 // src/core/negotiate.ts, reimplemented here because adapters never import
 // internal modules. Nothing in this file reads User-Agent. Serving by user
 // agent is cloaking under Google's spam policies (clarified for AI Overviews
 // and AI Mode on 15 May 2026); serving by Accept or path suffix is not.
+
+import { signForwarding } from "./sign-request.mjs";
 
 export const DEFAULT_API_BASE = "https://api.trooth.co";
 
@@ -36,6 +46,9 @@ export const TROOTH_HEADERS = [
   "Trooth-Contract",
   "Trooth-Semanto-Version",
   "Trooth-Page-Hash",
+  "Trooth-Signed-Page-Hash",
+  "Trooth-Signed-By",
+  "Trooth-Semanto-State",
   "Link",
   "Content-Signal",
   "x-markdown-tokens",
@@ -231,10 +244,18 @@ export function decide(path, accept, manifest, config = {}) {
   const rep = bySuffix.rep || negotiate(accept);
   if (rep === "html") return { serve: false, reason: "html" };
 
-  if (rep === "jsonld") return { serve: true, url: root + API_PATHS.facts, kind: "facts", representation: "jsonld" };
-
   const page = findPage(manifest, bySuffix.basePath);
-  if (page && page.id) return { serve: true, url: root + API_PATHS.page + encodeURIComponent(page.id), kind: "page", representation: "markdown", page };
+  if (rep === "jsonld") {
+    // The site root's /facts.jsonld is the company's facts. Any other JSON-LD request is the page's JSON-LD, fetched by
+    // path with the same path and Accept, so the bytes are the API's answer for that path.
+    if (normalizePath(pathname) === "/facts.jsonld") return { serve: true, url: root + API_PATHS.facts, kind: "facts", representation: "jsonld" };
+    if (!page && mode === "semanto_then_cloudflare_for_unsigned") return { serve: false, reason: "not_listed" };
+    return { serve: true, url: root + API_PATHS.byPath + pathname, kind: "page_jsonld", representation: "jsonld" };
+  }
+
+  // The ".md" suffix fixes the representation at the API whatever Accept the reader sent (a ".md" path with an
+  // Accept of application/ld+json is markdown here, so it must be markdown there too).
+  if (page && page.id) return { serve: true, url: root + API_PATHS.page + encodeURIComponent(page.id) + ".md", kind: "page", representation: "markdown", page };
   if (mode === "semanto_then_cloudflare_for_unsigned") return { serve: false, reason: "not_listed" };
   return { serve: true, url: root + API_PATHS.byPath + pathname, kind: "page_lookup", representation: "markdown" };
 }
@@ -292,15 +313,31 @@ export function proofHeaders(manifest, pathname, config) {
   return out;
 }
 
-/** Add proof headers to an HTML response without touching its body. Other responses pass untouched. */
+/** A Vary value with Accept added once to whatever was there ("*" already covers it). */
+export function mergeVary(existing) {
+  const parts = String(existing || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.some((p) => p === "*" || p.toLowerCase() === "accept")) return parts.join(", ");
+  return [...parts, "Accept"].join(", ");
+}
+
+/**
+ * The host's own response, with Vary: Accept merged in (the answer at this
+ * url depends on Accept, so a cache must key on it) and, on HTML, the proof
+ * headers. The body is never touched.
+ */
 export function withProofHeaders(response, manifest, pathname, config) {
-  const ct = response.headers.get("Content-Type") || "";
-  if (!/^text\/html/i.test(ct)) return response;
   const headers = new Headers(response.headers);
-  const add = proofHeaders(manifest, pathname, config);
-  for (const [k, v] of Object.entries(add)) {
-    if (k === "Link" && headers.has("Link")) headers.set("Link", `${headers.get("Link")}, ${v}`);
-    else headers.set(k, v);
+  headers.set("Vary", mergeVary(headers.get("Vary")));
+  const ct = response.headers.get("Content-Type") || "";
+  if (/^text\/html/i.test(ct)) {
+    const add = proofHeaders(manifest, pathname, config);
+    for (const [k, v] of Object.entries(add)) {
+      if (k === "Link" && headers.has("Link")) headers.set("Link", `${headers.get("Link")}, ${v}`);
+      else headers.set(k, v);
+    }
   }
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
@@ -370,12 +407,56 @@ export function memoryStore() {
 
 // ---------------------------------------------------------------- serving
 
-/** Fetch the decided URL from the API and return its bytes and the listed headers, unchanged. */
-export async function fetchSigned(decision, request, fetchImpl = globalThis.fetch, extraInit = {}) {
+/** The client address the host saw, from the headers each platform sets. The host may pass it as config.clientAddress. */
+export function clientAddress(request, config = {}) {
+  if (config.clientAddress) return String(config.clientAddress);
+  for (const name of ["CF-Connecting-IP", "Fastly-Client-IP", "True-Client-IP", "X-Real-IP"]) {
+    const v = request.headers.get(name);
+    if (v) return v.trim();
+  }
+  const xff = request.headers.get("X-Forwarded-For");
+  return xff ? xff.split(",")[0].trim() : "";
+}
+
+/** The connector key from config: a private JWK object, or its JSON (TROOTH_CONNECTOR_KEY). Null when absent or unreadable. */
+export function connectorKeyOf(config = {}) {
+  const k = config.connectorKey;
+  if (!k) return null;
+  if (typeof k === "object") return k.d && k.x && k.kid ? k : null;
+  try {
+    const j = JSON.parse(String(k));
+    return j && j.d && j.x && j.kid ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The headers for the request to the API. A reader's Signature fields pass
+ * unchanged. When the reader signed its request and the adapter holds a
+ * connector key, the host it addressed and its address are added and signed
+ * with that key, so the API can prove the reader; without a key nothing is
+ * added (an unsigned forwarded header would be ignored anyway).
+ */
+export async function forwardingHeaders(decision, request, config = {}, now = config.now || (() => Math.floor(Date.now() / 1000))) {
   const headers = forwardRequestHeaders(request.headers);
+  const key = connectorKeyOf(config);
+  const signedReader = headers.get("Signature-Input") && headers.get("Signature") && headers.get("Signature-Agent");
+  if (key && signedReader) {
+    headers.set("Trooth-Forwarded-Authority", new URL(request.url).host.toLowerCase());
+    headers.set("Trooth-Forwarded-For", clientAddress(request, config));
+    const sig = await signForwarding({ method: "GET", url: decision.url, headers, privateJwk: key, created: now() });
+    for (const [k, v] of Object.entries(sig)) headers.set(k, v);
+  }
+  return headers;
+}
+
+/** Fetch the decided URL from the API and return its bytes and the listed headers, unchanged, with Vary: Accept merged in. */
+export async function fetchSigned(decision, request, fetchImpl = globalThis.fetch, extraInit = {}, config = {}) {
+  const headers = await forwardingHeaders(decision, request, config);
   const res = await fetchImpl(decision.url, { method: request.method === "HEAD" ? "HEAD" : "GET", headers, redirect: "follow", ...extraInit });
   const out = copyHeaders(res);
-  if (!out.has("Vary")) out.set("Vary", "Accept");
+  out.set("Vary", mergeVary(out.get("Vary")));
   return new Response(res.status === 304 || request.method === "HEAD" ? null : res.body, { status: res.status, headers: out });
 }
 
@@ -390,7 +471,7 @@ export async function handleRequest({ request, config, manifestCache, fetchImpl 
   // adapter still answers by path.
   const manifest = manifestCache ? await manifestCache.get() : null;
   const decision = decide(url.pathname, request.headers.get("Accept"), manifest, { ...config, method: request.method });
-  if (decision.serve) return fetchSigned(decision, request, fetchImpl, fetchInit);
+  if (decision.serve) return fetchSigned(decision, request, fetchImpl, fetchInit, config);
   const hostResponse = await next(request);
   if (!hostResponse) return hostResponse;
   return withProofHeaders(hostResponse, manifest, url.pathname, config);
@@ -402,5 +483,7 @@ export function configFromEnv(env = {}) {
     troothId: env.TROOTH_ID,
     apiBase: env.TROOTH_API_BASE || DEFAULT_API_BASE,
     mode: normalizeMode(env.TROOTH_MODE || env.MODE),
+    // The private JWK (JSON) of this adapter's connector key, registered in the dashboard under Delivery, Connectors.
+    ...(env.TROOTH_CONNECTOR_KEY ? { connectorKey: env.TROOTH_CONNECTOR_KEY } : {}),
   };
 }

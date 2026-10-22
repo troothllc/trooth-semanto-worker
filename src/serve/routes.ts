@@ -21,7 +21,10 @@ import { negotiate } from "../core/negotiate";
 import { estimateTokens } from "../core/tokens";
 import { versionId, type SemantoFile } from "../core/semanto";
 import { buildResponse, toResponse, type LinkTargets, type ResponseSpec, type ServedRepresentation } from "./headers";
-import { behindNotice, problem, renderProblem, type Problem, type ProblemCode } from "./errors";
+import { basicNotice, behindNotice, problem, renderProblem, type Problem, type ProblemCode } from "./errors";
+import { WITNESSED_NOT_SIGNED } from "../basic/tier";
+import { withTrustState, type TrustState } from "../compiler/llms";
+import { checkAgainstRecord, type FirstPublicationDocument, type FirstPublicationRecord } from "../basic/first-publication";
 import { negotiateRoute } from "./negotiate-route";
 import { buildPageProof, verifyUrl } from "./proof";
 import { factsJsonLd, manifestMarkdown, pageJsonLd, wellKnownSemanto } from "./represent";
@@ -41,7 +44,7 @@ interface Signer {
 export interface RouteDeps {
   ports: Ports;
   /** Verify a Web Bot Auth request, when the readers module is wired. Without it, only the Signature-Agent header is recorded and proof is "none". */
-  readers?: { verify(req: Request): Promise<{ agent_key_url: string | null; proven: boolean; keyid?: string | null }> };
+  readers?: { verify(req: Request, trooth_id?: string): Promise<{ agent_key_url: string | null; proven: boolean; keyid?: string | null; address?: string | null; via_adapter?: boolean }> };
   /**
    * Workspace authorization for /os routes. Answers the caller's workspace
    * (trooth_id and role), or null to refuse. `true` is accepted from simple
@@ -55,6 +58,8 @@ export interface RouteDeps {
   commerce?: CommerceStore;
   /** Per-reader rate limit, when wired. */
   rateLimit?: (req: Request) => Promise<{ allowed: boolean; retry_after: number }>;
+  /** First-publication records (src/basic/first-publication.ts), for the public record and check routes. */
+  firstPublications?: { get(record_id: string): Promise<FirstPublicationRecord | null> };
 }
 
 /** The request pieces the handlers read. Never the user agent. */
@@ -106,13 +111,15 @@ export function createApp(deps: RouteDeps): ServeApp {
       let agent_key_url = hints.signatureAgent;
       let proven = false;
       let keyid: string | null = null;
+      let address = c.req.header("cf-connecting-ip") ?? null;
       if (deps.readers) {
-        const r = await deps.readers.verify(c.req.raw);
+        const r = await deps.readers.verify(c.req.raw, input.trooth_id);
         agent_key_url = r.agent_key_url ?? agent_key_url;
         proven = r.proven;
         keyid = r.proven ? (r.keyid ?? null) : null;
+        // Through an adapter whose connector signature checked out, the reader's address is the one it vouched for.
+        if (r.via_adapter && r.address) address = r.address;
       }
-      const address = c.req.header("cf-connecting-ip") ?? null;
       await ports.receipts.record({ ...input, agent_key_url, proof: proven ? "web_bot_auth" : "none", ...(keyid ? { keyid } : {}), read_at: ports.now().toISOString(), ...(address ? { address } : {}) });
     })().catch(() => undefined);
     try {
@@ -126,6 +133,42 @@ export function createApp(deps: RouteDeps): ServeApp {
     const p = await buildResponse({ ...spec, now: ports.now() }, { ifNoneMatch: requestHints(c).ifNoneMatch });
     return toResponse(p);
   }
+
+  /** A Semanto Basic record: Trooth witnessed it, the company did not sign it. */
+  const isBasic = (file: SemantoFile | null): boolean => !!file && file.header.state !== "signed" && !!file.witness;
+
+  /**
+   * Every Basic body carries the notice (src/basic/tier.ts WITNESSED_NOT_SIGNED):
+   * front matter on markdown and text, a "notice" member on JSON, and the
+   * notice under its Trooth IRI on JSON-LD.
+   */
+  function basicBody(rep: ServedRepresentation, body: Uint8Array): Uint8Array {
+    if (rep === "markdown" || rep === "text") {
+      const n = utf8(basicNotice(WITNESSED_NOT_SIGNED));
+      const out = new Uint8Array(n.length + body.length);
+      out.set(n, 0);
+      out.set(body, n.length);
+      return out;
+    }
+    if (rep === "json" || rep === "jsonld") {
+      try {
+        const v = JSON.parse(new TextDecoder().decode(body)) as unknown;
+        if (typeof v === "object" && v !== null && !Array.isArray(v)) return json(rep === "json" ? { ...v, tier: "basic", notice: WITNESSED_NOT_SIGNED } : { ...v, "https://trooth.co/rel/notice": WITNESSED_NOT_SIGNED });
+      } catch {
+        return body;
+      }
+    }
+    return body;
+  }
+
+  /** Send a response for a loaded file, marking a Basic record in its header and its body. */
+  async function sendFor(c: Context<Vars>, file: SemantoFile | null, spec: Omit<ResponseSpec, "now">): Promise<Response> {
+    if (!isBasic(file) || spec.status >= 300) return send(c, spec);
+    return send(c, { ...spec, body: basicBody(spec.rep, spec.body), state: "witnessed-not-signed" });
+  }
+
+  /** The trust state the llms.txt Trooth section describes. */
+  const trustState = (file: SemantoFile): TrustState => (file.header.state === "signed" && file.signature && file.witness ? "signed_and_witnessed" : file.witness ? "witnessed" : "neither");
 
   async function sendProblem(c: Context<Vars>, company: CompanyRecord | null, file: SemantoFile | null, code: ProblemCode, opts: { detail?: string; retry_after?: number } = {}): Promise<Response> {
     const hints = requestHints(c);
@@ -250,6 +293,39 @@ export function createApp(deps: RouteDeps): ServeApp {
     });
   });
 
+  // ------------------------------------------------------------ first publication (before /:trooth_id)
+
+  /** The record, its JWS and its inclusion proof in the log against the latest tree head. */
+  async function firstPublicationDocument(record_id: string): Promise<FirstPublicationDocument | null> {
+    if (!deps.firstPublications || !isSemantoId(record_id, "smb")) return null;
+    const r = await deps.firstPublications.get(record_id);
+    if (!r) return null;
+    let inclusion: FirstPublicationDocument["inclusion"] = null;
+    if (r.log) {
+      const head = await ports.log.latestTreeHead();
+      if (head) inclusion = await ports.log.inclusion(r.log.index, head.tree_size);
+    }
+    return { object: "semanto.first_publication_record", record: r.record, jws: r.jws, leaf: r.leaf, leaf_hash: r.leaf_hash, inclusion, check_url: `${base}/first-publication/check` };
+  }
+
+  const witnessSend = async (c: Context<Vars>, value: unknown): Promise<Response> => send(c, { status: 200, rep: "json", body: json(value), version_id: null, links: {}, signer: { key: await ports.keys.getWitnessKey(), by: "witness" } });
+
+  app.post(`${apiPrefix}/first-publication/check`, async (c) => {
+    const input = await readJson(c);
+    if (!input || typeof input !== "object") return sendProblem(c, null, null, "invalid_request", { detail: 'Send { "record_id": "<the smb_ record id>", "markdown": "<the text>" } as JSON.' });
+    const { record_id, markdown } = input as { record_id?: unknown; markdown?: unknown };
+    if (typeof record_id !== "string" || typeof markdown !== "string") return sendProblem(c, null, null, "invalid_request", { detail: 'Send { "record_id": "<the smb_ record id>", "markdown": "<the text>" } as JSON.' });
+    const doc = await firstPublicationDocument(record_id);
+    if (!doc) return sendProblem(c, null, null, "semanto_not_found", { detail: `No first-publication record ${record_id}.` });
+    return witnessSend(c, await checkAgainstRecord(doc, markdown));
+  });
+
+  app.get(`${apiPrefix}/first-publication/:record_id`, async (c) => {
+    const doc = await firstPublicationDocument(c.req.param("record_id"));
+    if (!doc) return sendProblem(c, null, null, "semanto_not_found", { detail: "No first-publication record with this id." });
+    return witnessSend(c, doc);
+  });
+
   // ------------------------------------------------------------ the semanto object
 
   app.get(`${apiPrefix}/:trooth_id`, async (c) => {
@@ -261,7 +337,7 @@ export function createApp(deps: RouteDeps): ServeApp {
     if (rep === "jsonld") return serveFacts(c, r);
     const body = json(file);
     recordReceipt(c, { trooth_id: company.trooth_id, version: file.header.version, page_id: null, representation: "json" });
-    return send(c, { status: 200, rep: "json", body, version_id: versionId(file.root_hash), page_hash: file.root_hash, content_signals: settings.content_signals, links: links(company, file), signer });
+    return sendFor(c, file, { status: 200, rep: "json", body, version_id: versionId(file.root_hash), content_signals: settings.content_signals, links: links(company, file), signer });
   });
 
   // ------------------------------------------------------------ versions
@@ -296,7 +372,7 @@ export function createApp(deps: RouteDeps): ServeApp {
     if (file.header.state === "withdrawn") return sendProblem(c, company, current, "semanto_withdrawn");
     if (file.header.state !== "signed") return sendProblem(c, company, current, "semanto_not_signed");
     const settings = await settingsFor(trooth_id);
-    return send(c, { status: 200, rep: "json", body: json(file), version_id: versionId(file.root_hash), page_hash: file.root_hash, content_signals: settings.content_signals, links: links(company, file), signer: await signerFor(company) });
+    return send(c, { status: 200, rep: "json", body: json(file), version_id: versionId(file.root_hash), content_signals: settings.content_signals, links: links(company, file), signer: await signerFor(company) });
   });
 
   // ------------------------------------------------------------ pages
@@ -306,7 +382,7 @@ export function createApp(deps: RouteDeps): ServeApp {
   async function servePage(c: Context<Vars>, r: Loaded, page: StoredPage, rep: "markdown" | "jsonld"): Promise<Response> {
     const { company, file, settings, signer } = r;
     const vid = versionId(file.root_hash);
-    const behind = page.live === "behind";
+    const behind = page.live === "behind" && !isBasic(file);
     const markdownText = new TextDecoder().decode(page.bytes);
     let body: Uint8Array;
     let served: ServedRepresentation;
@@ -325,7 +401,7 @@ export function createApp(deps: RouteDeps): ServeApp {
       served = "markdown";
     }
     recordReceipt(c, { trooth_id: company.trooth_id, version: page.version, page_id: page.entry.id, representation: rep });
-    return send(c, {
+    return sendFor(c, file, {
       status: 200,
       rep: served,
       body,
@@ -340,6 +416,11 @@ export function createApp(deps: RouteDeps): ServeApp {
     });
   }
 
+  /** A 303 to the page on the company's host. Signed like every other response (Location is covered), with an empty body; it is navigation, never content. */
+  async function sendRedirect(c: Context<Vars>, r: Loaded, page: StoredPage): Promise<Response> {
+    return send(c, { status: 303, rep: "markdown", body: new Uint8Array(0), version_id: versionId(r.file.root_hash), location: page.entry.url, links: links(r.company, r.file, page), signer: r.signer });
+  }
+
   app.get(`${apiPrefix}/:trooth_id/pages/:page{.+}`, async (c) => {
     const pathname = new URL(c.req.url).pathname;
     if (pathname.endsWith("/proof")) return servePageProof(c);
@@ -350,10 +431,8 @@ export function createApp(deps: RouteDeps): ServeApp {
     if (!isSemantoId(page_id, "smp")) return sendProblem(c, r.company, r.file, "page_not_found");
     const page = await ports.versions.getPage(r.company.trooth_id, page_id);
     if (!page) return sendProblem(c, r.company, r.file, "page_not_found");
-    if (decision.rep === "html") {
-      // Not ours: the company's host serves the HTML. Point the browser there.
-      return new Response(null, { status: 303, headers: { Location: page.entry.url, Vary: "Accept", "Access-Control-Allow-Origin": "*" } });
-    }
+    // Not ours: the company's host serves the HTML. Point the browser there, with a signed 303.
+    if (decision.rep === "html") return sendRedirect(c, r, page);
     return servePage(c, r, page, decision.rep);
   });
 
@@ -369,7 +448,7 @@ export function createApp(deps: RouteDeps): ServeApp {
     const signed_at = (await ports.versions.listVersions(r.company.trooth_id)).find((v) => v.version === page.version)?.signed_at ?? null;
     const proof = await buildPageProof(r.file, page_id, log, signed_at);
     if (!proof) return sendProblem(c, r.company, r.file, "page_not_found");
-    return send(c, { status: 200, rep: "json", body: json(proof), version_id: proof.version_id, page_hash: proof.page_hash, content_signals: r.settings.content_signals, links: links(r.company, r.file, page), signer: r.signer });
+    return sendFor(c, r.file, { status: 200, rep: "json", body: json(proof), version_id: proof.version_id, page_hash: proof.page_hash, content_signals: r.settings.content_signals, links: links(r.company, r.file, page), signer: r.signer });
   }
 
   // ------------------------------------------------------------ facts, llms, sitemap
@@ -378,7 +457,7 @@ export function createApp(deps: RouteDeps): ServeApp {
     const stored = await ports.versions.getJsonLd(r.company.trooth_id);
     const body = stored ?? json(factsJsonLd(r.file, ports.config));
     recordReceipt(c, { trooth_id: r.company.trooth_id, version: r.file.header.version, page_id: null, representation: "jsonld" });
-    return send(c, { status: 200, rep: "jsonld", body, version_id: versionId(r.file.root_hash), content_signals: r.settings.content_signals, links: links(r.company, r.file), signer: r.signer });
+    return sendFor(c, r.file, { status: 200, rep: "jsonld", body, version_id: versionId(r.file.root_hash), content_signals: r.settings.content_signals, links: links(r.company, r.file), signer: r.signer });
   }
 
   async function serveLlms(c: Context<Vars>, r: Loaded, kind: "llms" | "llms-full" | "sitemap"): Promise<Response> {
@@ -393,9 +472,11 @@ export function createApp(deps: RouteDeps): ServeApp {
       }
       body = utf8(manifestMarkdown(r.file, kind === "sitemap" ? "sitemap" : "llms", pages));
     }
+    // The Trooth section of llms.txt says what is true of this version: signed and witnessed, witnessed only, or neither.
+    if (kind === "llms") body = utf8(withTrustState(new TextDecoder().decode(body), trustState(r.file)));
     const text = new TextDecoder().decode(body);
     recordReceipt(c, { trooth_id: r.company.trooth_id, version: r.file.header.version, page_id: null, representation: "markdown" });
-    return send(c, { status: 200, rep: "markdown", body, version_id: versionId(r.file.root_hash), markdown_tokens: estimateTokens(text), content_signals: r.settings.content_signals, links: links(r.company, r.file), signer: r.signer });
+    return sendFor(c, r.file, { status: 200, rep: "markdown", body, version_id: versionId(r.file.root_hash), markdown_tokens: estimateTokens(text), content_signals: r.settings.content_signals, links: links(r.company, r.file), signer: r.signer });
   }
 
   app.get(`${apiPrefix}/:trooth_id/facts.jsonld`, async (c) => {
@@ -448,6 +529,8 @@ export function createApp(deps: RouteDeps): ServeApp {
     const pathname = new URL(c.req.url).pathname;
     const marker = `/${r.company.trooth_id}/by-path`;
     const raw = pathname.slice(pathname.indexOf(marker) + marker.length) || "/";
+    // The site root's /facts.jsonld is the company's facts, as every adapter maps it; any other .jsonld is a page's JSON-LD.
+    if (raw === "/facts.jsonld") return serveFacts(c, r);
     const decision = negotiateRoute(raw, requestHints(c).accept);
     const base = decision.basePath || "/";
     const candidates = [`https://${r.company.domain}${base}`];
@@ -459,7 +542,7 @@ export function createApp(deps: RouteDeps): ServeApp {
       if (page) break;
     }
     if (!page) return sendProblem(c, r.company, r.file, "page_not_found", { detail: `The current signed version has no page at ${base} on ${r.company.domain}.` });
-    if (decision.rep === "html") return new Response(null, { status: 303, headers: { Location: page.entry.url, Vary: "Accept", "Access-Control-Allow-Origin": "*" } });
+    if (decision.rep === "html") return sendRedirect(c, r, page);
     return servePage(c, r, page, decision.rep);
   }
   app.get(`${apiPrefix}/:trooth_id/by-path`, serveByPath);
@@ -569,7 +652,11 @@ export function createApp(deps: RouteDeps): ServeApp {
     const trooth_id = c.req.param("trooth_id");
     if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");
     if (!deps.workspace) return sendProblem(c, null, null, "conflict", { detail: "The pipeline is not wired in this deployment." });
-    const body = new Uint8Array(await c.req.arrayBuffer());
+    // At most 5 MB: a larger declared length is refused before reading, and the read stops at the cap.
+    const declared = Number(c.req.header("content-length") ?? "0");
+    if (declared > CATALOG_MAX_BYTES) return sendProblem(c, null, null, "payload_too_large", { detail: "The catalog is larger than 5 MB. Send it in parts." });
+    const body = await readCapped(c.req.raw, CATALOG_MAX_BYTES);
+    if (body === null) return sendProblem(c, null, null, "payload_too_large", { detail: "The catalog is larger than 5 MB. Send it in parts." });
     return sendWorkspace(c, trooth_id, await deps.workspace.catalog(trooth_id, { method: c.req.method, url: c.req.url, headers: c.req.raw.headers, body }));
   });
 
@@ -610,6 +697,34 @@ export function createApp(deps: RouteDeps): ServeApp {
   app.notFound((c) => sendProblem(c, null, null, "semanto_not_found", { detail: "No route here. The public routes are listed at https://trooth.co/docs/semanto." }));
 
   return app;
+}
+
+/** The largest catalog body the connector route reads (src/pipeline.ts uses the same number). */
+export const CATALOG_MAX_BYTES = 5 * 1024 * 1024;
+
+/** Read a request body up to `cap` bytes; null when it is longer. */
+export async function readCapped(req: Request, cap: number): Promise<Uint8Array | null> {
+  if (!req.body) return new Uint8Array(0);
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > cap) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const ch of chunks) {
+    out.set(ch, o);
+    o += ch.byteLength;
+  }
+  return out;
 }
 
 /** True when Accept names text/plain at least as strongly as application/json (the checkpoint is plain text; the tree head is JSON). */

@@ -57,6 +57,16 @@ In markdown (`Accept: text/markdown`) the same answer reads as a few sentences: 
 
 A missing or malformed `url` or `hash` answers an RFC 9457 problem (`application/problem+json`, code `invalid_request`, `retryable: false`, `next_action` saying what to send). Rate limits answer `429` with `Retry-After`. Problems are also available in markdown.
 
+## First-publication records
+
+Semanto Basic can witness that a text existed at an address on a date (`src/basic/first-publication.ts`). Two public routes let anyone, a platform handling a dispute included, check such a record without an account. Both answers are signed by Trooth's witness key with the response signature.
+
+`GET /public/semanto/first-publication/{smb_id}` answers `object: "semanto.first_publication_record"` with `record` (the witnessed record), `jws` (Trooth's JWS over it, `typ` `first-publication`), `leaf` and `leaf_hash` (its log leaf), `inclusion` (the inclusion proof against the latest tree head, or `null` while it waits to be logged) and `check_url`. An unknown id answers `semanto_not_found` (404).
+
+The record carries `url`, `content_hash` (the digest of the text's UTF-8 bytes), `witnessed_at` and `id`, all witnessed by Trooth, and a separate `declared` block, `{ "stated_by": "requester", "title", "author" }`, holding what the person who asked said about the text. Trooth did not witness the declared block and the record says so; a reader never treats a declared author as witnessed.
+
+`POST /public/semanto/first-publication/check` with `{ "record_id": "<smb_ id>", "markdown": "<the text>" }` answers `object: "semanto.first_publication_check"` with `status` `matches` (the digest of the text sent equals the witnessed `content_hash`) or `differs`, both digests, `witnessed_at`, `url`, the record, its JWS and the inclusion proof. A body that is not that shape answers `invalid_request`. The answer shows that a text existed at that address on that date; it never says who wrote it or who copied whom. The dispute statement a company exports links both routes.
+
 ## Relationship to the verifier kits
 
 `semanto-verify page <url>` does what this endpoint does and more, offline after three fetches (the page, the keys, the proof and header): it checks the response signature, the page hash, the inclusion proof, the header, the company signature, the witness, the log leaf, the log inclusion and the tree head, and prints each step. The endpoint is the quick question; the kit is the independent check. Both say `matches` and `differs` in the same sense.

@@ -1,0 +1,15 @@
+{
+  "kind": "witness",
+  "description": "A JWS whose protected header decodes to null. A header that is not a JSON object is malformed.",
+  "now": "2026-10-22T12:00:10Z",
+  "payload": {
+    "root_hash": "sha256:9175ea57c5eb516f5d6b2a748f469ec33f8e3e0ea9cde9beacad4db4226fbf76",
+    "witnessed_at": "2026-10-22T12:00:00Z"
+  },
+  "jws": "bnVsbA..KEwXH_e282YiJ5sbFnBA0NiMmx5q7suu-aCsLAKcxjvaNFl6cwhoKLqZRkk-VGiV81fBdnW6-KNTwGpkHAl9CA",
+  "kid": "1AnBKwFDl4CpFa1Kv9vyvPwphrQnYh2DhjlRN0u6pcw",
+  "expect": {
+    "ok": false,
+    "reason": "malformed"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "kind": "page-proof",
+  "description": "The page proof without the version header. The proof is not tied to a signed version and the company signature cannot be checked, so the result is not ok.",
+  "now": "2026-10-22T12:00:10Z",
+  "proof": {
+    "object": "semanto.proof",
+    "page_id": "smp_mh2iriw5u3rzy53s3mqowrgbh7",
+    "page_hash": "sha256:61f488a2dda6e39c7772db20eb44c13fe71ccb56113199f954d88042d5d2c410",
+    "version": 1,
+    "version_id": "smv_sf26uv6f5niw6xllfj2i6ru6ym",
+    "pages_root": "sha256:60a29c44bf95d23fe6fcc84decabf1f2fea87f4b1e6379963290d5e09856e794",
+    "inclusion": {
+      "index": 1,
+      "size": 3,
+      "path": [
+        "sha256:cf3d673b226981433b45bcec2fee86557b41ad25be0b6f958d5b5da3a6399c16",
+        "sha256:d1f20a3e17f1bdfa0ade0bf874c4c61c2abedc1b6d7af7f965011b73e846bfa2"
+      ]
+    },
+    "root_hash": "sha256:9175ea57c5eb516f5d6b2a748f469ec33f8e3e0ea9cde9beacad4db4226fbf76",
+    "signed_at": "2026-10-22T12:00:00Z",
+    "witnessed_at": "2026-10-22T12:00:00Z",
+    "signature": "eyJhbGciOiJFZERTQSIsImlhdCI6IjIwMjYtMTAtMjJUMTI6MDA6MDAuMDAwWiIsImtpZCI6IkY0NnZicnJjSlRRT2d6V2w0RDhlczNJZ0VQRUx4djctVGxkazZ0cDJxaEkiLCJ0eXAiOiJodHRwczovL3Ryb290aC5jby90eXBlcy9zZW1hbnRvLXZlcnNpb24ifQ..QMmNSV6du2Wu-s4t8eoNpxe4xNVo8jfQLH49ggZptmWkxAgsVfOk9fiplv65FPKuh2uKJkF_5MssdEewznhaCA",
+    "witness": "eyJhbGciOiJFZERTQSIsImlhdCI6IjIwMjYtMTAtMjJUMTI6MDA6MDAuMDAwWiIsImtpZCI6IjFBbkJLd0ZEbDRDcEZhMUt2OXZ5dlB3cGhyUW5ZaDJEaGpsUk4wdTZwY3ciLCJ0eXAiOiJodHRwczovL3Ryb290aC5jby90eXBlcy93aXRuZXNzLXN0YXRlbWVudCJ9..nCI7hVhpLt6kjP4LHACL3KmpjBfvouCi3fIdDSNb5J4zOx688xcv0PBSxa0wEUOeOLdcStvD_EWCbquSqoXRBg",
+    "ledger": {
+      "log": "https://api.trooth.co/public/semanto/log",
+      "index": 3,
+      "tree_size": 5,
+      "leaf": {
+        "kind": "semanto_version",
+        "trooth_id": "acme",
+        "ref": "smv_sf26uv6f5niw6xllfj2i6ru6ym",
+        "hash": "sha256:9175ea57c5eb516f5d6b2a748f469ec33f8e3e0ea9cde9beacad4db4226fbf76",
+        "at": "2026-10-22T12:00:00Z"
+      },
+      "leaf_hash": "sha256:af58729f2b60a404c5af04c5e801552ed6c4c132ac20db6648765f54fb95b5df",
+      "root_hash": "sha256:d2c12bfa8e44bbbb3a1cfe50e18bc8ca71fcfb1f9581d1bbe6e6937df838d7d0",
+      "tree_head_jws": "eyJhbGciOiJFZERTQSIsImlhdCI6IjIwMjYtMTAtMjJUMTI6MDA6MDAuMDAwWiIsImtpZCI6IjFBbkJLd0ZEbDRDcEZhMUt2OXZ5dlB3cGhyUW5ZaDJEaGpsUk4wdTZwY3ciLCJ0eXAiOiJodHRwczovL3Ryb290aC5jby90eXBlcy9zaWduZWQtdHJlZS1oZWFkIn0.eyJyb290X2hhc2giOiJzaGEyNTY6ZDJjMTJiZmE4ZTQ0YmJiYjNhMWNmZTUwZTE4YmM4Y2E3MWZjZmIxZjk1ODFkMWJiZTZlNjkzN2RmODM4ZDdkMCIsInNpZ25lZF9hdCI6IjIwMjYtMTAtMjJUMTI6MDA6MDBaIiwidHJlZV9zaXplIjo1fQ.B7LoFGT_1gik8LGB_KbABWC7NtIpF7Ra3Hnd7MZw4YM31uZxpXbcwT7kD_lIeS4hEWeWc3Ue45aY3M0OIx-nCQ",
+      "inclusion_path": [
+        "sha256:2c78f15f1a5feaf413133e4486db200892ac56fd6067eae1b14c1737e18f0596",
+        "sha256:03810b835993075ef9d864e61fa9db18260cea9c7cceaa72188f859f53658ffd",
+        "sha256:96e9a6fb4e194319c679db06e0aac996565dede17c40485ab71259302e5264db"
+      ]
+    }
+  },
+  "page_markdown": "# Security at Acme\n\nEvery employee account uses multi-factor authentication.\n\nCustomer data is stored in the United States. Backups are taken every day and kept for 30 days.\n\nReport a security issue to security@acme.com.\n",
+  "expect": {
+    "ok": false,
+    "reason": "header_absent"
+  }
+}

@@ -9,12 +9,20 @@
 // service in the RFC 3161 sense, with the log entry making the timestamp
 // publicly auditable (RFC 6962 style), applied to the extracted markdown of a
 // page rather than to an arbitrary file.
+//
+// What Trooth witnessed is only the address, the fingerprint of the text and
+// the moment: url, content_hash, witnessed_at. A title or an author the
+// requester gave sits in a separate "declared" block, labelled as stated by
+// the requester, so nobody reads them as witnessed. Anyone can check a record
+// at GET /public/semanto/first-publication/{smb_id} (the record, its JWS and
+// its log inclusion proof) and compare text with it at
+// POST /public/semanto/first-publication/check.
 
 import { canonicalize } from "../core/canonical";
 import { utf8, toHex } from "../core/encoding";
 import { digest, isDigest } from "../core/hash";
 import { semantoId, isSemantoId } from "../core/ids";
-import { JWS_TYPES, signObject, verifyJws } from "../core/jws";
+import { JWS_TYPES, signObject, verifyJws, type JwsFailure } from "../core/jws";
 import type { PrivateJwk, PublicJwk } from "../core/keys";
 import { leafHash } from "../core/merkle";
 import type { LogLeaf, LogPort } from "./ports";
@@ -23,14 +31,16 @@ export interface FirstPublication {
   object: "semanto.first_publication";
   /** smb_ id: digest of the canonical record without `id`. */
   id: string;
+  /** Witnessed: the address Trooth read. */
   url: string;
-  /** Digest of the extracted markdown bytes. */
+  /** Witnessed: the digest of the extracted markdown bytes. */
   content_hash: string;
-  title: string;
-  author?: string;
-  /** ISO 8601, when Trooth read the text. */
+  /** Witnessed: ISO 8601, when Trooth read the text. */
   witnessed_at: string;
+  /** Who asked Trooth to witness the page. */
   trooth_id: string;
+  /** Stated by the requester, not witnessed by Trooth: the title and author they gave. */
+  declared: { stated_by: "requester"; title?: string; author?: string };
 }
 
 export interface FirstPublicationRecord {
@@ -68,10 +78,9 @@ export async function createFirstPublication(input: FirstPublicationInput, witne
     object: "semanto.first_publication",
     url: input.url,
     content_hash,
-    title: input.title,
-    ...(input.author ? { author: input.author } : {}),
     witnessed_at: input.witnessed_at.toISOString(),
     trooth_id: input.trooth_id,
+    declared: { stated_by: "requester", ...(input.title ? { title: input.title } : {}), ...(input.author ? { author: input.author } : {}) },
   };
   const id = semantoId("smb", await digest(canonicalize(body)));
   const record: FirstPublication = { id, ...body };
@@ -84,39 +93,84 @@ export async function createFirstPublication(input: FirstPublicationInput, witne
 
 export type FirstPublicationCheck =
   | { ok: true; record: FirstPublication }
-  | { ok: false; reason: "content_changed" | "id_mismatch" | "payload_mismatch" | "malformed" | "unknown_key" | "bad_signature" | "wrong_type" | "not_yet_valid" | "expired"; words: string };
+  | { ok: false; reason: "content_changed" | "id_mismatch" | JwsFailure; words: string };
 
 /** Recompute the hash from the markdown and check Trooth's signature. */
 export async function verifyFirstPublication(record: FirstPublication, jws: string, markdown: string, resolveKey: (kid: string) => Promise<PublicJwk | null> | PublicJwk | null): Promise<FirstPublicationCheck> {
   if (!isSemantoId(record.id, "smb") || !isDigest(record.content_hash)) return { ok: false, reason: "malformed", words: "The record is not well formed." };
   const { id, ...rest } = record;
   if (semantoId("smb", await digest(canonicalize(rest))) !== id) return { ok: false, reason: "id_mismatch", words: "The record id does not match its contents." };
-  const v = await verifyJws(jws, resolveKey, { expectTyp: JWS_TYPES.firstPublication });
-  if (!v.ok) return { ok: false, reason: v.reason, words: `Trooth's signature did not check out: ${v.reason.replace(/_/g, " ")}.` };
-  if (canonicalize(v.payload) !== canonicalize(record)) return { ok: false, reason: "payload_mismatch", words: "The signature is over a different record." };
+  // The record is the expected payload: an embedded payload that is not this record is payload_mismatch.
+  const v = await verifyJws(jws, resolveKey, { expectTyp: JWS_TYPES.firstPublication, payload: record });
+  if (!v.ok) return { ok: false, reason: v.reason, words: v.reason === "payload_mismatch" ? "The signature is over a different record." : `Trooth's signature did not check out: ${v.reason.replace(/_/g, " ")}.` };
   const now = await digest(utf8(markdown));
   if (now !== record.content_hash) return { ok: false, reason: "content_changed", words: "The text given is not the text Trooth witnessed. The hash differs." };
   return { ok: true, record };
 }
 
 /** Plain words a person can hand to a platform in a copying dispute. */
-export function exportDisputeStatement(r: FirstPublicationRecord, opts: { log_url: string; verify_url: string }): string {
+export function exportDisputeStatement(r: FirstPublicationRecord, opts: { log_url: string; record_url: string; check_url: string }): string {
   const date = r.record.witnessed_at.slice(0, 10);
   const where = r.log ? `The record is in a public log at index ${r.log.index} (tree size ${r.log.tree_size}) at ${opts.log_url}.` : "The record has been signed and is waiting to be added to the public log.";
+  const d = r.record.declared;
   return [
     `Trooth witnessed this text at this address on this date.`,
     ``,
     `Address: ${r.record.url}`,
-    `Title: ${r.record.title}`,
-    ...(r.record.author ? [`Author: ${r.record.author}`] : []),
     `Date witnessed: ${date} (${r.record.witnessed_at})`,
     `Text fingerprint: ${r.record.content_hash}`,
     `Record id: ${r.record.id}`,
+    ...(d.title || d.author ? [``, `Stated by the person who asked, not witnessed by Trooth:`, ...(d.title ? [`Title: ${d.title}`] : []), ...(d.author ? [`Author: ${d.author}`] : [])] : []),
     ``,
     where,
     ``,
-    `What this means: on ${date}, Trooth read the text at the address above and recorded a fingerprint of it, signed with Trooth's key. Anyone can recompute the fingerprint from the text and check the signature at ${opts.verify_url}. It shows the text existed at that address on that date. It does not by itself show who wrote it or who copied whom; a later date on another copy is what a platform compares.`,
+    `What this means: on ${date}, Trooth read the text at the address above and recorded a fingerprint of it, signed with Trooth's key. The record, its signature and its place in the log are at ${opts.record_url}. Anyone can compare a text with it by sending { "record_id": "${r.record.id}", "markdown": "<the text>" } to ${opts.check_url}, which answers matches or differs. It shows the text existed at that address on that date. It does not by itself show who wrote it or who copied whom; a later date on another copy is what a platform compares.`,
     ``,
     `Signed statement (JWS): ${r.jws}`,
   ].join("\n");
+}
+
+/** What GET /public/semanto/first-publication/{smb_id} answers. */
+export interface FirstPublicationDocument {
+  object: "semanto.first_publication_record";
+  record: FirstPublication;
+  jws: string;
+  leaf: LogLeaf;
+  leaf_hash: string;
+  /** The record's inclusion proof in the public log against the latest tree head, when it is logged. */
+  inclusion: { index: number; tree_size: number; leaf_hash: string; root_hash: string; path: string[] } | null;
+  check_url: string;
+}
+
+/** What POST /public/semanto/first-publication/check answers. Never a verdict about who wrote the text. */
+export interface FirstPublicationCheckAnswer {
+  object: "semanto.first_publication_check";
+  record_id: string;
+  status: "matches" | "differs";
+  /** The digest of the markdown sent. */
+  content_hash: string;
+  /** The digest Trooth witnessed. */
+  witnessed_hash: string;
+  witnessed_at: string;
+  url: string;
+  record: FirstPublication;
+  jws: string;
+  inclusion: FirstPublicationDocument["inclusion"];
+}
+
+/** Compare a text with a record: matches when the digest of its UTF-8 bytes is the witnessed content_hash. */
+export async function checkAgainstRecord(doc: FirstPublicationDocument, markdown: string): Promise<FirstPublicationCheckAnswer> {
+  const content_hash = await digest(utf8(markdown));
+  return {
+    object: "semanto.first_publication_check",
+    record_id: doc.record.id,
+    status: content_hash === doc.record.content_hash ? "matches" : "differs",
+    content_hash,
+    witnessed_hash: doc.record.content_hash,
+    witnessed_at: doc.record.witnessed_at,
+    url: doc.record.url,
+    record: doc.record,
+    jws: doc.jws,
+    inclusion: doc.inclusion,
+  };
 }

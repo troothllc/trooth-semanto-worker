@@ -106,7 +106,8 @@ describe("headers on a served page", () => {
     expect(v.ok).toBe(true);
     const si = parseSignatureInput(h.get("signature-input")!);
     const params = Object.values(si)[0]!.params;
-    expect(params.expires! - params.created).toBe(300);
+    // The signature lives as long as a cache may serve the response: max-age 300 plus stale-while-revalidate 3600.
+    expect(params.expires! - params.created).toBe(3900);
     expect(params.tag).toBe("trooth-semanto");
   });
 
@@ -214,7 +215,9 @@ describe("problems", () => {
       const text = fromUtf8(body);
       expect(text.startsWith("---\ntrooth_state: behind\n")).toBe(true);
       expect(text).toContain("what_happened:");
-      expect(r.headers.get("trooth-page-hash")).toBe(estate.acme.entries[1]!.hash);
+      // Trooth-Page-Hash is the digest of the bytes served; the signed page's hash travels in Trooth-Signed-Page-Hash.
+      expect(r.headers.get("trooth-page-hash")).toBe(await digest(body));
+      expect(r.headers.get("trooth-signed-page-hash")).toBe(estate.acme.entries[1]!.hash);
       expect(stripBehindNotice(body)).toEqual(estate.acme.pages.get(id));
       expect(await digest(stripBehindNotice(body))).toBe(estate.acme.entries[1]!.hash);
       expect(behindNotice("2026-10-01T10:00:00.000Z", "smv_x")).toContain("trooth_signed_at: 2026-10-01T10:00:00.000Z");
@@ -234,15 +237,15 @@ describe("proofs", () => {
       expect(proof.inclusion.size).toBe(3);
       expect(proof.ledger).not.toBeNull();
       const bytes = estate.acme.pages.get(entry.id)!;
-      const resolveKey = (kid: string) => (kid === estate.companyPublic.kid ? estate.companyPublic : kid === estate.witnessPublic.kid ? estate.witnessPublic : null);
-      const ok = await verifyProof(proof, bytes, { header: estate.acme.file.header, resolveKey, at: FIXED_NOW });
+      const keys = { resolveCompanyKey: (kid: string) => (kid === estate.companyPublic.kid ? estate.companyPublic : null), resolveTroothKey: (kid: string) => (kid === estate.witnessPublic.kid ? estate.witnessPublic : null) };
+      const ok = await verifyProof(proof, bytes, { header: estate.acme.file.header, ...keys, at: FIXED_NOW });
       expect(ok.failures).toEqual([]);
       expect(ok.ok).toBe(true);
       expect(Object.values(ok.checks).every((c) => c === "ok")).toBe(true);
 
       const changed = new Uint8Array(bytes);
       changed[changed.length - 1] = changed[changed.length - 1]! ^ 1;
-      const bad = await verifyProof(proof, changed, { header: estate.acme.file.header, resolveKey, at: FIXED_NOW });
+      const bad = await verifyProof(proof, changed, { header: estate.acme.file.header, ...keys, at: FIXED_NOW });
       expect(bad.ok).toBe(false);
       expect(bad.checks.page_hash).toBe("failed");
       expect(bad.checks.inclusion).toBe("ok");
@@ -252,20 +255,23 @@ describe("proofs", () => {
       expect(bad2.checks.inclusion).toBe("failed");
     }
   });
-  it("verifies with the bytes alone when no keys are given, leaving signatures not_checked", async () => {
+  it("is strict: with the bytes alone the hashes check out but the result is not ok, and nothing missing is skipped silently", async () => {
     const entry = estate.acme.entries[2]!;
     const proof = await buildPageProof(estate.acme.file, entry.id, null);
     const v = await verifyProof(proof!, estate.acme.pages.get(entry.id)!);
-    expect(v.ok).toBe(true);
+    expect(v.ok).toBe(false);
+    expect(v.checks.page_hash).toBe("ok");
+    expect(v.checks.inclusion).toBe("ok");
+    expect(v.checks.header).toBe("absent");
     expect(v.checks.signature).toBe("not_checked");
-    expect(v.checks.ledger_inclusion).toBe("not_checked");
+    expect(v.checks.ledger_inclusion).toBe("absent");
     expect(await buildPageProof(estate.acme.file, "smp_aaaaaaaaaaaaaaaaaaaaaaaaaa", null)).toBeNull();
   });
   it("fails the witness check when a different key is offered", async () => {
     const entry = estate.acme.entries[0]!;
     const proof = (await buildPageProof(estate.acme.file, entry.id, null))!;
     const wrong = toPublic(estate.companyKey);
-    const v = await verifyProof(proof, estate.acme.pages.get(entry.id)!, { resolveKey: () => ({ ...wrong, kid: estate.witnessPublic.kid }) });
+    const v = await verifyProof(proof, estate.acme.pages.get(entry.id)!, { resolveTroothKey: () => ({ ...wrong, kid: estate.witnessPublic.kid }) });
     expect(v.checks.witness).toBe("failed");
   });
 });
@@ -327,7 +333,9 @@ describe("the other public routes", () => {
   it("serves the semanto object by Accept", async () => {
     const j = await get(`/acme-inc`);
     expect(j.headers.get("content-type")).toBe("application/json");
-    expect(j.headers.get("trooth-page-hash")).toBe(estate.acme.file.root_hash);
+    const jBytes = new Uint8Array(await j.clone().arrayBuffer());
+    expect(j.headers.get("trooth-page-hash")).toBe(await digest(jBytes));
+    expect(j.headers.get("trooth-signed-page-hash")).toBeNull();
     const file = await body(j);
     expect(file.root_hash).toBe(estate.acme.file.root_hash);
     const m = await get(`/acme-inc`, { accept: "text/markdown" });

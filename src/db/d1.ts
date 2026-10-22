@@ -166,6 +166,24 @@ export async function selectVersion(db: D1Database, trooth_id: string, version: 
     .first<VersionRow>();
 }
 
+/**
+ * The version the public routes serve: the current signed version, or, for a
+ * Semanto Basic company with no signed version, its witnessed record.
+ */
+export async function selectServedVersion(db: D1Database, trooth_id: string): Promise<VersionRow | null> {
+  return (
+    (await selectCurrentSignedVersion(db, trooth_id)) ??
+    (await db
+      .prepare(
+        `SELECT v.trooth_id, v.version, v.state, v.built_at, v.signed_at, v.withdrawn_at, v.root_hash, v.page_count, v.fact_count, v.ledger_index
+         FROM semanto_versions v JOIN semanto_companies c ON c.trooth_id = v.trooth_id AND c.basic_version = v.version
+         WHERE v.trooth_id = ?1 AND v.state = 'read' AND v.witness_jws IS NOT NULL`,
+      )
+      .bind(trooth_id)
+      .first<VersionRow>())
+  );
+}
+
 export async function selectCurrentSignedVersion(db: D1Database, trooth_id: string): Promise<VersionRow | null> {
   return db
     .prepare(
@@ -349,7 +367,7 @@ export class D1VersionStore implements VersionStore {
     return selectCompanyByDomain(this.db, domain);
   }
   async getCurrent(trooth_id: string): Promise<SemantoFile | null> {
-    const v = await selectCurrentSignedVersion(this.db, trooth_id);
+    const v = await selectServedVersion(this.db, trooth_id);
     return v ? this.readFile(trooth_id, v.version) : null;
   }
   async getVersion(trooth_id: string, version: number): Promise<SemantoFile | null> {
@@ -360,27 +378,27 @@ export class D1VersionStore implements VersionStore {
     return selectVersions(this.db, trooth_id);
   }
   async getPage(trooth_id: string, page_id: string): Promise<StoredPage | null> {
-    const v = await selectCurrentSignedVersion(this.db, trooth_id);
+    const v = await selectServedVersion(this.db, trooth_id);
     if (!v) return null;
     const row = await selectPage(this.db, trooth_id, v.version, page_id);
     return row ? this.assemblePage(trooth_id, v, row) : null;
   }
   async getPageByUrl(trooth_id: string, url: string): Promise<StoredPage | null> {
-    const v = await selectCurrentSignedVersion(this.db, trooth_id);
+    const v = await selectServedVersion(this.db, trooth_id);
     if (!v) return null;
     const row = await selectPageByUrl(this.db, trooth_id, v.version, url);
     return row ? this.assemblePage(trooth_id, v, row) : null;
   }
   async getFacts(trooth_id: string): Promise<Fact[] | null> {
-    const v = await selectCurrentSignedVersion(this.db, trooth_id);
+    const v = await selectServedVersion(this.db, trooth_id);
     return v ? selectFacts(this.db, trooth_id, v.version) : null;
   }
   async getJsonLd(trooth_id: string): Promise<Uint8Array | null> {
-    const v = await selectCurrentSignedVersion(this.db, trooth_id);
+    const v = await selectServedVersion(this.db, trooth_id);
     return v ? r2Bytes(this.store, r2Key.jsonld(trooth_id, v.version)) : null;
   }
   async getLlms(trooth_id: string, kind: "llms" | "llms-full" | "sitemap"): Promise<Uint8Array | null> {
-    const v = await selectCurrentSignedVersion(this.db, trooth_id);
+    const v = await selectServedVersion(this.db, trooth_id);
     if (!v) return null;
     const key = kind === "llms" ? r2Key.llms : kind === "llms-full" ? r2Key.llmsFull : r2Key.sitemap;
     return r2Bytes(this.store, key(trooth_id, v.version));
@@ -445,15 +463,18 @@ export class D1Keys implements KeyPort {
     const { d: _d, ...pub } = this.witness;
     return { keys: [pub] };
   }
-  async resolve(_trooth_id: string | null, kid: string): Promise<PublicJwk | null> {
-    if (kid === this.witness.kid) {
-      const { d: _d, ...pub } = this.witness;
-      return pub;
-    }
+  /** This company's keys only: a key that belongs to another company, or Trooth's witness key, is not returned. */
+  async resolveCompany(trooth_id: string, kid: string): Promise<PublicJwk | null> {
     const k = await selectKeyByKid(this.db, kid);
-    if (!k) return null;
+    if (!k || k.trooth_id !== trooth_id) return null;
     const { trooth_id: _t, custody: _c, ...jwk } = k;
     return jwk;
+  }
+  /** Trooth's witness keys only. */
+  async resolveTrooth(kid: string): Promise<PublicJwk | null> {
+    if (kid !== this.witness.kid) return null;
+    const { d: _d, ...pub } = this.witness;
+    return pub;
   }
 }
 
@@ -612,6 +633,17 @@ export class D1PipelineStore implements PipelineStore {
     await this.db.batch(statements);
   }
 
+  async markWitnessed(trooth_id: string, file: SemantoFile, witnessed_at: string): Promise<void> {
+    const n = file.header.version;
+    await r2Put(this.store, r2Key.file(trooth_id, n), JSON.stringify(file), "application/json");
+    await this.db.batch([
+      this.db
+        .prepare(`UPDATE semanto_versions SET witness_jws = ?3, witness_kid = ?4, witnessed_at = ?5 WHERE trooth_id = ?1 AND version = ?2 AND state = 'read'`)
+        .bind(trooth_id, n, file.witness?.jws ?? null, file.witness?.kid ?? null, witnessed_at),
+      this.db.prepare(`UPDATE semanto_companies SET basic_version = ?2, updated_at = ?3 WHERE trooth_id = ?1`).bind(trooth_id, n, witnessed_at),
+    ]);
+  }
+
   async markSigned(trooth_id: string, file: SemantoFile, signed_at: string): Promise<void> {
     const n = file.header.version;
     await r2Put(this.store, r2Key.file(trooth_id, n), JSON.stringify(file), "application/json");
@@ -703,6 +735,15 @@ export class D1PipelineStore implements PipelineStore {
     return results.map((r) => JSON.parse(r.public_jwk) as PublicJwk);
   }
 
+  async ownerUserId(trooth_id: string): Promise<string | null> {
+    const r = await this.db.prepare(`SELECT os_owner_user_id FROM semanto_companies WHERE trooth_id = ?1`).bind(trooth_id).first<{ os_owner_user_id: string | null }>();
+    return r?.os_owner_user_id ?? null;
+  }
+
+  async registerOwner(trooth_id: string, user_id: string): Promise<void> {
+    await this.db.prepare(`UPDATE semanto_companies SET os_owner_user_id = ?2 WHERE trooth_id = ?1 AND os_owner_user_id IS NULL`).bind(trooth_id, user_id).run();
+  }
+
   async putConnectorKey(trooth_id: string, jwk: PublicJwk, source: string, created_at: string): Promise<void> {
     await this.db
       .prepare(`INSERT OR REPLACE INTO semanto_connector_keys (kid, trooth_id, public_jwk, source, created_at, revoked_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL)`)
@@ -741,9 +782,14 @@ export class D1PipelineStore implements PipelineStore {
 
   async putFirstPublication(r: FirstPublicationRecord): Promise<void> {
     await this.db
-      .prepare(`INSERT OR REPLACE INTO semanto_first_publications (trooth_id, record_id, url, content_hash, witnessed_at, jws, log_index) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`)
-      .bind(r.record.trooth_id, r.record.id, r.record.url, r.record.content_hash, r.record.witnessed_at, r.jws, r.log?.index ?? null)
+      .prepare(`INSERT OR REPLACE INTO semanto_first_publications (trooth_id, record_id, url, content_hash, witnessed_at, jws, log_index, record_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`)
+      .bind(r.record.trooth_id, r.record.id, r.record.url, r.record.content_hash, r.record.witnessed_at, r.jws, r.log?.index ?? null, JSON.stringify(r))
       .run();
+  }
+
+  async getFirstPublication(record_id: string): Promise<FirstPublicationRecord | null> {
+    const row = await this.db.prepare(`SELECT record_json FROM semanto_first_publications WHERE record_id = ?1`).bind(record_id).first<{ record_json: string | null }>();
+    return row?.record_json ? (JSON.parse(row.record_json) as FirstPublicationRecord) : null;
   }
 
   async putBlob(key: string, bytes: Uint8Array, contentType: string): Promise<void> {

@@ -11,6 +11,7 @@
 import { leafHash as merkleLeafHash } from "@/core/merkle";
 import { utf8 } from "@/core/encoding";
 import { canonicalize } from "@/core/canonical";
+import { EMPTY_FRONTIER, MemoryTileBucket, Tiles, type Frontier } from "./tiles";
 
 /** What a log leaf says. Every field is plain text; `hash` is "sha256:" plus 64 hex. */
 export type LeafKind =
@@ -74,9 +75,17 @@ export interface StoredTreeHead {
 export interface LogStore {
   /** Number of leaves in the log. */
   size(): Promise<number>;
-  /** Append one leaf with its precomputed hash and return its index. */
-  appendLeaf(leaf: LogLeaf, leafHash: Uint8Array): Promise<number>;
-  /** Leaf hashes for indexes [from, to). */
+  /** The compact range (right edge) at the current size, so an append is O(log n). */
+  frontier(): Promise<Frontier>;
+  /**
+   * Append one leaf with its precomputed hash and the frontier after it, and
+   * return its index (which is the size before the append). Appends must be
+   * serialized (the LogDO Durable Object in production, src/ledger/log-do.ts).
+   */
+  appendLeaf(leaf: LogLeaf, leafHash: Uint8Array, next: Frontier): Promise<number>;
+  /** The 256-hash tiles every proof is computed from. */
+  tiles(): Tiles;
+  /** Leaf hashes for indexes [from, to). For audits and backfills, never on the append or proof path. */
   leafHashes(from: number, to: number): Promise<Uint8Array[]>;
   /** One leaf by index, or null. */
   getLeaf(index: number): Promise<{ leaf: LogLeaf; leafHash: Uint8Array } | null>;
@@ -89,13 +98,26 @@ export interface LogStore {
 export class MemoryLogStore implements LogStore {
   private leaves: { leaf: LogLeaf; leafHash: Uint8Array }[] = [];
   private heads = new Map<number, StoredTreeHead>();
+  private edge: Frontier = EMPTY_FRONTIER;
+  readonly bucket = new MemoryTileBucket();
+  private readonly tileSet = new Tiles(this.bucket);
 
   async size(): Promise<number> {
     return this.leaves.length;
   }
-  async appendLeaf(leaf: LogLeaf, leafHash: Uint8Array): Promise<number> {
+  async frontier(): Promise<Frontier> {
+    return this.edge;
+  }
+  async appendLeaf(leaf: LogLeaf, leafHash: Uint8Array, next: Frontier): Promise<number> {
+    const index = this.leaves.length;
+    if (next.size !== index + 1) throw new Error("appendLeaf: the frontier is not for this append (appends must be serialized)");
     this.leaves.push({ leaf, leafHash });
-    return this.leaves.length - 1;
+    await this.tileSet.appendLeafHash(index, leafHash);
+    this.edge = next;
+    return index;
+  }
+  tiles(): Tiles {
+    return this.tileSet;
   }
   async leafHashes(from: number, to: number): Promise<Uint8Array[]> {
     if (from < 0 || to > this.leaves.length || from > to) throw new Error("leafHashes: range out of bounds");

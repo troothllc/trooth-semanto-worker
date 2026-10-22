@@ -150,7 +150,8 @@ export function wellKnownSemanto(company: CompanyRecord, file: SemantoFile | nul
 /** A fallback llms.txt, llms-full.txt or sitemap.md built from the manifest when the compiler stored none. */
 export function manifestMarkdown(file: SemantoFile, kind: "llms" | "sitemap", pages: Map<string, string>): string {
   const h = file.header;
-  const lines: string[] = [`# ${h.org}`, "", `> Signed Semanto file for ${h.identity.domain}, version ${h.version}.`, ""];
+  const what = h.state === "signed" && file.signature ? "Signed Semanto file" : file.witness ? "Semanto file witnessed by Trooth and not signed by the company" : "Semanto file, not signed yet";
+  const lines: string[] = [`# ${h.org}`, "", `> ${what} for ${h.identity.domain}, version ${h.version}.`, ""];
   if (kind === "sitemap") {
     lines.push("## Pages", "");
     for (const p of h.pages_manifest) lines.push(`- [${p.title}](${p.url}) ${p.hash}`);

@@ -126,7 +126,10 @@ describe("first-publication proof", () => {
     expect(ok.ok).toBe(true);
     const changed = await verifyFirstPublication(fp.record, fp.jws, markdown.replace("word for word", "roughly"), () => publicJwk);
     expect(!changed.ok && changed.reason).toBe("content_changed");
-    const tampered = await verifyFirstPublication({ ...fp.record, title: "Another title" }, fp.jws, markdown, () => publicJwk);
+    // Title and author are declared by the requester, apart from what Trooth witnessed.
+    expect(fp.record.declared).toEqual({ stated_by: "requester", title: "A post", author: "Acme Inc" });
+    expect(Object.keys(fp.record).sort()).toEqual(["content_hash", "declared", "id", "object", "trooth_id", "url", "witnessed_at"]);
+    const tampered = await verifyFirstPublication({ ...fp.record, declared: { stated_by: "requester", title: "Another title" } }, fp.jws, markdown, () => publicJwk);
     expect(!tampered.ok && tampered.reason).toBe("id_mismatch");
     const other = await generateKeyPair();
     const wrongKey = await verifyFirstPublication(fp.record, fp.jws, markdown, () => toPublic(other.privateJwk));
@@ -135,7 +138,10 @@ describe("first-publication proof", () => {
   it("exports a plain-words statement for a copying dispute", async () => {
     const { privateJwk } = await generateKeyPair();
     const fp = await createFirstPublication({ url: "https://acme.com/blog/a-post", markdown, title: "A post", trooth_id: "acme-inc", witnessed_at: NOW }, privateJwk, memoryLog());
-    const text = exportDisputeStatement(fp, { log_url: "https://api.trooth.co/public/semanto/log", verify_url: "https://api.trooth.co/public/semanto/verify" });
+    const text = exportDisputeStatement(fp, { log_url: "https://api.trooth.co/public/semanto/log", record_url: `https://api.trooth.co/public/semanto/first-publication/${fp.record.id}`, check_url: "https://api.trooth.co/public/semanto/first-publication/check" });
+    expect(text).toContain("https://api.trooth.co/public/semanto/first-publication/check");
+    expect(text).not.toContain("/verify");
+    expect(text).toContain("Stated by the person who asked, not witnessed by Trooth:");
     expect(text).toContain("Trooth witnessed this text at this address on this date.");
     expect(text).toContain("Address: https://acme.com/blog/a-post");
     expect(text).toContain("public log at index 0");

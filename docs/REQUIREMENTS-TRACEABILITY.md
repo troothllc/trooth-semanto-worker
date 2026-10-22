@@ -95,6 +95,32 @@ The requirement wording below was reconstructed from `docs/reports/*.md` (each a
 | 33 | Signed Content Signals with the header, robots.txt and drift detection | `src/basic/content-signals.ts`, `src/settings/delivery.ts` (`contentSignalHeader`) | `test/basic.test.ts`, `test/settings.test.ts` | built |
 | 34 | Ten-minute setup target, measured: six steps with targets summing to 600 seconds, the time spent per step taken from timestamps | `src/basic/tier.ts` (`SETUP_CHECKLIST`, `measureSetup`), returned by `POST /os/semanto/{trooth_id}/basic/prove` (`src/pipeline.ts`) | `test/basic.test.ts`; `test/integration.test.ts` ("Semanto Basic: claims, proves by DNS, builds the witnessed record and measures the setup") | built; `within_ten_minutes` stays null until every step has a timestamp (the head tag and first report steps are stamped by the dashboard) |
 
+## Review fixes, 22 October 2026
+
+An independent review raised 19 findings. Each was fixed with a regression test that failed before the fix; the verifier fixes also have vectors consumed by all three kits. The full account is `docs/reports/review-fixes.md`. The rows above that each finding touches:
+
+| Finding | Rows | Main files | Regression test | Status |
+| --- | --- | --- | --- | --- |
+| 1 Embedded JWS payload must be the expected one | 8, 9, 18, 32 | `src/core/jws.ts`, `src/serve/proof.ts`, the three kits | `test/review-fixes.test.ts` "finding 1"; vectors `negative/forged-compact-payload.json`, `negative/page-proof-forged-compact.json` | built |
+| 2 Company and Trooth keys never merged | 9, 12, 18 | `src/serve/ports.ts` (`resolveCompany`, `resolveTrooth`), `src/serve/proof.ts`, `src/db/d1.ts`, the kits | "finding 2"; vectors `negative/witness-company-key.json`, `negative/tree-head-company-key.json` | built |
+| 3 Key judged at `iat` / `created` | 8, 11, 12, 18 | `src/core/jws.ts` (`keyValidAtSigning`), `src/core/httpsig.ts`, the kits | "finding 3"; vectors `key-rotated-after-signing.json`, `key-revoked-after-signing.json`, `negative/key-revoked-before-signing.json` | built |
+| 4 Trooth-Page-Hash is always the body's digest | 6, 8 | `src/serve/headers.ts`, `src/serve/routes.ts` | "findings 4, 11 and 12"; vector `response-page-jsonld.json` | built |
+| 5 SSRF in the key directory fetch | 17, 19 | `src/readers/webbotauth.ts`, `src/readers/ports.ts`, `src/core/ssrf.ts` | "finding 5" | built, founder step: confirm DoH egress to cloudflare-dns.com |
+| 6 Decoy-label nonce replay; atomic nonces | 17, 19 | `src/readers/webbotauth.ts`, `src/readers/nonce-do.ts`, `wrangler.toml` | "finding 6"; vector `negative/web-bot-auth-two-labels.json` | built, founder step: deploy the `NONCES` Durable Object |
+| 7 Reader proven through an adapter only with a connector signature | 11 to 17, 19, 28 | `src/readers/forwarded.ts`, `src/pipeline.ts`, `adapters/shared/*`, every adapter | "finding 7" | built, founder step: `TROOTH_CONNECTOR_KEY` per adapter |
+| 8 Workspace roles | 14 | `src/pipeline.ts` (`troothOsAuthorize`, `mayOperate`), `src/db/d1.ts`, `migrations/0004_review_fixes.sql` | "finding 8"; `test/integration.test.ts` role tests | built, founder step: worker-f sends `workspaceRole`; backfill `os_owner_user_id` |
+| 9 Compiler SSRF | 2 | `src/core/ssrf.ts`, `src/compiler/fetch.ts`, `src/index.ts` | "finding 9" | built |
+| 10 Strict page proofs | 9, 18 | `src/serve/proof.ts`, the kits and CLIs | "finding 10"; vectors `negative/page-proof-no-header.json`, `negative/page-proof-unwitnessed.json` | built |
+| 11 Optional response headers covered | 6, 8, 20 | `src/core/httpsig.ts`, `src/serve/headers.ts`, the kits | "findings 4, 11 and 12"; vector `negative/response-uncovered-header.json` | built |
+| 12 Signature TTL 3,900 seconds | 6, 7, 8 | `src/serve/headers.ts` | "findings 4, 11 and 12"; vector `negative/signature-expired.json` | built |
+| 13 Vary: Accept on every adapter answer | 11 to 17 | `adapters/shared/semanto-adapter.mjs` and every adapter | "findings 13 and 14" | built |
+| 14 Adapter and API agree on JSON-LD | 5, 11 to 17 | `adapters/shared/semanto-adapter.mjs`, nginx, Apache, WordPress | "findings 13 and 14" (cross-check of every request shape) | built |
+| 15 Basic records witnessed and not signed | 4, 29 | `src/pipeline.ts` (`witnessOnly`), `src/serve/routes.ts`, `src/compiler/llms.ts`, `src/serve/errors.ts` | "finding 15"; `test/integration.test.ts` "Semanto Basic" | built |
+| 16 Log frontier, tiles, LogDO | 9 | `src/ledger/tiles.ts`, `src/ledger/log.ts`, `src/ledger/store-d1.ts`, `src/ledger/log-do.ts` | "finding 16" | built, founder step: deploy the `LOG` Durable Object and apply migration 0004 |
+| 17 First-publication routes and the declared block | 32 | `src/basic/first-publication.ts`, `src/serve/routes.ts` | "finding 17"; `test/integration.test.ts` "witnesses a first publication" | built |
+| 18 Go CLI flags after the path | 18 | `verifier/go/semanto/cli.go`, `verifier/go/cmd/semanto-verify/main.go` | `verifier/go/semanto/cli_test.go` | built |
+| 19 Small items | 6, 8, 18, 23, 26 | see the report | "finding 19"; `test/integration.test.ts` "review finding 19"; vectors `negative/response-created-not-integer.json`, `negative/jws-bad-nbf.json`, `negative/jws-header-null.json` | built |
+
 ## Notes
 
 **A. The log leaf for a version.** Resolved at integration: the ledger owns the format (`src/ledger/ports.ts`, canonical JSON of `{ kind, trooth_id, ref, hash, at }`). `src/serve/proof.ts` carries `ledger.leaf` in every proof and `verifyProof` recomputes the leaf hash from it, requires `kind` `semanto_version` and `hash` equal to the proof's `root_hash`. The vectors already had this shape and were not regenerated.

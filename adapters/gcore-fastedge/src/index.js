@@ -8,12 +8,23 @@
 // suffix, never User-Agent), fetches the signed bytes from the Trooth API and
 // returns them with the API's headers, or fetches your origin and adds the
 // Trooth-Semanto-Version and Link headers to HTML. Settings come from the
-// app's environment variables in the FastEdge panel.
+// app's environment variables in the FastEdge panel; the connector private
+// JWK (TROOTH_CONNECTOR_KEY) is a FastEdge secret, and with it a reader's Web
+// Bot Auth request is forwarded with the host it addressed, signed.
 
 import { getEnv } from "fastedge::env";
+import { getSecret } from "fastedge::secret";
 import { handleRequest, createManifestCache, configFromEnv } from "../../shared/semanto-adapter.mjs";
 
 let manifestCache = null;
+
+function safeSecret(name) {
+  try {
+    return getSecret(name) || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 addEventListener("fetch", (event) => event.respondWith(handle(event.request)));
 
@@ -22,6 +33,7 @@ async function handle(request) {
     TROOTH_ID: getEnv("TROOTH_ID"),
     TROOTH_API_BASE: getEnv("TROOTH_API_BASE"),
     MODE: getEnv("MODE"),
+    TROOTH_CONNECTOR_KEY: safeSecret("TROOTH_CONNECTOR_KEY"),
   });
   // Your site. The CDN resource's origin hostname, for example origin.example.com.
   const originHost = getEnv("ORIGIN_HOST");

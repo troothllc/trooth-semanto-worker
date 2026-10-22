@@ -23,6 +23,7 @@
 import { toBase64, fromBase64, utf8 } from "./encoding";
 import { sha256 } from "./hash";
 import { importPrivate, importPublic, sign as rawSign, verify as rawVerify, type PrivateJwk, type PublicJwk } from "./keys";
+import { keyValidAtSigning } from "./jws";
 
 export type HeaderBag = Headers | Record<string, string | string[] | undefined>;
 
@@ -131,7 +132,8 @@ export function parseSignatureInput(value: string): Record<string, { components:
     for (const pm of m[3]!.matchAll(/;([A-Za-z*][A-Za-z0-9_.*-]*)(?:=("(?:[^"\\]|\\.)*"|[^;,\s]+))?/g)) {
       const k = pm[1]!;
       const v = pm[2] === undefined ? "" : pm[2].startsWith('"') ? pm[2].slice(1, -1).replace(/\\(.)/g, "$1") : pm[2];
-      if (k === "created" || k === "expires") (params as Record<string, unknown>)[k] = Number(v);
+      // RFC 9421 2.3: created and expires are Integers. Anything else is kept as NaN so the verifier refuses it as malformed.
+      if (k === "created" || k === "expires") (params as Record<string, unknown>)[k] = /^-?\d{1,15}$/.test(v) ? Number(v) : Number.NaN;
       else if (k === "keyid" || k === "alg" || k === "nonce" || k === "tag") (params as Record<string, unknown>)[k] = v;
     }
     if (typeof params.created !== "number" || typeof params.keyid !== "string") continue;
@@ -215,8 +217,8 @@ export async function signMessage(m: MessageForSigning, priv: PrivateJwk, opts: 
 }
 
 export type SigVerification =
-  | { ok: true; label: string; keyid: string; params: SignatureParams; components: string[] }
-  | { ok: false; reason: "no_signature" | "malformed" | "unknown_key" | "bad_signature" | "expired" | "not_yet_valid" | "missing_component" | "wrong_tag" | "unsupported_alg" | "too_old" };
+  | { ok: true; label: string; keyid: string; params: SignatureParams; components: string[]; notes: string[] }
+  | { ok: false; reason: "no_signature" | "malformed" | "unknown_key" | "bad_signature" | "expired" | "not_yet_valid" | "missing_component" | "wrong_tag" | "unsupported_alg" | "too_old" | "key_not_yet_valid" | "key_expired" | "key_revoked" };
 
 export interface VerifyOptions {
   resolveKey: (keyid: string) => Promise<PublicJwk | null> | PublicJwk | null;
@@ -229,20 +231,42 @@ export interface VerifyOptions {
   maxAgeSeconds?: number;
   /** Accept `created` this far in the future (clock skew). */
   skewSeconds?: number;
+  /**
+   * Verify this label only. Without it every label is tried in turn, which
+   * is right for a response but wrong for a request whose nonce is claimed
+   * afterwards: the caller must choose one label, verify it, and claim that
+   * label's nonce (a decoy label cannot then lend its fresh nonce to a
+   * replayed signature).
+   */
+  label?: string;
+  /**
+   * Read the signature from these fields instead of Signature-Input and
+   * Signature. A proxy that vouches for a request whose Signature fields hold
+   * someone else's signature carries its own in separate fields, so its
+   * signature can cover the original Signature fields whole (the connector
+   * forwarding signature, src/readers/forwarded.ts).
+   */
+  inputHeader?: string;
+  signatureHeader?: string;
 }
 
 export async function verifyMessage(m: MessageForSigning, opts: VerifyOptions): Promise<SigVerification> {
-  const si = getHeader(m.headers, "signature-input");
-  const sg = getHeader(m.headers, "signature");
+  const si = getHeader(m.headers, opts.inputHeader ?? "signature-input");
+  const sg = getHeader(m.headers, opts.signatureHeader ?? "signature");
   if (!si || !sg) return { ok: false, reason: "no_signature" };
   const inputs = parseSignatureInput(si);
   const sigs = parseSignature(sg);
-  const labels = Object.keys(inputs).filter((l) => sigs[l]);
+  let labels = Object.keys(inputs).filter((l) => sigs[l]);
+  if (opts.label !== undefined) labels = labels.filter((l) => l === opts.label);
   if (labels.length === 0) return { ok: false, reason: "malformed" };
   const now = opts.now ?? Math.floor(Date.now() / 1000);
   let last: SigVerification = { ok: false, reason: "malformed" };
   for (const label of labels) {
     const { components, params, raw } = inputs[label]!;
+    if (!Number.isInteger(params.created) || (params.expires !== undefined && !Number.isInteger(params.expires))) {
+      last = { ok: false, reason: "malformed" };
+      continue;
+    }
     if (params.alg && params.alg !== "ed25519") {
       last = { ok: false, reason: "unsupported_alg" };
       continue;
@@ -285,13 +309,40 @@ export async function verifyMessage(m: MessageForSigning, opts: VerifyOptions): 
       last = { ok: false, reason: "bad_signature" };
       continue;
     }
-    return { ok: true, label, keyid: params.keyid, params, components };
+    // The key is judged when the message was signed (created), as a JWS key is judged at its iat.
+    const kv = keyValidAtSigning(jwk, params.created * 1000);
+    if (!kv.ok) {
+      last = { ok: false, reason: kv.reason };
+      continue;
+    }
+    return { ok: true, label, keyid: params.keyid, params, components, notes: kv.notes };
   }
   return last;
 }
 
-/** The components Semanto covers on every response it signs. */
+/**
+ * The components Semanto covers on every response it signs. Trooth-Page-Hash
+ * is always the digest of the exact body bytes of this response
+ * (docs/spec/response-signatures.md).
+ */
 export const SEMANTO_RESPONSE_COMPONENTS = ["@status", "content-type", "content-digest", "trooth-semanto-version", "trooth-page-hash"] as const;
+
+/**
+ * Headers Semanto covers whenever it sends them. Trooth-Signed-Page-Hash
+ * carries the manifest hash of the signed page when the body is a derived
+ * representation (a page's JSON-LD, a page behind its live copy, a proof
+ * object). A verifier reads the covered list from Signature-Input and refuses
+ * a Trooth header that is present but not covered.
+ */
+export const SEMANTO_RESPONSE_OPTIONAL_COMPONENTS = ["trooth-signed-page-hash", "trooth-signed-by", "trooth-semanto-state", "location", "content-signal", "link"] as const;
+
+/** The optional headers a verifier must find covered when they are present; content-signal and link are reported, not required. */
+export const SEMANTO_RESPONSE_MUST_COVER_WHEN_PRESENT = ["trooth-signed-page-hash", "trooth-signed-by", "trooth-semanto-state", "location"] as const;
+
+/** The component list for one response: the fixed list plus every optional header the response carries. */
+export function semantoResponseComponents(headers: HeaderBag): string[] {
+  return [...SEMANTO_RESPONSE_COMPONENTS, ...SEMANTO_RESPONSE_OPTIONAL_COMPONENTS.filter((c) => getHeader(headers, c) !== null)];
+}
 
 /** The components Web Bot Auth requires on a signed request (draft-ietf-webbotauth-httpsig-protocol-00). */
 export const WEB_BOT_AUTH_REQUIRED = ["@authority", "signature-agent"] as const;

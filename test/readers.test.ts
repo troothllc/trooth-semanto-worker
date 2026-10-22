@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Trooth, LLC
 //
 // Tests for src/readers: Web Bot Auth verification and read receipts.
-// The agent directory at https://agent.example is a fixture; the company
-// is Acme Inc (acme).
+// The agent directory at https://agent.fixtureagent.com is a fixture (a
+// plainly fictional public name: the SSRF guard refuses reserved names such as
+// .example, so the fixture uses a .com name); the company is Acme Inc (acme).
 
 import { describe, it, expect } from "vitest";
 import { generateKeyPair, type PrivateJwk, type PublicJwk } from "@/core/keys";
@@ -14,7 +15,7 @@ import { verifyWebBotAuth, parseSignatureAgent, directoryUrl, directoryDisplayNa
 import { makeReceipt, recordRead, hashIp, ipHashSalt, utcDay, signDailyDigest, verifyDailyDigest, summarize, dashboardRows, receiptsCsv, type Receipt } from "@/readers/receipts";
 
 const NOW_S = 1_792_000_000; // a fixed unix time
-const AGENT = "https://agent.example";
+const AGENT = "https://agent.fixtureagent.com";
 const DIR = `${AGENT}${DIRECTORY_PATH}`;
 const TARGET = "https://acme.com/pricing";
 
@@ -57,13 +58,14 @@ async function signedRequest(priv: PrivateJwk, opts: { created?: number; ttl?: n
 
 describe("Web Bot Auth (draft-ietf-webbotauth-httpsig-protocol-00)", () => {
   it("parses Signature-Agent as a structured-field string holding an https URL", () => {
-    expect(parseSignatureAgent('"https://agent.example"')).toEqual({ ok: true, url: "https://agent.example/" });
-    expect(parseSignatureAgent("https://agent.example/keys.json")).toEqual({ ok: true, url: "https://agent.example/keys.json" });
-    expect(parseSignatureAgent('"http://agent.example"')).toMatchObject({ ok: false, reason: "signature_agent_not_https" });
+    expect(parseSignatureAgent(`"${AGENT}"`)).toEqual({ ok: true, url: `${AGENT}/` });
+    expect(parseSignatureAgent(`${AGENT}/keys.json`)).toEqual({ ok: true, url: `${AGENT}/keys.json` });
+    expect(parseSignatureAgent('"http://agent.fixtureagent.com"')).toMatchObject({ ok: false, reason: "signature_agent_not_https" });
     expect(parseSignatureAgent('"not a url"')).toMatchObject({ ok: false });
     expect(parseSignatureAgent(null)).toMatchObject({ ok: false, reason: "no_signature_agent" });
-    expect(directoryUrl("https://agent.example/")).toBe(DIR);
-    expect(directoryUrl("https://agent.example/keys.json")).toBe("https://agent.example/keys.json");
+    expect(directoryUrl(`${AGENT}/`)).toBe(DIR);
+    // The directory is always the well-known path on the origin: a requester's path and query are dropped.
+    expect(directoryUrl(`${AGENT}/keys.json?x=1`)).toBe(DIR);
   });
 
   it("proves a valid signed request and reports the directory url and keyid, nothing else", async () => {
@@ -124,7 +126,7 @@ describe("Web Bot Auth (draft-ietf-webbotauth-httpsig-protocol-00)", () => {
     expect(r).toMatchObject({ proven: false, reason: "no_signature" });
     expect(directoryDisplayName(null, "none")).toBe("unproven reader");
     expect(directoryDisplayName(`${AGENT}/`, "none")).toBe("unproven reader");
-    expect(directoryDisplayName(`${AGENT}/`, "web_bot_auth")).toBe("agent.example");
+    expect(directoryDisplayName(`${AGENT}/`, "web_bot_auth")).toBe("agent.fixtureagent.com");
     expect(directoryDisplayName("https://chatgpt.com/", "web_bot_auth")).toBe("ChatGPT agent (OpenAI)");
   });
 

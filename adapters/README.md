@@ -25,7 +25,11 @@ These outcomes are the ones Cloudflare's Markdown for Agents documents (changelo
 
 ## Headers forwarded from the API
 
-`Content-Type`, `ETag`, `Vary`, `Content-Digest`, `Signature-Input`, `Signature`, `Trooth-Contract`, `Trooth-Semanto-Version`, `Trooth-Page-Hash`, `Link`, `Content-Signal`, `x-markdown-tokens`, `x-original-tokens`. Nothing else (no cookies, no server banners). No `X-Semanto-*` header exists (RFC 6648).
+`Content-Type`, `ETag`, `Vary`, `Content-Digest`, `Signature-Input`, `Signature`, `Trooth-Contract`, `Trooth-Semanto-Version`, `Trooth-Page-Hash`, `Trooth-Signed-Page-Hash`, `Trooth-Signed-By`, `Trooth-Semanto-State`, `Location`, `Link`, `Content-Signal`, `x-markdown-tokens`, `x-original-tokens`. Nothing else (no cookies, no server banners). No header carries an `X-` prefix (RFC 6648). Every answer, including errors and HTML passed to a browser, carries `Vary: Accept`, merged into any `Vary` already present.
+
+## JSON-LD mapping
+
+`/facts.jsonld` at the site root, or `Accept: application/ld+json` there, is the company's facts. Any other path asked for as JSON-LD (by `Accept` or a `.jsonld` suffix) is that page's JSON-LD at `by-path/{path}.jsonld`, never the facts. A page asked for as markdown is fetched with a `.md` suffix so the API returns markdown whatever `Accept` the reader sent. A cross-check test runs every request shape through each adapter and through the API and compares the bytes.
 
 ## The three settings
 
@@ -33,6 +37,7 @@ These outcomes are the ones Cloudflare's Markdown for Agents documents (changelo
 | --- | --- |
 | `TROOTH_ID` | the company's Trooth ID |
 | `TROOTH_API_BASE` | `https://api.trooth.co` |
+| `TROOTH_CONNECTOR_KEY` | the company's connector private key (an Ed25519 JWK, kept in the platform's secret store: a Worker secret, Fastly Secret Store, Gcore `getSecret`, Netlify or Vercel environment variable, an Akamai property variable, a WordPress option). With it, an agent's Web Bot Auth signature is forwarded to the API with `Trooth-Forwarded-Authority` and `Trooth-Forwarded-For` and signed by the adapter (`Trooth-Connector-Signature-Input`, `Trooth-Connector-Signature`), so the read counts as that agent's. Without it, reads through the adapter are unproven readers. The public half is registered in the workspace under connectors. |
 | `MODE` | `semanto_only`: every markdown and JSON-LD request from the signed copy; a page Trooth has not signed gets Trooth's markdown "not found", never an unsigned conversion. `semanto_then_cloudflare_for_unsigned`: only pages the current manifest lists (the manifest is fetched once and kept with its ETag); the rest go to Cloudflare's converter or the host. `proof_only`: only the two `/.well-known` files, plus the two headers on HTML. |
 
 ## Which adapter for which host
@@ -72,6 +77,8 @@ In every case the canonical Semanto lives on the Trooth Network, byte-identical 
 | `gcore-fastedge/` | `src/index.js`, `package.json`, the CDN rule in the README |
 | `nginx/` | `semanto-maps.conf`, `semanto-proxy.conf`, `semanto-server.conf` |
 | `apache/` | `semanto.conf` |
+
+nginx and Apache cannot sign the forwarding. They clear any `Trooth-Forwarded-*` and `Trooth-Connector-*` header a client sent and do not forward agent identity, so a read through them is an "unproven reader" unless the agent's request reaches `api.trooth.co` directly. Use a code adapter in front of them when proven reads matter.
 | `wordpress-plugin/` | `trooth-semanto/` (the plugin), README with the connector endpoint |
 | `head-tag/` | The tags to paste for Webflow, Squarespace, Wix and Shopify; Shopify `llms.txt` and `agents.md` templates |
 | `commerce-platforms/` | Shopify, BigCommerce and Salesforce Commerce scripts; WooCommerce points at the plugin |

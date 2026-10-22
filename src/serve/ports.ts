@@ -26,6 +26,8 @@ export interface CompanyRecord {
   current_version: number | null;
   /** Who holds the signing key. Hosted means Trooth signs responses with the company's key; customer means the witness key signs. */
   custody: "hosted" | "customer";
+  /** Semanto Basic: the version Trooth witnessed (not signed by the company), served while there is no signed version. */
+  basic_version?: number | null;
 }
 
 /** A line in the versions list. */
@@ -58,7 +60,13 @@ export interface StoredPage {
 export interface VersionStore {
   getCompany(trooth_id: string): Promise<CompanyRecord | null>;
   getCompanyByDomain(domain: string): Promise<CompanyRecord | null>;
-  /** The current signed version, or null when there is none. */
+  /**
+   * The version the public routes serve: the current signed version, or, for
+   * a Semanto Basic company with no signed version, its witnessed record
+   * (state read, Trooth's witness statement, no company signature). Null when
+   * there is neither. A caller that needs a signed version checks
+   * header.state === "signed".
+   */
   getCurrent(trooth_id: string): Promise<SemantoFile | null>;
   getVersion(trooth_id: string, version: number): Promise<SemantoFile | null>;
   listVersions(trooth_id: string): Promise<VersionSummary[]>;
@@ -128,8 +136,10 @@ export interface KeyPort {
   getCompanySigningKey(trooth_id: string): Promise<PrivateJwk | null>;
   getWitnessKey(): Promise<PrivateJwk>;
   getWitnessPublicKeys(): Promise<Jwks>;
-  /** Resolve a kid across the company's keys and Trooth's witness keys. */
-  resolve(trooth_id: string | null, kid: string): Promise<PublicJwk | null>;
+  /** A kid among this company's own keys only. A company signature resolves here and nowhere else. */
+  resolveCompany(trooth_id: string, kid: string): Promise<PublicJwk | null>;
+  /** A kid among Trooth's keys only. Witness statements, tree heads, checkpoints and revocation lists resolve here and nowhere else. */
+  resolveTrooth(kid: string): Promise<PublicJwk | null>;
 }
 
 /** What a read receipt records: the representation, the page and whether the reader proved a key directory. Never a user agent string. */

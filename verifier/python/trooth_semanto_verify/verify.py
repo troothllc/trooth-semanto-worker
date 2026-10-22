@@ -20,17 +20,21 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from .canonical import canonical_bytes, canonicalize
 from .httpsig import (
     SEMANTO_RESPONSE_COMPONENTS,
+    SEMANTO_RESPONSE_MUST_COVER_WHEN_PRESENT,
     SEMANTO_RESPONSE_TAG,
     WEB_BOT_AUTH_REQUIRED,
     WEB_BOT_AUTH_TAG,
     header_get,
+    parse_signature_input,
     verify_content_digest,
     verify_message,
 )
-from .jws import JWS_TYPES, b64url_decode, ed25519_verify, key_resolver, parse_time, verify_jws
+from .jws import JWS_TYPES, b64url_decode, ed25519_verify, has_roles, parse_time, role_keys, role_resolver, strict_role_resolver, verify_jws
 from .merkle import digest, digest_bytes, is_digest, leaf_hash, root_from_leaf_hashes, verify_consistency as _verify_consistency, verify_inclusion
 
 SCHEMA_URL = "https://trooth.co/schemas/semanto/v1.json"
+TROOTH_LOG_SIGNER_NAME = "trooth.co"
+TROOTH_LOG_ORIGIN = "trooth.co/semanto/log/v1"
 _B32 = "abcdefghijklmnopqrstuvwxyz234567"
 _ISO = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
@@ -130,7 +134,11 @@ def state_of(version: dict, now: Now = None, revocations: Optional[dict] = None,
 class _Checks:
     def __init__(self) -> None:
         self.list: List[dict] = []
+        self.notes: List[str] = []
         self.reason: Optional[str] = None
+
+    def note(self, text: str) -> None:
+        self.notes.append(text)
 
     def add(self, name: str, ok: bool, detail: str, reason: Optional[str] = None) -> bool:
         self.list.append({"name": name, "ok": ok, "detail": detail})
@@ -140,7 +148,7 @@ class _Checks:
 
     def result(self, **extra: Any) -> dict:
         ok = all(c["ok"] for c in self.list)
-        out = {"ok": ok, "reason": None if ok else self.reason, "checks": self.list}
+        out = {"ok": ok, "reason": None if ok else self.reason, "checks": self.list, "notes": self.notes}
         out.update(extra)
         return out
 
@@ -204,10 +212,15 @@ def _as_bytes(b: Union[bytes, bytearray, str]) -> bytes:
 
 
 def verify_semanto(file: dict, page_bytes_by_url: PageBytes = None, keys: Any = None, now: Now = None, revocations: Optional[dict] = None, latest: Optional[int] = None) -> dict:
-    """Verify a whole Semanto file offline. See docs/spec/semanto-file.md."""
+    """Verify a whole Semanto file offline. See docs/spec/semanto-file.md.
+
+    keys: {"company": <JWK Set>, "trooth": <JWK Set>}. The company signature resolves only against the company's set,
+    the witness statement only against Trooth's. A plain JWK Set is the company's, and then no witness checks out.
+    """
     c = _Checks()
     at = _at(now)
-    resolve = key_resolver(keys)
+    company_key = strict_role_resolver(keys, "company")
+    trooth_key = strict_role_resolver(keys, "trooth")
     issues: List[dict] = []
     if not isinstance(file, dict) or not isinstance(file.get("header"), dict):
         c.add("structure", False, "The file has no header.", "malformed")
@@ -259,16 +272,20 @@ def verify_semanto(file: dict, page_bytes_by_url: PageBytes = None, keys: Any = 
 
     sig = file.get("signature")
     if sig:
-        v = verify_jws(sig.get("jws"), resolve, expect_typ=JWS_TYPES["semantoVersion"], payload=h, at=at)
-        c.add("company_signature", v["ok"], f"The header is signed by key {v['header']['kid']} (typ semanto-version)." if v["ok"] else f"The company's signature did not check out: {v['reason']}.", None if v["ok"] else v["reason"])
+        v = verify_jws(sig.get("jws"), company_key, expect_typ=JWS_TYPES["semantoVersion"], payload=h, at=at)
+        c.add("company_signature", v["ok"], f"The header is signed by the company's key {v['header']['kid']} (typ semanto-version)." if v["ok"] else f"The company's signature did not check out: {v['reason']}.", None if v["ok"] else v["reason"])
+        for n in v.get("notes", []) if v["ok"] else []:
+            c.note(f"Company signature: {n}.")
     else:
         c.add("company_signature", h.get("state") != "signed", "The file says it is signed but carries no signature." if h.get("state") == "signed" else "The file is not signed yet; that matches its state.", "unsigned")
 
     w = file.get("witness")
     if w:
         payload = {"root_hash": file["root_hash"], "witnessed_at": w.get("at")}
-        v = verify_jws(w.get("jws"), resolve, expect_typ=JWS_TYPES["witness"], payload=payload, at=at)
-        c.add("witness", v["ok"], f"Trooth witnessed root_hash at {w.get('at')} with key {v['header']['kid']}." if v["ok"] else f"The witness statement did not check out: {v['reason']}.", None if v["ok"] else f"witness_{v['reason']}")
+        v = verify_jws(w.get("jws"), trooth_key, expect_typ=JWS_TYPES["witness"], payload=payload, at=at)
+        c.add("witness", v["ok"], f"Trooth witnessed root_hash at {w.get('at')} with Trooth's key {v['header']['kid']}." if v["ok"] else f"The witness statement did not check out against Trooth's keys: {v['reason']}.", None if v["ok"] else f"witness_{v['reason']}")
+        for n in v.get("notes", []) if v["ok"] else []:
+            c.note(f"Witness statement: {n}.")
     else:
         c.list.append({"name": "witness", "ok": True, "detail": "No witness statement in the file."})
 
@@ -277,18 +294,20 @@ def verify_semanto(file: dict, page_bytes_by_url: PageBytes = None, keys: Any = 
     return c.result(issues=issues, state=state, version_id=version_id(file["root_hash"]) if is_digest(file.get("root_hash")) else None)
 
 
-def verify_page_proof(proof: dict, page_bytes: Union[bytes, str], keys: Any = None, now: Now = None, header: Optional[dict] = None) -> dict:
-    """Verify a semanto.proof document (what /pages/{id}/proof returns) against the page's bytes.
+def verify_page_proof(proof: dict, page_bytes: Union[bytes, str], keys: Any = None, now: Now = None, header: Optional[dict] = None, allow_unwitnessed: bool = False, allow_unlogged: bool = False) -> dict:
+    """Verify a semanto.proof document (what /pages/{id}/proof returns) against the page's bytes, strictly.
 
-    Pass the version header (fetched beside the proof) to tie the proof to root_hash and check the company's signature.
+    The version header (fetched beside the proof) and the company signature are required. The witness
+    statement and the log entry are required unless allow_unwitnessed or allow_unlogged; a missing one is
+    a check that reads "absent", never a silent skip. keys: {"company", "trooth"} kept apart by role.
     """
     c = _Checks()
     at = _at(now)
-    resolve = key_resolver(keys)
+    company_key = strict_role_resolver(keys, "company")
     b = _as_bytes(page_bytes)
-    h = header if header is not None else proof.get("header")
-    inc = proof.get("inclusion")
-    if proof.get("object") != "semanto.proof" or not is_digest(proof.get("page_hash")) or not is_digest(proof.get("pages_root")) or not is_digest(proof.get("root_hash")) or not isinstance(inc, dict):
+    h = header if header is not None else (proof.get("header") if isinstance(proof, dict) else None)
+    inc = proof.get("inclusion") if isinstance(proof, dict) else None
+    if not isinstance(proof, dict) or proof.get("object") != "semanto.proof" or not is_digest(proof.get("page_hash")) or not is_digest(proof.get("pages_root")) or not is_digest(proof.get("root_hash")) or not isinstance(inc, dict):
         c.add("structure", False, "The proof is not a semanto.proof with full digests and an inclusion block.", "malformed")
         return c.result()
 
@@ -314,15 +333,26 @@ def verify_page_proof(proof: dict, page_bytes: Union[bytes, str], keys: Any = No
         else:
             detail, reason = "The header does not list this page at that index with this hash.", "manifest_mismatch"
         c.add("header", bound, detail, reason)
-        sig = verify_jws(proof.get("signature"), resolve, expect_typ=JWS_TYPES["semantoVersion"], payload=h, at=at)
-        c.add("company_signature", sig["ok"], f"The header is signed by key {sig['header']['kid']} (typ semanto-version)." if sig["ok"] else f"The company's signature did not check out: {sig['reason']}.", None if sig["ok"] else sig["reason"])
+        if not proof.get("signature"):
+            c.add("company_signature", False, "The proof carries no company signature.", "signature_absent")
+        else:
+            sig = verify_jws(proof.get("signature"), company_key, expect_typ=JWS_TYPES["semantoVersion"], payload=h, at=at)
+            c.add("company_signature", sig["ok"], f"The header is signed by the company's key {sig['header']['kid']} (typ semanto-version)." if sig["ok"] else f"The company's signature did not check out: {sig['reason']}.", None if sig["ok"] else sig["reason"])
+            for n in sig.get("notes", []) if sig["ok"] else []:
+                c.note(f"Company signature: {n}.")
     else:
-        c.list.append({"name": "header", "ok": True, "detail": "No version header was given, so the proof was not tied to the signed header and the company signature was not checked."})
+        c.add("header", False, "No version header was given, so the proof is not tied to a signed version. Fetch the version beside the proof.", "header_absent")
+        c.add("company_signature", False, "The company signature cannot be checked without the version header.", "header_absent")
 
-    if proof.get("witness"):
+    trooth_keys = keys if has_roles(keys) else {"trooth": []}
+    if proof.get("witness") and proof.get("witnessed_at"):
         payload = {"root_hash": proof["root_hash"], "witnessed_at": proof.get("witnessed_at")}
-        w = verify_jws(proof["witness"], resolve, expect_typ=JWS_TYPES["witness"], payload=payload, at=at)
-        c.add("witness", w["ok"], f"Trooth witnessed this root_hash at {proof.get('witnessed_at')} with key {w['header']['kid']}." if w["ok"] else f"The witness statement did not check out: {w['reason']}.", None if w["ok"] else f"witness_{w['reason']}")
+        w = verify_jws(proof["witness"], strict_role_resolver(keys, "trooth"), expect_typ=JWS_TYPES["witness"], payload=payload, at=at)
+        c.add("witness", w["ok"], f"Trooth witnessed this root_hash at {proof.get('witnessed_at')} with Trooth's key {w['header']['kid']}." if w["ok"] else f"The witness statement did not check out against Trooth's keys: {w['reason']}.", None if w["ok"] else f"witness_{w['reason']}")
+        for n in w.get("notes", []) if w["ok"] else []:
+            c.note(f"Witness statement: {n}.")
+    else:
+        c.add("witness", allow_unwitnessed, "Absent: the proof carries no witness statement (allowed by the caller)." if allow_unwitnessed else "Absent: the proof carries no witness statement.", "witness_absent")
 
     l = proof.get("ledger")
     if l:
@@ -343,34 +373,56 @@ def verify_page_proof(proof: dict, page_bytes: Union[bytes, str], keys: Any = No
         except (ValueError, KeyError, TypeError):
             in_log = False
         c.add("log_inclusion", in_log, f"Leaf {l.get('index')} is in the log of size {l.get('tree_size')} with root {l.get('root_hash')}." if in_log else "The log inclusion proof does not lead to the tree head.", "log_inclusion_failed")
-        th = verify_tree_head({"jws": l.get("tree_head_jws") or (l.get("tree_head") or {}).get("jws"), "payload": (l.get("tree_head") or {}).get("payload")}, keys, at)
+        th = verify_tree_head({"jws": l.get("tree_head_jws") or (l.get("tree_head") or {}).get("jws"), "payload": (l.get("tree_head") or {}).get("payload")}, trooth_keys, at)
         same = th["ok"] and th.get("tree_size") == l.get("tree_size") and th.get("root_hash") == l.get("root_hash")
-        c.add("tree_head", same, (f"The tree head of size {th.get('tree_size')} is signed by Trooth (key {th.get('kid')})." if same else "The signed tree head names a different tree.") if th["ok"] else f"The tree head signature did not check out: {th['reason']}.", "tree_head_mismatch" if th["ok"] else f"tree_head_{th['reason']}")
+        c.add("tree_head", same, (f"The tree head of size {th.get('tree_size')} is signed by Trooth (key {th.get('kid')})." if same else "The signed tree head names a different tree.") if th["ok"] else f"The tree head signature did not check out against Trooth's keys: {th['reason']}.", "tree_head_mismatch" if th["ok"] else f"tree_head_{th['reason']}")
+    else:
+        c.add("log", allow_unlogged, "Absent: the proof carries no log entry (allowed by the caller)." if allow_unlogged else "Absent: the proof carries no log entry.", "log_absent")
 
     vid = proof.get("version_id") or (version_id(proof["root_hash"]) if is_digest(proof.get("root_hash")) else None)
     return c.result(version_id=vid)
 
 
 def verify_response(status: int, headers: Dict[str, Any], body: Union[bytes, str], keys: Any = None, now: Now = None, tag: str = SEMANTO_RESPONSE_TAG, required: Optional[List[str]] = None, max_age_seconds: Optional[int] = None) -> dict:
-    """Verify a signed HTTP response: RFC 9421 with tag trooth-semanto and RFC 9530 Content-Digest."""
+    """Verify a signed HTTP response: RFC 9421 with tag trooth-semanto and RFC 9530 Content-Digest.
+
+    The covered list is read from Signature-Input: the fixed components must be covered, and
+    Trooth-Signed-Page-Hash, Trooth-Signed-By, Trooth-Semanto-State and Location must be covered
+    whenever present. Trooth-Page-Hash is always the digest of the body. Trooth-Signed-By: witness
+    resolves against Trooth's keys; anything else against the company's.
+    """
     c = _Checks()
     b = _as_bytes(body)
+    role = "trooth" if (header_get(headers, "trooth-signed-by") or "").strip().lower() == "witness" else "company"
+    who = "Trooth" if role == "trooth" else "company"
     now_sec = int(time.time()) if now is None else _epoch(now)
     dg = verify_content_digest(header_get(headers, "content-digest"), b)
     c.add("content_digest", dg, "Content-Digest matches the body." if dg else "Content-Digest does not match the body, or is missing.", "content_digest_mismatch")
-    v = verify_message({"kind": "response", "status": status, "headers": headers}, key_resolver(keys), required=required or SEMANTO_RESPONSE_COMPONENTS, tag=tag, now=now_sec, max_age_seconds=max_age_seconds)
-    c.add("signature", v["ok"], f"The response is signed by key {v['keyid']} with tag {v['params'].get('tag')}, covering {', '.join(v['components'])}." if v["ok"] else f"The response signature did not check out: {v['reason']}.", None if v["ok"] else v["reason"])
+    v = verify_message({"kind": "response", "status": status, "headers": headers}, role_resolver(keys, role), required=required or SEMANTO_RESPONSE_COMPONENTS, tag=tag, now=now_sec, max_age_seconds=max_age_seconds)
+    c.add("signature", v["ok"], f"The response is signed by the {who} key {v['keyid']} with tag {v['params'].get('tag')}, covering {', '.join(v['components'])}." if v["ok"] else f"The response signature did not check out against the {who} keys: {v['reason']}.", None if v["ok"] else v["reason"])
+    if v["ok"]:
+        for n in v.get("notes", []):
+            c.note(f"Response signature: {n}.")
+        covered = [x.lower() for x in v["components"]]
+        uncovered = [n for n in SEMANTO_RESPONSE_MUST_COVER_WHEN_PRESENT if header_get(headers, n) is not None and n not in covered]
+        c.add("covered_headers", not uncovered, "Every Trooth header the response carries is covered by the signature." if not uncovered else "These headers are present but not covered by the signature: " + ", ".join(uncovered) + ".", "header_not_covered")
+        for n in ("content-signal", "link"):
+            if header_get(headers, n) is not None and n not in covered:
+                c.note(f"{n} is present but not covered by the signature; do not rely on it.")
     page_hash = header_get(headers, "trooth-page-hash")
-    if page_hash:
-        d = digest(b)
-        c.add("page_hash", d == page_hash, f"Trooth-Page-Hash is the digest of the body: {d}" if d == page_hash else f"Trooth-Page-Hash {page_hash} is not the digest of the body ({d}).", "page_hash_mismatch")
-    return c.result(keyid=v.get("keyid") if v["ok"] else None, params=v.get("params") if v["ok"] else None, version=header_get(headers, "trooth-semanto-version"), page_hash=page_hash)
+    d = digest(b)
+    c.add("page_hash", page_hash == d, f"Trooth-Page-Hash is the digest of the body: {d}" if page_hash == d else (f"Trooth-Page-Hash {page_hash} is not the digest of the body ({d})." if page_hash else "The response carries no Trooth-Page-Hash."), "page_hash_mismatch")
+    return c.result(keyid=v.get("keyid") if v["ok"] else None, params=v.get("params") if v["ok"] else None, signed_by=role, version=header_get(headers, "trooth-semanto-version"), page_hash=page_hash, signed_page_hash=header_get(headers, "trooth-signed-page-hash"))
 
 
 def verify_web_bot_auth_request(method: str, url: str, headers: Dict[str, Any], keys: Any = None, now: Now = None, max_age_seconds: Optional[int] = None) -> dict:
-    """Verify a Web Bot Auth signed request; returns the Signature-Agent it names when it checks out."""
+    """Verify a Web Bot Auth signed request against the agent's keys; one web-bot-auth label only."""
     now_sec = int(time.time()) if now is None else _epoch(now)
-    v = verify_message({"kind": "request", "method": method, "url": url, "headers": headers}, key_resolver(keys), required=WEB_BOT_AUTH_REQUIRED, tag=WEB_BOT_AUTH_TAG, now=now_sec, max_age_seconds=max_age_seconds)
+    inputs = parse_signature_input(header_get(headers, "signature-input") or "")
+    labels = [l for l, e in inputs.items() if e["params"].get("tag") == WEB_BOT_AUTH_TAG]
+    if len(labels) > 1:
+        return {"ok": False, "reason": "more_than_one_label"}
+    v = verify_message({"kind": "request", "method": method, "url": url, "headers": headers}, role_resolver(keys, "agent"), required=WEB_BOT_AUTH_REQUIRED, tag=WEB_BOT_AUTH_TAG, now=now_sec, max_age_seconds=max_age_seconds, label=labels[0] if labels else None)
     if not v["ok"]:
         return v
     agent = (header_get(headers, "signature-agent") or "").strip().strip('"')
@@ -378,21 +430,21 @@ def verify_web_bot_auth_request(method: str, url: str, headers: Dict[str, Any], 
 
 
 def verify_tree_head(tree_head: Union[dict, str], keys: Any = None, now: Now = None) -> dict:
-    """A compact JWS (typ signed-tree-head) over { tree_size, root_hash, signed_at }; a string, {"jws"} or {"payload", "jws"}."""
+    """A compact JWS (typ signed-tree-head) over { tree_size, root_hash, signed_at }, against Trooth's keys; a string, {"jws"} or {"payload", "jws"}."""
+    if not isinstance(tree_head, (str, dict)):
+        return {"ok": False, "reason": "malformed"}
     jws = tree_head if isinstance(tree_head, str) else (tree_head.get("jws") or tree_head.get("tree_head_jws"))
     given = None if isinstance(tree_head, str) else tree_head.get("payload")
-    v = verify_jws(jws, key_resolver(keys), expect_typ=JWS_TYPES["treeHead"], payload=given, at=_at(now))
+    v = verify_jws(jws, role_resolver(keys, "trooth"), expect_typ=JWS_TYPES["treeHead"], payload=given, at=_at(now))
     if not v["ok"]:
         return v
     p = v["payload"]
-    if given is not None and canonicalize(given) != canonicalize(p):
-        return {"ok": False, "reason": "payload_mismatch"}
-    if not isinstance(p.get("tree_size"), int) or not is_digest(p.get("root_hash")):
+    if not isinstance(p, dict) or not isinstance(p.get("tree_size"), int) or not is_digest(p.get("root_hash")):
         return {"ok": False, "reason": "malformed"}
     if isinstance(tree_head, dict) and tree_head.get("root_hash") is not None:
         if tree_head["root_hash"] != p["root_hash"] or (tree_head.get("tree_size") is not None and tree_head["tree_size"] != p["tree_size"]):
             return {"ok": False, "reason": "payload_mismatch"}
-    return {"ok": True, "kid": v["header"]["kid"], "payload": p, "tree_size": p["tree_size"], "root_hash": p["root_hash"], "signed_at": p.get("signed_at")}
+    return {"ok": True, "kid": v["header"]["kid"], "payload": p, "tree_size": p["tree_size"], "root_hash": p["root_hash"], "signed_at": p.get("signed_at"), "notes": v.get("notes", [])}
 
 
 def verify_inclusion_in_log(proof: dict, root_hash_override: Optional[str] = None) -> bool:
@@ -405,11 +457,14 @@ def verify_consistency(proof: dict) -> bool:
     return _verify_consistency(proof["from"], proof["to"], digest_bytes(proof["old_root"]), digest_bytes(proof["new_root"]), [digest_bytes(x) for x in proof.get("path") or []])
 
 
-def verify_checkpoint(text: str, keys: Any = None, expected_origin: Optional[str] = None) -> dict:
+def verify_checkpoint(text: str, keys: Any = None, expected_origin: Optional[str] = TROOTH_LOG_ORIGIN, expected_name: Optional[str] = TROOTH_LOG_SIGNER_NAME) -> dict:
     """A signed note (golang.org/x/mod/sumdb/note): origin, size, base64 root, blank line, then lines "\u2014 name base64(keyhash4||sig)".
 
-    keyhash4 is the first 4 bytes of SHA-256(name || "\n" || 0x01 || pubkey). The signer name is the log operator's (Trooth: "trooth.co").
+    keyhash4 is the first 4 bytes of SHA-256(name || "\n" || 0x01 || pubkey). Only Trooth's keys are tried,
+    only a line named "trooth.co" counts, and the origin must be "trooth.co/semanto/log/v1" unless another is named.
     """
+    if not isinstance(text, str):
+        return {"ok": False, "reason": "malformed"}
     split = text.find("\n\n")
     if split < 0:
         return {"ok": False, "reason": "malformed"}
@@ -420,23 +475,29 @@ def verify_checkpoint(text: str, keys: Any = None, expected_origin: Optional[str
     origin = lines[0]
     if expected_origin and origin != expected_origin:
         return {"ok": False, "reason": "wrong_origin"}
+    if not re.fullmatch(r"\d+", lines[1]):
+        return {"ok": False, "reason": "malformed"}
     try:
         size = int(lines[1])
         root = base64.b64decode(lines[2], validate=True)
     except (ValueError, TypeError):
         return {"ok": False, "reason": "malformed"}
-    candidates: list = []
-    from .jws import _collect
-
-    _collect(keys, candidates)
+    candidates = role_keys(keys, "trooth")
     saw_line = False
+    saw_name = False
     for line in sig_block.split("\n"):
         m = re.match(r"^\u2014 (\S+) (\S+)$", line)
         if not m:
             continue
         saw_line = True
         name = m.group(1)
-        blob = base64.b64decode(m.group(2))
+        if expected_name and name != expected_name:
+            continue
+        saw_name = True
+        try:
+            blob = base64.b64decode(m.group(2))
+        except (ValueError, TypeError):
+            continue
         key_hash, sig = blob[:4], blob[4:]
         for jwk in candidates:
             pub = b64url_decode(jwk["x"])
@@ -446,18 +507,25 @@ def verify_checkpoint(text: str, keys: Any = None, expected_origin: Optional[str
             if ed25519_verify(jwk, sig, body.encode("utf-8")):
                 return {"ok": True, "origin": origin, "name": name, "tree_size": size, "root_hash": "sha256:" + root.hex(), "kid": jwk.get("kid")}
             return {"ok": False, "reason": "bad_signature"}
-    return {"ok": False, "reason": "unknown_key" if saw_line else "malformed"}
+    return {"ok": False, "reason": "malformed" if not saw_line else ("wrong_signer" if not saw_name else "unknown_key")}
 
 
 def verify_offer(jws: str, keys: Any = None, now: Now = None) -> dict:
-    v = verify_jws(jws, key_resolver(keys), expect_typ=JWS_TYPES["offer"], at=_at(now))
+    """A signed offer (typ signed-offer), against the company's keys."""
+    v = verify_jws(jws, role_resolver(keys, "company"), expect_typ=JWS_TYPES["offer"], at=_at(now))
     if not v["ok"]:
         return v
     return {**v, "offer_id": semanto_id("smo", digest(canonical_bytes(v["payload"])))}
 
 
 def verify_revocation_list(jws: str, keys: Any = None, now: Now = None) -> dict:
-    return verify_jws(jws, key_resolver(keys), expect_typ=JWS_TYPES["revocation"], at=_at(now))
+    """A signed revocation list (typ revocation-list), against Trooth's keys."""
+    v = verify_jws(jws, role_resolver(keys, "trooth"), expect_typ=JWS_TYPES["revocation"], at=_at(now))
+    if not v["ok"]:
+        return v
+    if not isinstance(v["payload"], dict) or not isinstance(v["payload"].get("revocations"), list):
+        return {"ok": False, "reason": "malformed"}
+    return v
 
 
 def parse_link(value: Optional[str]) -> List[dict]:

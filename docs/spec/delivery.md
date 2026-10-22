@@ -18,7 +18,8 @@ The negotiation table matches Cloudflare's documented outcomes, so an agent gets
 | `Accept: text/markdown, text/html;q=0.9` | markdown |
 | `Accept: text/*` | markdown when offered first, else HTML |
 | `Accept: */*` or no Accept | HTML (a browser) |
-| `Accept: application/ld+json` | the facts as JSON-LD |
+| `Accept: application/ld+json` on a page | that page's JSON-LD |
+| `Accept: application/ld+json` on `/facts.jsonld` at the site root | the company's facts as JSON-LD |
 | `Accept: text/markdown;q=0` | HTML |
 | path ending in `.md` or `/index.md` | markdown |
 | path ending in `.jsonld` or `/facts.jsonld` | JSON-LD |
@@ -96,4 +97,19 @@ Where no code can run, the head tag (`<link rel="https://trooth.co/rel/semanto">
 
 ## Every served answer has the full header set
 
-Pages, parts of a long page, the facts, `llms.txt`, `llms-full.txt`, `sitemap.md` and the whole file all carry the headers in `docs/spec/response-signatures.md`, including the signature. An adapter copies them byte for byte from the Trooth-hosted answer; it adds nothing and removes nothing except hop-by-hop headers.
+Pages, parts of a long page, the facts, `llms.txt`, `llms-full.txt`, `sitemap.md` and the whole file all carry the headers in `docs/spec/response-signatures.md`, including the signature. An adapter copies them byte for byte from the Trooth-hosted answer; it removes nothing except hop-by-hop headers, and adds only `Vary: Accept`, merged into any `Vary` already present, on every answer including errors and the HTML passed through to a browser, so a shared cache never gives a browser's HTML to an agent that asked for markdown or the other way around. `Vary` is not covered by the signature.
+
+## How an adapter maps a request
+
+Every adapter (`adapters/shared/semanto-adapter.mjs` and the PHP, nginx and Apache equivalents) maps a request on the company's domain to the same Trooth-hosted answer the API gives for the same `Accept`, and a cross-check test runs every request shape through both:
+
+| Request on the company's domain | Trooth-hosted answer |
+| --- | --- |
+| a page, markdown asked for | `/public/semanto/{trooth_id}/by-path/{path}.md` (or the page id's `/pages/{smp_id}.md`; the `.md` suffix fixes the representation so the API never re-negotiates it) |
+| `/facts.jsonld` at the site root, or `Accept: application/ld+json` there | `/public/semanto/{trooth_id}/facts.jsonld` |
+| a page with `Accept: application/ld+json`, or `{path}.jsonld` | `/public/semanto/{trooth_id}/by-path/{path}.jsonld`: that page's JSON-LD, never the company's facts |
+| `/.well-known/trooth.semanto`, `/.well-known/trooth-keys.json`, `/llms.txt`, `/llms-full.txt`, `/sitemap.md` | the same path on the Trooth-hosted copy |
+
+### Forwarding a signed agent
+
+When an agent sends a Web Bot Auth signature, the adapter forwards its `Signature`, `Signature-Input` and `Signature-Agent` unchanged, adds `Trooth-Forwarded-Authority` and `Trooth-Forwarded-For`, and signs the forwarding with the company's connector key (`TROOTH_CONNECTOR_KEY`) in `Trooth-Connector-Signature-Input` and `Trooth-Connector-Signature` (`docs/spec/response-signatures.md`, "Through an adapter"). The adapter always removes any `Trooth-Forwarded-*` or `Trooth-Connector-*` header the client sent before adding its own. nginx and Apache cannot sign; they clear those headers and do not forward, so an agent reading through them is an unproven reader unless its request reaches the API directly.

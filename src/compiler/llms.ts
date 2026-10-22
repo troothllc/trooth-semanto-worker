@@ -35,6 +35,29 @@ export interface LlmsInput {
   semantoUrl?: string;
   /** Where the Trooth-hosted copy of the file is served. */
   publicSemantoUrl?: string;
+  /** What is true of the version this file describes. A version just built is neither signed nor witnessed. */
+  state?: TrustState;
+}
+
+/** Signed by the company and witnessed by Trooth; witnessed by Trooth only (Semanto Basic); or neither yet. */
+export type TrustState = "signed_and_witnessed" | "witnessed" | "neither";
+
+const SEMANTO_LINE_RE = /^- \[Semanto file\]\((\S+)\): .*$/m;
+
+/** The one line about the file, in words that are true for its state. Never says signed when it is not. */
+export function trustLine(state: TrustState, semantoUrl: string): string {
+  const what =
+    state === "signed_and_witnessed"
+      ? "this whole site in one file, signed by the company and witnessed by Trooth; anyone can check it offline"
+      : state === "witnessed"
+        ? "this whole site in one file, witnessed by Trooth and not signed by the company (Semanto Basic); anyone can check the witness statement offline"
+        : "this whole site in one file, read by Trooth; it is not signed by the company or witnessed by Trooth yet";
+  return `- [Semanto file](${semantoUrl}): ${what}`;
+}
+
+/** Rewrite the Semanto line of an llms.txt for the state of the version it is served with. */
+export function withTrustState(llmsTxt: string, state: TrustState): string {
+  return llmsTxt.replace(SEMANTO_LINE_RE, (_m, url: string) => trustLine(state, url));
 }
 
 const SECTION_TITLES: Record<string, string> = {
@@ -102,7 +125,7 @@ export function buildLlmsTxt(input: LlmsInput): string {
   const semantoUrl = input.semantoUrl ?? `https://${input.domain}/.well-known/trooth.semanto`;
   lines.push("## Trooth");
   lines.push("");
-  lines.push(`- [Signed Semanto file](${semantoUrl}): this whole site in one file, signed by the company and witnessed by Trooth; anyone can check it offline`);
+  lines.push(trustLine(input.state ?? "neither", semantoUrl));
   lines.push(`- [Network record](${input.networkUrl}): the public copy on the Trooth Network, with each fact labeled by who said it and when`);
   if (input.publicSemantoUrl) lines.push(`- [Trooth-hosted copy](${input.publicSemantoUrl}): the same bytes served by Trooth`);
   lines.push(`- [llms-full.txt](https://${input.domain}/llms-full.txt): every page's markdown in one file`);

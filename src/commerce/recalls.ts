@@ -15,7 +15,7 @@
 import { canonicalize } from "../core/canonical";
 import { digest } from "../core/hash";
 import { semantoId, isSemantoId } from "../core/ids";
-import { signObject, verifyJws, JWS_TYPES } from "../core/jws";
+import { signObject, verifyJws, JWS_TYPES, type JwsFailure } from "../core/jws";
 import type { PrivateJwk, PublicJwk } from "../core/keys";
 import type { ValidationIssue } from "../core/semanto";
 import { isValidGtin, normalizeGtin } from "./product-record";
@@ -111,7 +111,7 @@ export async function signRecall(input: RecallNoticeInput, priv: PrivateJwk, opt
 
 export type RecallVerification =
   | { ok: true; notice: RecallNotice; kid: string }
-  | { ok: false; reason: "malformed" | "unknown_key" | "bad_signature" | "wrong_type" | "not_yet_valid" | "expired" | "id_mismatch" | "invalid_notice"; issues?: ValidationIssue[] };
+  | { ok: false; reason: JwsFailure | "id_mismatch" | "invalid_notice"; issues?: ValidationIssue[] };
 
 export async function verifyRecall(jws: string, resolveKey: (kid: string) => Promise<PublicJwk | null> | PublicJwk | null, opts: { at?: Date } = {}): Promise<RecallVerification> {
   const v = await verifyJws(jws, resolveKey, { expectTyp: JWS_TYPES.recall, at: opts.at });

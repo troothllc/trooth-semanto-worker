@@ -33,8 +33,12 @@ SEMANTO = read("semanto.json")
 
 def run(v: dict) -> dict:
     kind = v["kind"]
+    # A vector may carry its own keys (a rotated or revoked key) and its own page bytes (a forged page).
+    KEYS = v.get("keys") or globals()["KEYS"]
     if kind == "semanto-file":
-        return V.verify_semanto(v["file"], read("pages.json")["by_url"], KEYS, now=v["now"])
+        return V.verify_semanto(v["file"], v.get("pages_by_url") or read("pages.json")["by_url"], KEYS, now=v["now"])
+    if kind == "tree-head":
+        return V.verify_tree_head(v["tree_head"], KEYS, now=v["now"])
     if kind == "page-proof":
         return V.verify_page_proof(v["proof"], v["page_markdown"], KEYS, now=v["now"], header=v.get("header"))
     if kind == "response":
@@ -78,6 +82,8 @@ def test_vector(name: str) -> None:
         assert r["agent"] == v["expect"]["agent"]
     if v["expect"].get("version_id"):
         assert r["version_id"] == v["expect"]["version_id"]
+    if v["expect"].get("note"):
+        assert any(v["expect"]["note"] in n for n in r.get("notes") or []), r.get("notes")
 
 
 def test_canonical_json_matches_rfc_8785_cases() -> None:
@@ -122,8 +128,9 @@ def test_tampering_is_caught_in_each_layer() -> None:
     wrong_leaf["ledger"]["leaf"]["hash"] = V.digest(b"another root")
     r = V.verify_page_proof(wrong_leaf, v["page_markdown"], KEYS, now=v["now"], header=v["header"])
     assert r["reason"] == "log_leaf_mismatch"
+    # Strict: without the version header the proof is not tied to a signed version.
     no_header = V.verify_page_proof(v["proof"], v["page_markdown"], KEYS, now=v["now"])
-    assert no_header["ok"] is True
+    assert no_header["ok"] is False and no_header["reason"] == "header_absent"
     resp = read("response.json")
     rr = resp["response"]
     r = V.verify_response(rr["status"], rr["headers"], rr["body"] + " ", KEYS, now=resp["now_epoch"])
@@ -156,3 +163,15 @@ def test_cli_offline() -> None:
     bad = subprocess.run([sys.executable, "-m", "trooth_semanto_verify", "file", os.path.join(DIR, "negative", "fact-tampered.json"), "--keys", os.path.join(DIR, "keys.json")], capture_output=True, text=True, env=env, cwd=HERE)
     assert bad.returncode == 1
     assert "FAIL facts_root" in bad.stdout
+
+
+def test_jws_types_include_every_core_type() -> None:
+    # Review finding 19: the kit's registry matches src/core/jws.ts JWS_TYPES, marketplaceCatalog included.
+    assert V.JWS_TYPES["marketplaceCatalog"] == "https://trooth.co/types/marketplace-catalog"
+    assert len(V.JWS_TYPES) == 13
+
+
+def test_web_bot_auth_refuses_a_second_label() -> None:
+    v = read("negative/web-bot-auth-two-labels.json")
+    r = v["request"]
+    assert V.verify_web_bot_auth_request(r["method"], r["url"], r["headers"], KEYS, now=v["now_epoch"])["reason"] == "more_than_one_label"

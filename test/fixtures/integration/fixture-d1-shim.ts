@@ -8,7 +8,7 @@
 // run the SQL the Worker runs, against migrations/0001_semanto.sql and
 // 0002_integration.sql, without a Cloudflare runtime. Not used in production.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
@@ -42,7 +42,9 @@ class ShimStatement {
 export class FixtureD1 {
   readonly db = new DatabaseSync(":memory:");
   constructor() {
-    for (const m of ["0001_semanto.sql", "0002_integration.sql", "0003_os_company.sql"]) this.db.exec(readFileSync(fileURLToPath(new URL(`../../../migrations/${m}`, import.meta.url)), "utf8"));
+    // Every migration in order, as wrangler d1 migrations apply runs them.
+    const dir = fileURLToPath(new URL("../../../migrations/", import.meta.url));
+    for (const m of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) this.db.exec(readFileSync(`${dir}${m}`, "utf8"));
   }
   prepare(sql: string): ShimStatement {
     return new ShimStatement(this.db, sql);

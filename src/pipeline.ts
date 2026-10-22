@@ -56,9 +56,10 @@ import type { LogLeaf } from "./ledger/ports";
 import { timestampTreeHead } from "./ledger/timestamp";
 import type { FetchPort as LedgerFetchPort } from "./ledger/ports";
 import { signRevocationList } from "./ledger/revocation";
-import { verifyWebBotAuth, type WebBotAuthDeps, type WebBotAuthResult } from "./readers/webbotauth";
+import { type WebBotAuthDeps, type WebBotAuthResult } from "./readers/webbotauth";
+import { proveReader, type ForwardingContext, type ReaderProof } from "./readers/forwarded";
 import { recordRead } from "./readers/receipts";
-import type { ReceiptStore } from "./readers/ports";
+import type { NonceStore, ReceiptStore } from "./readers/ports";
 import { runMonitor, type AvailableSurfaces } from "./monitor/run";
 import type { ClockPort, EmailPort, FetchPort as MonitorFetchPort, StorePort as MonitorStorePort, TokenPort } from "./monitor/ports";
 import type { Offer as MonitorOffer, Product as MonitorProduct, SignedRecord } from "./monitor/types";
@@ -79,8 +80,14 @@ import type { CompanyRecord, JobPort, KeyPort, ReceiptInput, ReceiptPort, ServeC
 import type { LedgerLogPort } from "./serve/ledger-port";
 import type { ProblemCode } from "./serve/errors";
 import type { PipelineStore, StoredVersion } from "./pipeline-store";
+export type { WebBotAuthResult };
 
 export const CONNECTOR_TAG = "trooth-connector";
+/** The largest catalog the connector route reads; a larger body is a 413 problem. */
+export const CATALOG_MAX_BYTES = 5 * 1024 * 1024;
+/** What the dashboard and the sign answer say about the two-officer rule while workspaces have one account. */
+export const TWO_OFFICER_NOTE =
+  "Two-officer signing needs two different people with their own accounts. Your workspace has one account today, so a version cannot be signed until a second person joins (team seats). Turn two-officer signing off in Settings to sign with one approval.";
 export const CONNECTOR_COMPONENTS = ["@method", "@target-uri", "content-digest", "content-type"] as const;
 /** How old a connector signature may be, the same window Web Bot Auth uses. */
 export const CONNECTOR_MAX_AGE_SECONDS = 300;
@@ -110,6 +117,10 @@ export interface PipelineDeps {
   enqueue?: (job: CompileJob) => Promise<void>;
   /** Random bytes, injectable for tests. */
   random?: (n: number) => Uint8Array;
+  /** Atomic nonce claims for the connector catalog route (the NonceDO Durable Object in the Worker). */
+  nonces?: NonceStore;
+  /** Where a failed step's exception goes, with its request id. Never to the client. */
+  logError?: (request_id: string, action: string, error: unknown) => void;
 }
 
 export interface CompileSummary {
@@ -128,7 +139,11 @@ const ok = (status: number, body: unknown, headers?: Record<string, string>): Wo
 const problem = (code: ProblemCode, detail: string): WorkspaceResult => ({ status: 0, problem: { code, detail } });
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+/** Signing, keys, LEI, settings and connectors: owner or admin. */
 const mayAdminister = (role: WorkspaceRole) => role === "owner" || role === "admin";
+/** Building and running reports: owner, admin or member. A viewer may only read. */
+const mayOperate = (role: WorkspaceRole) => role === "owner" || role === "admin" || role === "member";
+const VIEWER_ONLY = "A workspace viewer can read but cannot start a build or a report. Ask an owner, admin or member.";
 
 /** Re-hash a file after facts or header fields change: facts_root, the facts tier and root_hash follow src/core/semanto.ts. */
 export async function rehashFile(file: SemantoFile, changes: { facts?: Fact[]; identity?: Partial<Identity> }): Promise<SemantoFile> {
@@ -222,17 +237,35 @@ export class Pipeline implements WorkspaceHandlers {
 
   // ---------------------------------------------------------------- workspace actions
 
+  /** A short id a person can quote to support; the exception it names is logged, never sent. */
+  private requestId(): string {
+    return [...this.random(8)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  private failed(action: string, e: unknown): WorkspaceResult {
+    const id = this.requestId();
+    if (this.d.logError) this.d.logError(id, action, e);
+    else console.error(`semanto ${action} failed, request ${id}:`, e);
+    const message = e instanceof Error ? e.message : "";
+    // A missing secret is this deployment's state, not an outside source failing.
+    const code: ProblemCode = /HOSTED_KEY_SEAL_SECRET/.test(message) ? "conflict" : "upstream_unavailable";
+    return { status: 0, problem: { code, detail: `The step did not finish. Quote request id ${id} to Trooth support.` }, headers: { "Trooth-Request-Id": id } };
+  }
+
   async handle(action: WorkspaceAction, ws: WorkspaceAuth, trooth_id: string, input: unknown): Promise<WorkspaceResult> {
     const body = isRecord(input) ? input : {};
     try {
       switch (action) {
         case "build":
+          if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
           return await this.build(trooth_id);
         case "sign":
           return await this.sign(ws, trooth_id, body);
         case "gap-report":
+          if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
           return await this.gapReport(trooth_id, body);
         case "monitor/run":
+          if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
           return await this.monitorRun(trooth_id, body);
         case "keys/rotate":
           return await this.rotateKeys(ws, trooth_id, body);
@@ -241,16 +274,16 @@ export class Pipeline implements WorkspaceHandlers {
         case "basic/claim":
           return await this.basicClaim(ws, trooth_id, body);
         case "basic/prove":
+          if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
           return await this.basicProve(trooth_id);
         case "first-publication":
+          if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
           return await this.firstPublication(trooth_id, body);
         case "connectors":
           return await this.addConnector(ws, trooth_id, body);
       }
     } catch (e) {
-      const message = e instanceof Error ? e.message : "The step did not finish.";
-      // A missing secret is this deployment's state, not an outside source failing.
-      return problem(/HOSTED_KEY_SEAL_SECRET/.test(message) ? "conflict" : "upstream_unavailable", message);
+      return this.failed(action, e);
     }
   }
 
@@ -268,6 +301,7 @@ export class Pipeline implements WorkspaceHandlers {
   // ---------------------------------------------------------------- sign
 
   private async sign(ws: WorkspaceAuth, trooth_id: string, body: Record<string, unknown>): Promise<WorkspaceResult> {
+    if (!mayAdminister(ws.role)) return problem("forbidden", `A workspace ${ws.role} cannot sign. Ask an owner or admin.`);
     const company = await this.d.store.getCompany(trooth_id);
     if (!company) return problem("conflict", "This company has no record yet.");
     const v = typeof body.version === "number" ? await this.d.store.getVersion(trooth_id, body.version) : await this.d.store.latestVersion(trooth_id);
@@ -303,7 +337,12 @@ export class Pipeline implements WorkspaceHandlers {
     await this.d.store.addAuthorization(trooth_id, { record: role.record, at: iso(now), root_hash: builtRoot });
     const config = await this.d.store.getConfig(trooth_id);
     const decision = mayBeSigned(builtRoot, await this.d.store.authorizations(trooth_id, builtRoot), config.signing);
-    if (!decision.allowed) return ok(202, { object: "semanto.sign_waiting", trooth_id, version: v.file.header.version, root_hash: builtRoot, reason: decision.reason, approvals_missing: decision.missing });
+    if (!decision.allowed) {
+      // Two officers means two distinct accounts. A worker-f workspace has one account until team seats exist, so until
+      // then a company with two_officer set cannot sign; the dashboard shows this sentence.
+      const seats = config.signing.officers === "two_officer" ? { two_officer_note: TWO_OFFICER_NOTE } : {};
+      return ok(202, { object: "semanto.sign_waiting", trooth_id, version: v.file.header.version, root_hash: builtRoot, reason: decision.reason, approvals_missing: decision.missing, ...seats });
+    }
 
     const header: SemantoHeader = { ...v.file.header, state: "signed", identity: { ...v.file.header.identity, ...(decision.authorized_by ? { authorized_by: decision.authorized_by } : {}) } };
 
@@ -466,7 +505,9 @@ export class Pipeline implements WorkspaceHandlers {
   // ---------------------------------------------------------------- Semanto Basic
 
   private async basicClaim(ws: WorkspaceAuth, trooth_id: string, body: Record<string, unknown>): Promise<WorkspaceResult> {
-    if (!mayAdminister(ws.role)) return problem("forbidden", "Only an owner or admin can claim a domain.");
+    // An owner or admin may claim. While the company has no registered owner, a member may claim too, and becomes its owner.
+    const owner = await this.d.store.ownerUserId(trooth_id);
+    if (!mayAdminister(ws.role) && !(ws.role === "member" && owner === null)) return problem("forbidden", "Only an owner or admin can claim a domain.");
     const domain = str(body.domain)?.toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
     if (!domain || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)) return problem("invalid_request", "Send the domain as domain, for example acme.com.");
     const now = this.d.now();
@@ -476,6 +517,7 @@ export class Pipeline implements WorkspaceHandlers {
       await this.d.store.putCompany({ trooth_id, domain, org: str(body.org) ?? domain, tier: "basic", current_version: null, custody: "customer" });
     }
     await this.d.store.putBasic(c);
+    await this.d.store.registerOwner(trooth_id, ws.user_id);
     return ok(200, {
       object: "semanto.basic_claim",
       trooth_id,
@@ -500,14 +542,37 @@ export class Pipeline implements WorkspaceHandlers {
         return { version: s.version, root_hash: s.root_hash, page_count: s.pages, fact_count: s.facts, built_at: iso(this.d.now()) };
       },
     }, this.d.now());
-    const company = built.ok ? built.company : proved.company;
+    let company = built.ok ? built.company : proved.company;
+    // Witness-only finalize: Trooth's witness statement and a "witness" log leaf, no company signature. The record stays
+    // state read; the public routes serve it marked witnessed-not-signed.
+    let witnessed: { witnessed_at: string; log_index: number; tree_size: number } | null = null;
+    if (built.ok && company.record) {
+      const stored = await this.d.store.getVersion(trooth_id, company.record.version);
+      if (stored) witnessed = await this.witnessOnly(trooth_id, stored);
+      if (witnessed) company = { ...company, record: { ...company.record, witnessed: true } };
+    }
     await this.d.store.putBasic(company);
     const setup = measureSetup(company.claimed_at, {
       enter_domain: company.claimed_at,
       ...(company.domain_proved_at ? { publish_token: company.domain_proved_at, prove_domain: company.domain_proved_at } : {}),
       ...(company.basic_built_at ? { build_record: company.basic_built_at } : {}),
     });
-    return ok(200, basicResponse(company, { object: "semanto.basic_proof", trooth_id, proved: true, method: proved.method, state: company.state, record: company.record ?? null, setup }), basicHeaders());
+    return ok(200, basicResponse(company, { object: "semanto.basic_proof", trooth_id, proved: true, method: proved.method, state: company.state, record_state: "read", witnessed: witnessed !== null, witness: witnessed, record: company.record ?? null, setup }), basicHeaders());
+  }
+
+  /** Semanto Basic: witness a built version without a company signature, and log the witness statement. */
+  private async witnessOnly(trooth_id: string, v: StoredVersion): Promise<{ witnessed_at: string; log_index: number; tree_size: number } | null> {
+    if (v.file.header.state !== "read") return null;
+    const now = this.d.now();
+    const witnessed_at = iso(now);
+    const witness = await this.d.keys.getWitnessKey();
+    const root = v.file.root_hash;
+    const vid = versionId(root);
+    const wit = await signObject({ root_hash: root, witnessed_at }, witness, JWS_TYPES.witness, { iat: now });
+    const leaf = await this.d.log.append({ kind: "witness", trooth_id, ref: vid, hash: await digest(wit.detached), at: witnessed_at });
+    const file: SemantoFile = { ...v.file, signature: null, witness: { by: "Trooth", at: witnessed_at, kid: witness.kid, jws: wit.detached }, ledger: null };
+    await this.d.store.markWitnessed(trooth_id, file, witnessed_at);
+    return { witnessed_at, log_index: leaf.index, tree_size: leaf.tree_size };
   }
 
   // ---------------------------------------------------------------- first publication
@@ -526,6 +591,7 @@ export class Pipeline implements WorkspaceHandlers {
     const res = await this.fetcher().fetch(url!);
     if (!res.ok || res.status !== 200) return problem("upstream_unavailable", res.ok ? `The page answered ${res.status}.` : res.detail);
     const page = extract({ html: res.text, url: url!, witnessed_at: res.fetchedAt, source_hash: res.source_hash, headers: res.headers });
+    // Title and author are what the requester states (or the page's own title); the record keeps them apart from what Trooth witnessed.
     const record = await createFirstPublication(
       { url: url!, markdown: page.body, title: str(body.title) ?? page.title, ...(str(body.author) ? { author: str(body.author)! } : {}), trooth_id, witnessed_at: this.d.now() },
       await this.d.keys.getWitnessKey(),
@@ -536,7 +602,9 @@ export class Pipeline implements WorkspaceHandlers {
       object: "semanto.first_publication_receipt",
       ...record,
       markdown: page.body,
-      dispute: exportDisputeStatement(record, { log_url: this.d.config.ledger_url, verify_url: `${this.d.config.public_api_base}/verify` }),
+      record_url: `${this.d.config.public_api_base}/first-publication/${record.record.id}`,
+      check_url: `${this.d.config.public_api_base}/first-publication/check`,
+      dispute: exportDisputeStatement(record, { log_url: this.d.config.ledger_url, record_url: `${this.d.config.public_api_base}/first-publication/${record.record.id}`, check_url: `${this.d.config.public_api_base}/first-publication/check` }),
     });
   }
 
@@ -571,7 +639,8 @@ export class Pipeline implements WorkspaceHandlers {
   async signedRecord(trooth_id: string): Promise<SignedRecord | null> {
     const company = await this.d.store.getCompany(trooth_id);
     const file = await this.d.versions.getCurrent(trooth_id);
-    if (!company || !file) return null;
+    // The monitor compares against a signed record only; a Basic record is witnessed, not signed.
+    if (!company || !file || file.header.state !== "signed") return null;
     const signed_at = (await this.d.versions.listVersions(trooth_id)).find((v) => v.version === file.header.version)?.signed_at ?? file.header.built_at;
     const records = await this.d.commerce.records(trooth_id);
     const offers = await this.d.commerce.offers(trooth_id);
@@ -617,8 +686,15 @@ export class Pipeline implements WorkspaceHandlers {
       { kind: "request", method: req.method, url: req.url, headers: req.headers },
       { resolveKey: (kid) => keys.find((k) => k.kid === kid) ?? null, required: [...CONNECTOR_COMPONENTS], tag: CONNECTOR_TAG, now: nowSec, maxAgeSeconds: CONNECTOR_MAX_AGE_SECONDS },
     );
-    if (!sig.ok) return problem("unauthorized", `The connector signature did not verify (${sig.reason}). Paste the connector's public key into the dashboard under Delivery, Connectors, and sign with tag trooth-connector.`);
+    if (!sig.ok) return problem("unauthorized", `The connector signature did not check out (${sig.reason}). Paste the connector's public key into the dashboard under Delivery, Connectors, and sign with tag trooth-connector.`);
+    if (req.body.length > CATALOG_MAX_BYTES) return problem("payload_too_large", "The catalog is larger than 5 MB. Send it in parts.");
     if (!(await verifyContentDigest(req.headers.get("content-digest"), req.body))) return problem("unauthorized", "Content-Digest does not match the body.");
+    // A nonce on every catalog request, claimed once (atomically in the NonceDO), so a captured request cannot be replayed.
+    if (!sig.params.nonce) return problem("unauthorized", "The connector signature carries no nonce. Update the connector; every request needs a fresh nonce.");
+    if (this.d.nonces) {
+      const until = (sig.params.expires ?? sig.params.created + CONNECTOR_MAX_AGE_SECONDS) * 1000;
+      if (!(await this.d.nonces.claim(`${sig.keyid}:${sig.params.nonce}`, until, nowSec * 1000))) return problem("unauthorized", "This catalog request was already received (its nonce was used). Send a new request.");
+    }
     let doc: unknown;
     try {
       doc = JSON.parse(new TextDecoder().decode(req.body));
@@ -645,7 +721,9 @@ export class Pipeline implements WorkspaceHandlers {
         if (!existing) await this.d.log.append({ kind: "product_record", trooth_id, ref: s.record.id, hash: await digest(canonicalize(s.record)), at: iso(this.d.now()) });
         signedRecords.push(s);
       } catch (e) {
-        skipped.push({ sku: input.sku, reason: e instanceof Error ? e.message : "the record did not validate" });
+        const id = this.requestId();
+        if (this.d.logError) this.d.logError(id, "catalog record", e);
+        skipped.push({ sku: input.sku, reason: `the record did not validate (request id ${id})` });
       }
     }
     for (const input of offers) {
@@ -654,7 +732,9 @@ export class Pipeline implements WorkspaceHandlers {
         await this.d.commerce.putOffer(trooth_id, s);
         signedOffers.push(s);
       } catch (e) {
-        skipped.push({ sku: input.sku, reason: e instanceof Error ? e.message : "the offer did not validate" });
+        const id = this.requestId();
+        if (this.d.logError) this.d.logError(id, "catalog offer", e);
+        skipped.push({ sku: input.sku, reason: `the offer did not validate (request id ${id})` });
       }
     }
     return ok(202, {
@@ -708,7 +788,7 @@ export class Pipeline implements WorkspaceHandlers {
     let head = null;
     let timestamp: unknown = null;
     if (size > 0) {
-      const signed = await this.d.log.ledger.signTreeHead(size);
+      const signed = await this.d.log.signTreeHead(size);
       head = { tree_size: signed.tree_size, root_hash: signed.root_hash };
       timestamp = await this.timestamp(signed);
     }
@@ -871,14 +951,29 @@ export function withCompanies(inner: CommerceStore, companies: { getCompany(id: 
 
 // ---------------------------------------------------------------- readers and receipts
 
-/** The receipt middleware's readers hook over src/readers/webbotauth.ts. A failure proves nothing and names nobody. */
-export function webBotAuthReaders(deps: WebBotAuthDeps): { verify(req: Request): Promise<{ agent_key_url: string | null; proven: boolean; keyid: string | null }> } {
+/**
+ * The receipt middleware's readers hook over src/readers/webbotauth.ts and
+ * src/readers/forwarded.ts. A request forwarded by an adapter is proven only
+ * when the adapter's connector signature (against that company's connector
+ * keys) checks out; then the agent's signature is checked against the
+ * forwarded authority and the forwarded address is used. A failure proves
+ * nothing and names nobody.
+ */
+export function webBotAuthReaders(deps: WebBotAuthDeps, forwarding?: (trooth_id: string) => Promise<ForwardingContext | null>): { verify(req: Request, trooth_id?: string): Promise<ReaderProof> } {
   return {
-    async verify(req) {
-      if (!req.headers.get("signature") || !req.headers.get("signature-input")) return { agent_key_url: null, proven: false, keyid: null };
-      const r: WebBotAuthResult = await verifyWebBotAuth({ method: req.method, url: req.url, headers: req.headers }, deps);
-      return r.proven ? { agent_key_url: r.agent_key_url, proven: true, keyid: r.keyid } : { agent_key_url: null, proven: false, keyid: null };
+    async verify(req, trooth_id) {
+      const ctx = forwarding && trooth_id ? await forwarding(trooth_id) : null;
+      return proveReader({ method: req.method, url: req.url, headers: req.headers }, deps, ctx);
     },
+  };
+}
+
+/** The forwarding context for a company: its connector keys and its domain, from the pipeline store. */
+export function forwardingFromStore(store: Pick<PipelineStore, "getCompany" | "connectorKeys">): (trooth_id: string) => Promise<ForwardingContext | null> {
+  return async (trooth_id) => {
+    const company = await store.getCompany(trooth_id);
+    if (!company) return null;
+    return { domain: company.domain, connectorKeys: await store.connectorKeys(trooth_id) };
   };
 }
 
@@ -918,17 +1013,25 @@ const ROLES: WorkspaceRole[] = ["owner", "admin", "member", "viewer"];
  * Accept a workspace bearer token by asking worker-f's session check through
  * the TROOTH_OS service binding (GET /auth/session in worker-f app-api.ts,
  * read 22 Oct 2026). That route answers { authenticated, companyId, userId,
- * email, role } where role is the account type, "vendor" or "buyer". A
- * worker-f workspace today has one account, the company's own, so a vendor
- * account is the owner of its company; a buyer account has no company to sign
- * for and is refused. The worker-f companyId is mapped to the Semanto
- * trooth_id through semanto_companies.os_company_id (migration 0003), never
- * guessed from a name. Deny (null) when there is no binding, no token, a
- * refused session, an unmapped company, or a buyer account.
+ * email, role } where role is the account type, "vendor" or "buyer", and,
+ * once worker-f has team seats, workspaceRole (owner, admin, member, viewer).
+ *
+ *   workspaceRole present   it is the role, as worker-f states it
+ *   absent, vendor account  owner only when userId is the company's registered
+ *                           owner (semanto_companies.os_owner_user_id, set when
+ *                           the company is created or claimed); every other
+ *                           vendor session is a member
+ *   buyer account           refused: it has no company to act for
+ *
+ * The worker-f companyId is mapped to the Semanto trooth_id through
+ * semanto_companies.os_company_id (migration 0003), never guessed from a
+ * name. Deny (null) when there is no binding, no token, a refused session, an
+ * unmapped company, or a buyer account.
  */
 export function troothOsAuthorize(
   service: ServiceFetcher | undefined,
   troothIdForCompany: (os_company_id: string) => Promise<string | null> = async () => null,
+  ownerUserIdFor: (trooth_id: string) => Promise<string | null> = async () => null,
 ): (req: Request, trooth_id: string) => Promise<WorkspaceAuth | null> {
   return async (req) => {
     if (!service) return null;
@@ -954,9 +1057,15 @@ export function troothOsAuthorize(
     if (accountType !== "vendor") return null;
     const trooth_id = await troothIdForCompany(companyId);
     if (!trooth_id) return null;
-    const role: WorkspaceRole = ROLES.includes("owner") ? "owner" : "member";
     const user_id = str(j.userId) ?? "unknown";
-    const name = str(j.email) ?? "Workspace owner";
+    const stated = str(j.workspaceRole) as WorkspaceRole | undefined;
+    let role: WorkspaceRole;
+    if (stated !== undefined && ROLES.includes(stated)) role = stated;
+    else {
+      const owner = await ownerUserIdFor(trooth_id);
+      role = owner !== null && user_id !== "unknown" && owner === user_id ? "owner" : "member";
+    }
+    const name = str(j.email) ?? "Workspace member";
     return { trooth_id, role, user_id, name };
   };
 }

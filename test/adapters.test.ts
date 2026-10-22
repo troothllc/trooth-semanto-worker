@@ -57,8 +57,9 @@ describe("adapters/shared decide: Accept outcomes", () => {
       expect(coreNegotiate(accept, [...OFFERED] as ("html" | "markdown" | "jsonld")[])).toBe(want);
       const d = decide("/pricing", accept, manifestFixture, config);
       if (want === "html") expect(d.serve).toBe(false);
-      else if (want === "jsonld") expect(d).toMatchObject({ serve: true, url: `${ROOT}/facts.jsonld`, kind: "facts" });
-      else expect(d).toMatchObject({ serve: true, kind: "page", url: `${ROOT}/pages/smp_a2b3c4d5e6f7g2h3j4k5m6n7p2` });
+      // A page path asks for the page's JSON-LD, by path, exactly as the API answers /by-path/pricing.
+      else if (want === "jsonld") expect(d).toMatchObject({ serve: true, url: `${ROOT}/by-path/pricing`, kind: "page_jsonld" });
+      else expect(d).toMatchObject({ serve: true, kind: "page", url: `${ROOT}/pages/smp_a2b3c4d5e6f7g2h3j4k5m6n7p2.md` });
     });
   }
 });
@@ -70,14 +71,14 @@ describe("adapters/shared decide: path suffixes", () => {
     }
   });
   it(".md and /index.md serve the listed page's markdown without an Accept header", () => {
-    expect(decide("/pricing.md", null, manifestFixture, config)).toMatchObject({ serve: true, kind: "page", url: `${ROOT}/pages/smp_a2b3c4d5e6f7g2h3j4k5m6n7p2` });
+    expect(decide("/pricing.md", null, manifestFixture, config)).toMatchObject({ serve: true, kind: "page", url: `${ROOT}/pages/smp_a2b3c4d5e6f7g2h3j4k5m6n7p2.md` });
     expect(decide("/pricing/index.md", null, manifestFixture, config)).toMatchObject({ serve: true, kind: "page" });
-    expect(decide("/index.md", null, manifestFixture, config)).toMatchObject({ serve: true, kind: "page", url: `${ROOT}/pages/smp_b3c4d5e6f7g2h3j4k5m6n7p2q3` });
+    expect(decide("/index.md", null, manifestFixture, config)).toMatchObject({ serve: true, kind: "page", url: `${ROOT}/pages/smp_b3c4d5e6f7g2h3j4k5m6n7p2q3.md` });
   });
-  it(".jsonld and /facts.jsonld serve the facts file", () => {
+  it("the site root's /facts.jsonld serves the facts file; any other .jsonld serves the page's JSON-LD by path", () => {
     expect(decide("/facts.jsonld", null, manifestFixture, config)).toMatchObject({ serve: true, kind: "facts", url: `${ROOT}/facts.jsonld` });
-    expect(decide("/pricing.jsonld", null, manifestFixture, config)).toMatchObject({ serve: true, kind: "facts" });
-    expect(decide("/pricing/facts.jsonld", "text/html", manifestFixture, config)).toMatchObject({ serve: true, kind: "facts" });
+    expect(decide("/pricing.jsonld", null, manifestFixture, config)).toMatchObject({ serve: true, kind: "page_jsonld", url: `${ROOT}/by-path/pricing.jsonld` });
+    expect(decide("/pricing/facts.jsonld", "text/html", manifestFixture, config)).toMatchObject({ serve: true, kind: "page_jsonld", url: `${ROOT}/by-path/pricing/facts.jsonld` });
   });
   it("the suffix wins over an html Accept", () => {
     expect(decide("/pricing.md", "text/html", manifestFixture, config)).toMatchObject({ serve: true, kind: "page" });
@@ -123,7 +124,9 @@ describe("adapters/shared decide: modes", () => {
     expect(decide("/not-listed.md", null, manifestFixture, c)).toEqual({ serve: false, reason: "not_listed" });
     expect(decide("/.well-known/trooth.semanto", null, manifestFixture, c).serve).toBe(true);
     expect(decide("/llms.txt", null, manifestFixture, c).serve).toBe(true);
-    expect(decide("/anything", "application/ld+json", manifestFixture, c)).toMatchObject({ serve: true, kind: "facts" });
+    expect(decide("/anything", "application/ld+json", manifestFixture, c)).toEqual({ serve: false, reason: "not_listed" });
+    expect(decide("/pricing", "application/ld+json", manifestFixture, c)).toMatchObject({ serve: true, kind: "page_jsonld" });
+    expect(decide("/facts.jsonld", null, manifestFixture, c)).toMatchObject({ serve: true, kind: "facts" });
   });
   it("without a manifest, semanto_then_cloudflare_for_unsigned serves no page", () => {
     const c = { ...config, mode: "semanto_then_cloudflare_for_unsigned" as const };
@@ -148,9 +151,12 @@ describe("adapters/shared decide: modes", () => {
     const unlisted = proofHeaders(manifestFixture, "/not-listed", config);
     expect(unlisted["Link"]).not.toContain("alternate");
   });
-  it("withProofHeaders leaves non-html responses untouched and keeps an existing Link", () => {
-    const css = new Response("a{}", { headers: { "Content-Type": "text/css" } });
-    expect(withProofHeaders(css, manifestFixture, "/a.css", config)).toBe(css);
+  it("withProofHeaders adds only Vary: Accept to non-html responses and keeps an existing Link", async () => {
+    const css = new Response("a{}", { headers: { "Content-Type": "text/css", Vary: "Origin" } });
+    const cssOut = withProofHeaders(css, manifestFixture, "/a.css", config);
+    expect(cssOut.headers.get("Vary")).toBe("Origin, Accept");
+    expect(cssOut.headers.get("Trooth-Semanto-Version")).toBeNull();
+    expect(await cssOut.text()).toBe("a{}");
     const html = new Response("<p>hi</p>", { headers: { "Content-Type": "text/html; charset=utf-8", Link: "</style.css>; rel=preload" } });
     const out = withProofHeaders(html, manifestFixture, "/pricing", config);
     expect(out.headers.get("Link")).toMatch(/^<\/style.css>; rel=preload, </);
@@ -201,6 +207,9 @@ function apiHeaders(): Record<string, string> {
     "Trooth-Contract": "1",
     "Trooth-Semanto-Version": "7",
     "Trooth-Page-Hash": "sha256:0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c",
+    "Trooth-Signed-Page-Hash": "sha256:1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d",
+    "Trooth-Signed-By": "witness",
+    "Trooth-Semanto-State": "behind",
     Link: '<https://api.trooth.co/public/semanto/acme-inc>; rel="https://trooth.co/rel/semanto"',
     "Content-Signal": "ai-train=no, search=yes, ai-input=yes",
     "x-markdown-tokens": "12",
@@ -222,6 +231,7 @@ describe("adapters/shared copyHeaders", () => {
     expect(out.has("CF-Ray")).toBe(false);
     expect(out.has("Cache-Control")).toBe(false);
     expect(headerList(out)).toHaveLength(TROOTH_HEADERS.length);
+    expect(TROOTH_HEADERS).toEqual(expect.arrayContaining(["Trooth-Signed-By", "Trooth-Semanto-State", "Trooth-Signed-Page-Hash"]));
   });
   it("lists the headers from the house rules and no X-Semanto header", () => {
     expect(TROOTH_HEADERS).toEqual(expect.arrayContaining(["Content-Type", "ETag", "Vary", "Content-Digest", "Signature-Input", "Signature", "Trooth-Semanto-Version", "Trooth-Page-Hash", "Link", "Content-Signal", "x-markdown-tokens", "x-original-tokens"]));
@@ -292,11 +302,11 @@ describe("adapters/shared handleRequest", () => {
     const url = String(input);
     const h = new Headers(init?.headers);
     if (url === ROOT) return new Response(JSON.stringify(manifestFixture), { status: 200, headers: { ETag: '"v7"', "Content-Type": "application/json" } });
-    if (url.endsWith("/pages/smp_a2b3c4d5e6f7g2h3j4k5m6n7p2")) {
+    if (url.endsWith("/pages/smp_a2b3c4d5e6f7g2h3j4k5m6n7p2.md")) {
       if (h.get("If-None-Match") === apiHeaders().ETag) return new Response(null, { status: 304, headers: apiHeaders() });
       return new Response("# Pricing\n\nPlans start here.\n", { status: 200, headers: apiHeaders() });
     }
-    if (url.endsWith("/facts.jsonld")) return new Response('{"@context":"https://schema.org"}', { status: 200, headers: { ...apiHeaders(), "Content-Type": "application/ld+json" } });
+    if (url.endsWith("/facts.jsonld") || url.endsWith("/by-path/anything")) return new Response('{"@context":"https://schema.org"}', { status: 200, headers: { ...apiHeaders(), "Content-Type": "application/ld+json" } });
     if (url.endsWith("/by-path/missing.md")) return new Response("# Not found\n", { status: 404, headers: { "Content-Type": "text/markdown; charset=utf-8", Vary: "Accept" } });
     return new Response("no", { status: 500 });
   }) as typeof fetch;
@@ -335,7 +345,7 @@ describe("adapters/shared handleRequest", () => {
     const res = await handleRequest({ request: new Request("https://acme.com/missing", { headers: { Accept: "text/markdown" } }), config: c, manifestCache: cache, fetchImpl, next });
     expect(await res.text()).toBe("<html>/missing</html>");
   });
-  it("serves facts for application/ld+json", async () => {
+  it("serves the page's JSON-LD by path for application/ld+json", async () => {
     const res = await handleRequest({ request: new Request("https://acme.com/anything", { headers: { Accept: "application/ld+json" } }), config, manifestCache: null, fetchImpl, next });
     expect(res.headers.get("Content-Type")).toBe("application/ld+json");
     expect(await res.text()).toBe('{"@context":"https://schema.org"}');

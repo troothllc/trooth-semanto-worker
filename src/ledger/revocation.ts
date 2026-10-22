@@ -17,7 +17,7 @@
 // old is itself a finding, so a reader never mistakes silence for health.
 // Every entry also becomes a leaf in the public log.
 
-import { JWS_TYPES, signObject, verifyJws } from "@/core/jws";
+import { JWS_TYPES, signObject, verifyJws, type JwsFailure } from "@/core/jws";
 import type { PrivateJwk, PublicJwk } from "@/core/keys";
 import type { SemantoState } from "@/core/semanto";
 import { digest } from "@/core/hash";
@@ -136,7 +136,7 @@ export async function signRevocationList(entries: RevocationEntry[], troothId: s
 
 export type RevocationListCheck =
   | { ok: true; list: RevocationList }
-  | { ok: false; reason: "stale" | "not_yet_valid" | "bad_signature" | "wrong_type" | "malformed" | "unknown_key"; sentence: string };
+  | { ok: false; reason: "stale" | JwsFailure; sentence: string };
 
 /** Verify a list. A list past next_update is "stale", which a reader must treat as no answer, never as "nothing revoked". */
 export async function verifyRevocationList(jws: string, key: PublicJwk, now: Date = new Date()): Promise<RevocationListCheck> {

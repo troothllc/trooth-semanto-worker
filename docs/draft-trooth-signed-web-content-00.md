@@ -124,6 +124,8 @@ A signature under this document MUST cover at least these components, in any ord
 - the field `content-version`;
 - the field `content-hash`.
 
+When any of the following fields is present in the response, the signature MUST cover it, because each changes what the response means: `location` (a redirect is signed like any other response), a field naming which party signed (when a party other than the publisher, such as a log operator or witness, may sign), and a field stating that the content is behind or not signed by the publisher. When `content-signal` or `link` is present the signature SHOULD cover it; a verifier MUST NOT rely on an uncovered `link` or `content-signal`. A verifier MUST reject a response that carries a field this paragraph requires to be covered when the signature does not cover it. Covered components follow the required ones, in a fixed order the publisher documents.
+
 It MAY cover additional fields. It MUST NOT cover request-derived components such as `@method`, `@target-uri` or `@authority`, because the signed response is meant to be the same for every reader of the same bytes and to survive being stored and forwarded. A verifier that needs to bind a response to a URL does so through the content version and its proof, not through the signature.
 
 ## Signature Parameters
@@ -135,7 +137,9 @@ The signature parameters MUST include:
 - `alg`, which MUST be `ed25519`;
 - `tag`, which MUST be `signed-web-content`.
 
-The parameters SHOULD include `expires`. A signature without `expires` is valid as long as the key and the content version are valid. The parameters MUST NOT include `nonce`; a response signature is not bound to a request.
+`created` and `expires` MUST be Integers as defined by {{RFC9421}}; a verifier MUST reject a decimal, a string or any other type as malformed rather than coerce it.
+
+The parameters SHOULD include `expires`. A signature without `expires` is valid as long as the key and the content version are valid. When responses are cached, `expires` SHOULD be at least `created` plus the response's `max-age` plus its `stale-while-revalidate`, so a response a cache may still serve still verifies; the implementation uses 300 plus 3600, 3900 seconds. The transport signature only says the bytes left the publisher unchanged; the freshness of what was said is carried by the content version's window and the revocation list ({{proofs}}), not by `expires`. The parameters MUST NOT include `nonce`; a response signature is not bound to a request.
 
 Only Ed25519 is defined for this document. A verifier MUST reject a signature with any other `alg`.
 
@@ -149,7 +153,7 @@ Two new response header fields bind the response to what the publisher published
 
 `Content-Version` is a String Structured Field whose value is the content version identifier. The format is publisher-defined and opaque to verifiers.
 
-`Content-Hash` is a String Structured Field whose value is the content hash of the body as published. A verifier MUST compute SHA-256 over the body it received and compare it with `Content-Hash`. When the two differ, the response does not carry the published content, even if the signature verifies, because the signature could have been copied onto other bytes only by also copying `Content-Digest`, which would then fail; the check on `Content-Hash` protects against a publisher-side mismatch between what was published and what was signed.
+`Content-Hash` is a String Structured Field whose value is the SHA-256 of the exact body bytes of this response. It is always the digest of the body sent, for every representation, so a verifier can always check it. When the body is derived from a published page rather than being its bytes (for example the page's JSON-LD, or the page preceded by a notice that it is behind), the publisher SHOULD also send the page's published hash in a separate covered field (the implementation sends `Trooth-Signed-Page-Hash`), which the verifier checks against the proof. A verifier MUST compute SHA-256 over the body it received and compare it with `Content-Hash`. When the two differ, the response does not carry the published content, even if the signature verifies, because the signature could have been copied onto other bytes only by also copying `Content-Digest`, which would then fail; the check on `Content-Hash` protects against a publisher-side mismatch between what was published and what was signed.
 
 Both fields use names without an `X-` prefix per {{RFC6648}}.
 
@@ -176,11 +180,10 @@ Content-Hash: sha256:61f488a2dda6e39c7772db20eb44c13fe71ccb56113199f954d
   88042d5d2c410
 Link: </proofs/smp_mh2iriw5u3rzy53s3mqowrgbh7>; rel="content-proof"
 Signature-Input: sig1=("@status" "content-type" "content-digest"
-  "content-version" "content-hash");created=1792670400;
-  expires=1792670700;keyid="F46vbrrcJTQOgzWl4D8es3IgEPELxv7-Tldk6tp2qhI";
+  "content-version" "content-hash" "link");created=1792670400;
+  expires=1792674300;keyid="F46vbrrcJTQOgzWl4D8es3IgEPELxv7-Tldk6tp2qhI";
   alg="ed25519";tag="signed-web-content"
-Signature: sig1=:pQposla4OcEMJczN9oimjbTUpMJ6buPldy0IhTwiauasKnhyBYGcmyN8
-  4k0H8SftADRoO2v+uOQHl6li/zETAw==:
+Signature: sig1=:<Ed25519 signature over the base below>:
 
 # Security at Acme
 
@@ -196,13 +199,14 @@ The signature base, per {{RFC9421}}, is:
 "content-version": smv_sf26uv6f5niw6xllfj2i6ru6ym
 "content-hash": sha256:61f488a2dda6e39c7772db20eb44c13fe71ccb56113199f
   954d88042d5d2c410
+"link": </proofs/smp_mh2iriw5u3rzy53s3mqowrgbh7>; rel="content-proof"
 "@signature-params": ("@status" "content-type" "content-digest"
-  "content-version" "content-hash");created=1792670400;
-  expires=1792670700;keyid="F46vbrrcJTQOgzWl4D8es3IgEPELxv7-Tldk6tp2qhI";
+  "content-version" "content-hash" "link");created=1792670400;
+  expires=1792674300;keyid="F46vbrrcJTQOgzWl4D8es3IgEPELxv7-Tldk6tp2qhI";
   alg="ed25519";tag="signed-web-content"
 ~~~
 
-Line breaks inside field values above are for display only.
+Line breaks inside field values above are for display only. The byte-stable signature for this response under the deployed field names (`Trooth-Semanto-Version`, `Trooth-Page-Hash`, tag `trooth-semanto`) is in the test vectors (`response.json`).
 
 # Key Discovery {#key-discovery}
 
@@ -243,7 +247,9 @@ Implementation note: Trooth uses `_trooth-keys.<domain>` with `v=trooth1` in dep
 
 ## Key Rotation
 
-A publisher rotates by adding the new key to the JWK Set and the DNS record, signing with it, and, after the longest `expires` it issued under the old key has passed, setting `revoked_at` on the old key or removing it. A verifier MUST NOT accept a signature made with a key after its `revoked_at`, and MUST NOT accept one before its `nbf` or after its `exp`.
+A publisher rotates by adding the new key to the JWK Set and the DNS record, signing with it, and, after the longest `expires` it issued under the old key has passed, setting `revoked_at` on the old key or removing it. A key is judged at the moment it signed: the signature's `created`, or the `iat` of a JWS. A verifier MUST reject a signature whose signing moment is at or after the key's `revoked_at`, before its `nbf`, or at or after its `exp`. A key rotated out or revoked after it signed still verifies what it signed while it was valid, and a verifier SHOULD report that the key was revoked later. When a key is revoked because it was compromised, the publisher MUST set `revoked_at` to the earliest moment the compromise could have begun, so that everything signed from then on is refused, and SHOULD re-sign earlier content it wants carried by a live key.
+
+A publisher's keys and a log operator's or witness's keys are different sets. A verifier MUST resolve a publisher's signature only against the publisher's JWK Set and a log or witness statement only against the operator's set, and MUST NOT merge the two, so a key of one party never signs for the other.
 
 # Validity and Revocation
 
@@ -315,7 +321,7 @@ LxwOGQofnBWw4LFRgj5REWmeauLzcTFOKOEcUTnpjOU=
 — trooth.co <base64 of 4-byte key hash followed by the Ed25519 signature>
 ~~~
 
-The first line is the log's origin, the signature line names the signer (the log operator), and the 4-byte key hash is the first four bytes of SHA-256 over the signer name, a newline, the byte 0x01 and the public key, so a verifier can pick the right key from a set.
+The first line is the log's origin, the signature line names the signer (the log operator), and the 4-byte key hash is the first four bytes of SHA-256 over the signer name, a newline, the byte 0x01 and the public key, so a verifier can pick the right key from a set. A verifier MUST check that the origin line is exactly the log it expects and that the signature line names the expected signer, using only the log operator's keys.
 
 ## The Proof Document
 
@@ -326,7 +332,7 @@ The `content-proof` link resolves to a JSON document that holds, for the content
 - `witness` and `witnessed_at`: when a third party witnessed the version, its signed statement over `{ "root_hash", "witnessed_at" }`;
 - `ledger`: the log name, the leaf index, the tree size, the leaf record and its hash, the inclusion path to the log root, and the signed tree head.
 
-A verifier works outward: the bytes hash to `page_hash`; the page is in `pages_root`; the version record hashes to `root_hash` and lists the page; the publisher signed the version record; the leaf names `root_hash`; the leaf is under the tree head; the tree head is signed by the log. Each step is a hash comparison or an Ed25519 verification and needs no network once the documents and the keys are in hand.
+A verifier works outward: the bytes hash to `page_hash`; the page is in `pages_root`; the version record hashes to `root_hash` and lists the page; the publisher signed the version record; the leaf names `root_hash`; the leaf is under the tree head; the tree head is signed by the log. Each step is a hash comparison or an Ed25519 verification and needs no network once the documents and the keys are in hand. Every step is required: a proof without the version record, the publisher's signature, the witness statement (when the application requires a witness) or the log section fails, naming what is absent. An application MAY explicitly accept content not yet witnessed or not yet logged, and the verifier then reports which parts were absent. A JWS in the proof that carries an embedded payload MUST be refused unless that payload equals, byte for byte, the canonical record the verifier recomputed.
 
 ## Log Endpoints
 
@@ -344,8 +350,8 @@ Monitors fetch tree heads on a schedule, verify consistency between each pair, a
 Given a response with status `S`, header fields `H` and body `B`, judged at instant `T`:
 
 1. Parse `Signature-Input` and `Signature`. Select the signature whose `tag` is `signed-web-content`. If none, the response is unsigned.
-2. Reject if `alg` is not `ed25519`, if any component in {{components}} is not covered, if `T` is not before `expires`, or if `created` is more than a small skew in the future.
-3. Resolve `keyid` to a key in the publisher's JWK Set. Reject if absent, or if the key is outside its `nbf`/`exp` window or past `revoked_at` at `T`. Record whether the `kid` also appears in the `_swc` DNS record.
+2. Reject if `created` or `expires` is not an Integer, if `alg` is not `ed25519`, if any required component in {{components}} is not covered, if a field that must be covered when present is present and not covered, if `T` is not before `expires`, or if `created` is more than a small skew in the future.
+3. Resolve `keyid` to a key in the JWK Set of the party that signed: the publisher's, unless a covered field names the log operator or witness as the signer, then that party's set; never both. Reject if absent, or if at `created` the key was outside its `nbf`/`exp` window or at or past `revoked_at`. Record whether the `kid` also appears in the `_swc` DNS record.
 4. Build the signature base per {{RFC9421}} and verify the Ed25519 signature.
 5. Verify `Content-Digest` against `B`. Verify that SHA-256 of `B` equals `Content-Hash`.
 6. If a `content-proof` link is present and the application wants it, fetch the proof document and verify it per {{proofs}} using the log's keys.
@@ -366,7 +372,11 @@ A client that asks for a signed representation and receives an unsigned one has 
 
 ## Key Compromise
 
-An attacker holding the publisher's private key can sign any content. The log limits the damage: every version the attacker signs that is appended to the log is visible to the publisher's own monitor, and a version served without appearing in the log is detectable by any reader who asks for its proof. Publishers SHOULD keep signing keys in hardware or a managed key service, SHOULD set short `expires` values, and MUST publish `revoked_at` promptly. Verifiers MUST honor `revoked_at` and the revocation list.
+An attacker holding the publisher's private key can sign any content. The log limits the damage: every version the attacker signs that is appended to the log is visible to the publisher's own monitor, and a version served without appearing in the log is detectable by any reader who asks for its proof. Publishers SHOULD keep signing keys in hardware or a managed key service and MUST publish `revoked_at` promptly, set to the earliest moment of possible compromise. Verifiers MUST honor `revoked_at`, judged at the signing moment, and the revocation list.
+
+## Request Signatures Through Intermediaries
+
+A publisher may count reads by agents that sign their requests with {{I-D.ietf-webbotauth-httpsig-protocol}}. A verifier of such a request MUST pick exactly one signature by its tag and refuse a request with more than one, check that signature's parameters and nonce before fetching anything, fetch the agent's key directory only at the origin of `Signature-Agent` and only over HTTPS to a public address (refusing IP literals, private, reserved and local names, and checking the resolved addresses), refuse redirects, cap the size and time of the fetch, verify that one signature, and only then claim its nonce atomically. When an edge adapter on the publisher's domain forwards the request, the adapter forwards the agent's signature fields unchanged, names the authority the agent addressed in its own field, and signs the forwarding with its own key in separate signature fields that cover the agent's; the verifier checks the adapter's signature first and only then checks the agent's against the forwarded authority. An intermediary that cannot sign MUST NOT be trusted to forward an agent's identity.
 
 ## Cloaking and the Same-Content Requirement
 

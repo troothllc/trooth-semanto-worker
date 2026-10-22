@@ -80,6 +80,13 @@ A verifier judging a version at an instant answers in the ledger's words (`src/l
 
 Both signatures are RFC 7515 JWS in compact serialization with RFC 8037 EdDSA (Ed25519), the payload detached: the signed bytes are the canonical JSON of the payload, which any verifier recomputes. The protected header carries `alg: "EdDSA"`, `kid` (the RFC 7638 thumbprint of the key), `typ` (the statement type, checked by every verifier so a signature is never replayed as a different kind of statement), `iat`, and `nbf` or `exp` when the statement has a window. The company's key is found in the JWK Set at `identity.key_binding.jwks_url` (by default `/.well-known/trooth-keys.json` on the domain) and bound to the domain by a TXT record at `_trooth-keys.<domain>` of the form `v=trooth1; kid=<thumbprint>`. Trooth's witness keys are at `https://api.trooth.co/.well-known/trooth-keys.json`.
 
+### Rules every verifier applies to a JWS
+
+- The expected payload decides. A verifier always supplies the canonical JSON it recomputed. A detached JWS is checked against those bytes; a compact JWS that carries its own payload is refused (`payload_mismatch`) unless the embedded payload is byte for byte the expected one, so a forged embedded payload with a real signature over other bytes never passes.
+- The protected header must be a JSON object (a `null`, array or string header is `malformed`); `iat`, `nbf` and `exp`, when present, must be numbers (`malformed`).
+- Keys come from one role and are never merged. The company's signature on a version, a catalog or an offer is checked only against the company's key set; Trooth's witness statement, tree heads, checkpoints and revocation lists only against Trooth's set. A Trooth key never signs for a company and a company key never witnesses (`unknown_key`). A kit given one combined set with no roles splits it by where each key came from; given role-labelled sets it uses them strictly.
+- A key is judged at the moment it signed, the JWS `iat` (or the instant asked about when the statement has no `iat`), not at the moment of checking. A key whose `nbf` is after `iat` is `key_not_yet_valid`; whose `exp` is at or before `iat` is `key_expired`; whose `revoked_at` is at or before `iat` is `key_revoked`. A key rotated out or revoked after it signed still verifies what it signed then, and the result carries a note such as "key revoked after signing on 2026-10-20". When a key is revoked because it was compromised, the company sets `revoked_at` to the earliest moment the compromise could have begun, which refuses everything the key signed from then on; versions it signed earlier stay good, and the company re-signs them with a new key when it wants them carried by a key that is still live.
+
 ## What a verifier checks, in order
 
 1. Structure: the required members, the schema and contract, digests where digests belong.
@@ -87,11 +94,19 @@ Both signatures are RFC 7515 JWS in compact serialization with RFC 8037 EdDSA (E
 3. `pages_root` and `facts_root` recompute from the manifest and the facts.
 4. Every tier hash matches its tier; every fact id matches its fact.
 5. For every page whose bytes are at hand, the bytes hash to the manifest entry.
-6. The company's signature over the header, with `typ` `semanto-version`, with a key from the published set that is valid at the instant.
-7. Trooth's witness statement over `{ root_hash, witnessed_at }`, with `typ` `witness-statement`.
+6. The company's signature over the header, with `typ` `semanto-version`, with a key from the company's set that was valid at the signature's `iat`.
+7. Trooth's witness statement over `{ root_hash, witnessed_at }`, with `typ` `witness-statement`, with a key from Trooth's set.
 8. The state at the instant, with the revocation list when one is at hand.
 
-The first failing step is the reported reason. The reason codes are listed in `verifier/test-vectors/v1/README.md`.
+The first failing step is the reported reason.
+
+### Semanto Basic
+
+A Semanto Basic record is built by Trooth from the company's public pages, witnessed by Trooth and not signed by the company: its header is `read` or `confirmed` with no company signature, and only the witness statement is present. It is served with `Trooth-Semanto-State: witnessed-not-signed`, every markdown body starts with a front matter notice saying so, and its llms.txt says "Witnessed by Trooth, not signed by the company". A verifier reports it as `unsigned` with a valid witness; it never reports it as `current`. When the company signs a version, the signed version is served instead.
+
+### Page proofs are strict
+
+A page proof (`verifyPageProof` in every kit) passes only when all of these are present and good: the page bytes hash to the manifest entry, the manifest entry is in the version, the company's signature, Trooth's witness statement and the log inclusion proof. A missing header is `header_absent`, a missing company signature `signature_absent`, a missing witness `witness_absent`, a missing log proof `log_absent`. A reader that knowingly accepts less passes `allowUnwitnessed` or `allowUnlogged` (`--allow-unwitnessed`, `--allow-unlogged` on the command line); the result then says which parts were absent. The reason codes are listed in `verifier/test-vectors/v1/README.md`.
 
 ## Serving
 

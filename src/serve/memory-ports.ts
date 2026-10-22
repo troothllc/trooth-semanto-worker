@@ -47,9 +47,17 @@ export class MemoryVersionStore implements VersionStore {
 
   private current(trooth_id: string): MemoryVersion | null {
     const c = this.companies.get(trooth_id);
-    if (!c || c.record.current_version === null) return null;
-    const v = c.versions.get(c.record.current_version);
-    return v && v.file.header.state === "signed" ? v : null;
+    if (!c) return null;
+    if (c.record.current_version !== null) {
+      const v = c.versions.get(c.record.current_version);
+      if (v && v.file.header.state === "signed") return v;
+    }
+    // Semanto Basic: the witnessed record, while there is no signed version.
+    if (c.record.basic_version !== undefined && c.record.basic_version !== null) {
+      const v = c.versions.get(c.record.basic_version);
+      if (v && v.file.header.state === "read" && v.file.witness) return v;
+    }
+    return null;
   }
 
   async getCompany(trooth_id: string): Promise<CompanyRecord | null> {
@@ -142,17 +150,11 @@ export class MemoryKeys implements KeyPort {
   async getWitnessPublicKeys(): Promise<Jwks> {
     return { keys: [toPublic(this.witness)] };
   }
-  async resolve(trooth_id: string | null, kid: string): Promise<PublicJwk | null> {
-    if (kid === this.witness.kid) return toPublic(this.witness);
-    if (trooth_id) {
-      const k = this.store.companies.get(trooth_id)?.jwks.keys.find((x) => x.kid === kid);
-      if (k) return k;
-    }
-    for (const c of this.store.companies.values()) {
-      const k = c.jwks.keys.find((x) => x.kid === kid);
-      if (k) return k;
-    }
-    return null;
+  async resolveCompany(trooth_id: string, kid: string): Promise<PublicJwk | null> {
+    return this.store.companies.get(trooth_id)?.jwks.keys.find((x) => x.kid === kid) ?? null;
+  }
+  async resolveTrooth(kid: string): Promise<PublicJwk | null> {
+    return kid === this.witness.kid ? toPublic(this.witness) : null;
   }
 }
 

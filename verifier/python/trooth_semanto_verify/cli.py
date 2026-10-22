@@ -5,9 +5,14 @@
 # one line per check in plain words and exits 0 only when every check passed.
 #
 #   semanto-verify file <semanto.json> [--pages <dir>] [--keys <keys.json>] [--now <iso>] [--revocations <file>]
-#   semanto-verify page <url> [--trooth <base>] [--now <iso>]
+#   semanto-verify page <url> [--trooth <base>] [--now <iso>] [--allow-unwitnessed] [--allow-unlogged]
 #   semanto-verify response <url> [--keys <keys.json>]
 #   semanto-verify log --from <n> --to <m> [--log <url>] [--keys <keys.json>]
+#
+# Keys are kept apart by role: the company's JWK Set (from its domain) checks
+# company signatures; Trooth's checks witness statements, tree heads and
+# revocation lists. `page` is strict by default: the version header must be
+# fetched, and a missing witness statement or log entry fails unless allowed.
 
 from __future__ import annotations
 
@@ -62,6 +67,8 @@ def _print(result: dict, title: str) -> bool:
         print(f"  {'ok  ' if c['ok'] else 'FAIL'} {c['name']}: {c['detail']}")
     if "checks" not in result:
         print(f"  {'ok  ' if result['ok'] else 'FAIL'} {result.get('reason') or ''}")
+    for n in result.get("notes") or []:
+        print(f"  note {n}")
     print("Every check passed." if result["ok"] else f"Failed: {result.get('reason')}.")
     print()
     return bool(result["ok"])
@@ -70,14 +77,14 @@ def _print(result: dict, title: str) -> bool:
 def _load_keys(domain: str, args: argparse.Namespace) -> Any:
     if args.keys:
         return _read_json(args.keys)
-    sets = []
-    for url in (f"https://{domain}/.well-known/trooth-keys.json", f"{args.trooth or TROOTH_API}/.well-known/trooth-keys.json"):
+    keys: dict = {"company": {"keys": []}, "trooth": {"keys": []}}
+    for role, url in (("company", f"https://{domain}/.well-known/trooth-keys.json"), ("trooth", f"{args.trooth or TROOTH_API}/.well-known/trooth-keys.json")):
         try:
-            sets.append(_fetch_json(url))
-            print(f"  ok   fetched the JWK Set at {url}")
+            keys[role] = _fetch_json(url)
+            print(f"  ok   fetched the {'company' if role == 'company' else 'Trooth'} JWK Set at {url}")
         except Exception as e:  # noqa: BLE001 - we report and continue
             print(f"  note {url} could not be read ({e})")
-    return sets
+    return keys
 
 
 def _dns_note(domain: str, kid: Optional[str]) -> None:
@@ -159,8 +166,9 @@ def cmd_response(args: argparse.Namespace, also_proof: bool = False) -> int:
                         header = _fetch_json(version_url).get("header")
                         print(f"  ok   fetched the version header at {version_url}")
                     except Exception as e:  # noqa: BLE001
-                        print(f"  note {version_url} could not be read ({e}); the company signature is not checked.")
-                pr = verify_page_proof(proof, body, keys, now=args.now, header=header)
+                        # Strict: a header that cannot be fetched is a failure, not a skip.
+                        print(f"  FAIL {version_url} could not be read ({e}); without the header the proof is not tied to a signed version.")
+                pr = verify_page_proof(proof, body, keys, now=args.now, header=header, allow_unwitnessed=getattr(args, "allow_unwitnessed", False), allow_unlogged=getattr(args, "allow_unlogged", False))
                 ok = _print(pr, f"Proof at {proof_url}") and ok
                 if header:
                     print(f"State now: {state_of({'header': header, 'root_hash': proof.get('root_hash'), 'signature': proof.get('signature')}, args.now)}.\n")
@@ -172,7 +180,8 @@ def cmd_response(args: argparse.Namespace, also_proof: bool = False) -> int:
 
 def cmd_log(args: argparse.Namespace) -> int:
     log = args.log or DEFAULT_LOG
-    keys = _read_json(args.keys) if args.keys else _fetch_json(f"{args.trooth or TROOTH_API}/.well-known/trooth-keys.json")
+    # Tree heads are Trooth's statements: only Trooth's keys check them.
+    keys = _read_json(args.keys) if args.keys else {"trooth": _fetch_json(f"{args.trooth or TROOTH_API}/.well-known/trooth-keys.json")}
     old = _fetch_json(f"{log}/tree-head?size={args.from_size}")
     new = _fetch_json(f"{log}/tree-head?size={args.to_size}")
     cons = _fetch_json(f"{log}/consistency?from={args.from_size}&to={args.to_size}")
@@ -204,6 +213,9 @@ def main(argv: Optional[list] = None) -> int:
         s.add_argument("--keys")
         s.add_argument("--now")
         s.add_argument("--trooth")
+        if name == "page":
+            s.add_argument("--allow-unwitnessed", action="store_true")
+            s.add_argument("--allow-unlogged", action="store_true")
     l = sub.add_parser("log", help="check two tree heads and the consistency proof between them")
     l.add_argument("--from", dest="from_size", type=int, required=True)
     l.add_argument("--to", dest="to_size", type=int, required=True)

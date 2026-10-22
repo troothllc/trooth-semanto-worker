@@ -12,15 +12,31 @@ import { printDigest, type AppendResult, type TransparencyLog } from "../ledger/
 import type { LogLeaf, StoredTreeHead } from "../ledger/ports";
 import type { LogConsistencyProof, LogInclusion, LogInclusionProof, LogPort } from "./ports";
 
+/** Who performs log writes: the ledger itself (tests) or the LogDO Durable Object (production, src/ledger/log-do.ts). */
+export interface LogWriter {
+  append(leaf: LogLeaf): Promise<AppendResult>;
+  signTreeHead(treeSize?: number): Promise<StoredTreeHead>;
+}
+
 export class LedgerLogPort implements LogPort {
+  private readonly writer: LogWriter;
+
   constructor(
     readonly ledger: TransparencyLog,
     private readonly logUrl: string,
-  ) {}
+    writer?: LogWriter,
+  ) {
+    this.writer = writer ?? ledger;
+  }
 
-  /** Append a leaf; the ledger signs a tree head for the new size. */
+  /** Append a leaf; the ledger signs a tree head for the new size. Serialized through the writer. */
   append(leaf: LogLeaf): Promise<AppendResult> {
-    return this.ledger.append(leaf);
+    return this.writer.append(leaf);
+  }
+
+  /** Sign a tree head for a size (the current one when omitted), through the same writer as appends. */
+  signTreeHead(treeSize?: number): Promise<StoredTreeHead> {
+    return this.writer.signTreeHead(treeSize);
   }
 
   latestTreeHead(): Promise<StoredTreeHead | null> {

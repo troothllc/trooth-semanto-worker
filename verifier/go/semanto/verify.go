@@ -25,6 +25,12 @@ import (
 // SchemaURL is the only schema this verifier reads.
 const SchemaURL = "https://trooth.co/schemas/semanto/v1.json"
 
+// Trooth's log: the checkpoint signer name and origin a Trooth checkpoint must carry.
+const (
+	TroothLogSignerName = "trooth.co"
+	TroothLogOrigin     = "trooth.co/semanto/log/v1"
+)
+
 // Check is one line of what was checked.
 type Check struct {
 	Name   string `json:"name"`
@@ -41,6 +47,10 @@ type Result struct {
 	VersionID string  `json:"version_id,omitempty"`
 	KeyID     string  `json:"key_id,omitempty"`
 	Issues    []Issue `json:"issues,omitempty"`
+	// Notes are sentences a reader can weigh that do not fail the check.
+	Notes []string `json:"notes,omitempty"`
+	// SignedBy is "company" or "trooth": whose keys a response signature was checked against.
+	SignedBy string `json:"signed_by,omitempty"`
 }
 
 // Issue is a structural problem found before hashing.
@@ -52,6 +62,13 @@ type Issue struct {
 type checks struct {
 	list   []Check
 	reason string
+	notes  []string
+}
+
+func (c *checks) addNotes(prefix string, notes []string) {
+	for _, n := range notes {
+		c.notes = append(c.notes, prefix+n+".")
+	}
 }
 
 func (c *checks) add(name string, ok bool, detail, reason string) bool {
@@ -72,7 +89,7 @@ func (c *checks) result() Result {
 	for _, x := range c.list {
 		ok = ok && x.OK
 	}
-	r := Result{OK: ok, Checks: c.list}
+	r := Result{OK: ok, Checks: c.list, Notes: c.notes}
 	if !ok {
 		r.Reason = c.reason
 	}
@@ -181,7 +198,8 @@ func PagesRoot(manifest []any) (string, error) {
 
 // FactsRoot is the RFC 6962 root over canonical facts in id order.
 func FactsRoot(facts []any) (string, error) {
-	sorted := append([]any{}, facts...)
+	sorted := make([]any, len(facts))
+	copy(sorted, facts)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		a, _ := sorted[i].(map[string]any)
 		b, _ := sorted[j].(map[string]any)
@@ -384,8 +402,11 @@ func validate(file map[string]any) []Issue {
 // ---------------------------------------------------------------- VerifySemanto
 
 // VerifySemanto checks a whole Semanto file offline. pages maps a page url (or
-// id) to its bytes and may be empty; keys are the company's and Trooth's JWK
-// Sets; revocations is an optional revocation list payload.
+// id) to its bytes and may be empty; keys holds the company's and Trooth's JWK
+// Sets apart by role (the company signature resolves only against the
+// company's set, the witness only against Trooth's; a set without roles is the
+// company's, and then no witness checks out); revocations is an optional
+// revocation list payload.
 func VerifySemanto(file map[string]any, pages map[string][]byte, keys KeySet, now time.Time, revocations map[string]any) Result {
 	c := &checks{}
 	h := getMap(file, "header")
@@ -469,8 +490,9 @@ func VerifySemanto(file map[string]any, pages map[string][]byte, keys KeySet, no
 	}
 
 	if sig := getMap(file, "signature"); sig != nil {
-		v := VerifyJWS(getStr(sig, "jws"), keys, JWSTypes["semantoVersion"], h, now)
-		c.add("company_signature", v.OK, ternary(v.OK, "The header is signed by key "+v.Kid+" (typ semanto-version).", "The company's signature did not check out: "+v.Reason+"."), v.Reason)
+		v := VerifyJWS(getStr(sig, "jws"), keys.StrictRole("company"), JWSTypes["semantoVersion"], h, now)
+		c.add("company_signature", v.OK, ternary(v.OK, "The header is signed by the company's key "+v.Kid+" (typ semanto-version).", "The company's signature did not check out: "+v.Reason+"."), v.Reason)
+		c.addNotes("Company signature: ", v.Notes)
 	} else {
 		signedState := getStr(h, "state") == "signed"
 		c.add("company_signature", !signedState, ternary(signedState, "The file says it is signed but carries no signature.", "The file is not signed yet; that matches its state."), "unsigned")
@@ -478,8 +500,9 @@ func VerifySemanto(file map[string]any, pages map[string][]byte, keys KeySet, no
 
 	if w := getMap(file, "witness"); w != nil {
 		payload := map[string]any{"root_hash": fileRoot, "witnessed_at": getStr(w, "at")}
-		v := VerifyJWS(getStr(w, "jws"), keys, JWSTypes["witness"], payload, now)
-		c.add("witness", v.OK, ternary(v.OK, "Trooth witnessed root_hash at "+getStr(w, "at")+" with key "+v.Kid+".", "The witness statement did not check out: "+v.Reason+"."), "witness_"+v.Reason)
+		v := VerifyJWS(getStr(w, "jws"), keys.StrictRole("trooth"), JWSTypes["witness"], payload, now)
+		c.add("witness", v.OK, ternary(v.OK, "Trooth witnessed root_hash at "+getStr(w, "at")+" with Trooth's key "+v.Kid+".", "The witness statement did not check out against Trooth's keys: "+v.Reason+"."), "witness_"+v.Reason)
+		c.addNotes("Witness statement: ", v.Notes)
 	} else {
 		c.note("witness", "No witness statement in the file.")
 	}
@@ -503,11 +526,28 @@ func ternary(cond bool, a, b string) string {
 
 // ---------------------------------------------------------------- VerifyPageProof
 
-// VerifyPageProof checks a semanto.proof document (what /pages/{id}/proof
-// returns) against the page's bytes. header is the version header fetched
-// beside the proof; with it the proof is tied to root_hash and the company's
-// signature is checked. nil skips those two checks and says so.
+// PageProofOptions relax the strict page proof check.
+type PageProofOptions struct {
+	// AllowUnwitnessed accepts a proof with no witness statement ("absent" does not fail).
+	AllowUnwitnessed bool
+	// AllowUnlogged accepts a proof with no log entry ("absent" does not fail).
+	AllowUnlogged bool
+}
+
+// VerifyPageProof checks a semanto.proof document strictly: the version
+// header and the company signature are required, and so are the witness
+// statement and the log entry. See VerifyPageProofWith.
 func VerifyPageProof(proof map[string]any, page []byte, keys KeySet, now time.Time, header map[string]any) Result {
+	return VerifyPageProofWith(proof, page, keys, now, header, PageProofOptions{})
+}
+
+// VerifyPageProofWith checks a semanto.proof document (what /pages/{id}/proof
+// returns) against the page's bytes. header is the version header fetched
+// beside the proof and is required; a missing witness statement or log entry
+// is a check that reads "absent" and fails unless opts allows it. The company
+// signature resolves only against the company's keys, the witness and the
+// tree head only against Trooth's.
+func VerifyPageProofWith(proof map[string]any, page []byte, keys KeySet, now time.Time, header map[string]any, opts PageProofOptions) Result {
 	c := &checks{}
 	inc := getMap(proof, "inclusion")
 	pageHash := getStr(proof, "page_hash")
@@ -546,16 +586,26 @@ func VerifyPageProof(proof map[string]any, page []byte, keys KeySet, now time.Ti
 		default:
 			c.add("header", false, "The header does not list this page at that index with this hash.", "manifest_mismatch")
 		}
-		sig := VerifyJWS(getStr(proof, "signature"), keys, JWSTypes["semantoVersion"], header, now)
-		c.add("company_signature", sig.OK, ternary(sig.OK, "The header is signed by key "+sig.Kid+" (typ semanto-version).", "The company's signature did not check out: "+sig.Reason+"."), sig.Reason)
+		if getStr(proof, "signature") == "" {
+			c.add("company_signature", false, "The proof carries no company signature.", "signature_absent")
+		} else {
+			sig := VerifyJWS(getStr(proof, "signature"), keys.StrictRole("company"), JWSTypes["semantoVersion"], header, now)
+			c.add("company_signature", sig.OK, ternary(sig.OK, "The header is signed by the company's key "+sig.Kid+" (typ semanto-version).", "The company's signature did not check out: "+sig.Reason+"."), sig.Reason)
+			c.addNotes("Company signature: ", sig.Notes)
+		}
 	} else {
-		c.note("header", "No version header was given, so the proof was not tied to the signed header and the company signature was not checked.")
+		c.add("header", false, "No version header was given, so the proof is not tied to a signed version. Fetch the version beside the proof.", "header_absent")
+		c.add("company_signature", false, "The company signature cannot be checked without the version header.", "header_absent")
 	}
 
-	if w := getStr(proof, "witness"); w != "" {
+	troothKeys := keys.StrictRole("trooth")
+	if w := getStr(proof, "witness"); w != "" && getStr(proof, "witnessed_at") != "" {
 		payload := map[string]any{"root_hash": proofRoot, "witnessed_at": getStr(proof, "witnessed_at")}
-		v := VerifyJWS(w, keys, JWSTypes["witness"], payload, now)
-		c.add("witness", v.OK, ternary(v.OK, "Trooth witnessed this root_hash at "+getStr(proof, "witnessed_at")+" with key "+v.Kid+".", "The witness statement did not check out: "+v.Reason+"."), "witness_"+v.Reason)
+		v := VerifyJWS(w, troothKeys, JWSTypes["witness"], payload, now)
+		c.add("witness", v.OK, ternary(v.OK, "Trooth witnessed this root_hash at "+getStr(proof, "witnessed_at")+" with Trooth's key "+v.Kid+".", "The witness statement did not check out against Trooth's keys: "+v.Reason+"."), "witness_"+v.Reason)
+		c.addNotes("Witness statement: ", v.Notes)
+	} else {
+		c.add("witness", opts.AllowUnwitnessed, ternary(opts.AllowUnwitnessed, "Absent: the proof carries no witness statement (allowed by the caller).", "Absent: the proof carries no witness statement."), "witness_absent")
 	}
 
 	if l := getMap(proof, "ledger"); l != nil {
@@ -586,13 +636,15 @@ func VerifyPageProof(proof map[string]any, page []byte, keys KeySet, now time.Ti
 		if th := getMap(l, "tree_head"); th != nil {
 			thIn = th
 		}
-		tr := VerifyTreeHead(thIn, keys, now)
+		tr := VerifyTreeHead(thIn, troothKeys, now)
 		same := tr.OK && tr.TreeSize == lSize && tr.RootHash == getStr(l, "root_hash")
-		detail := "The tree head signature did not check out: " + tr.Reason + "."
+		detail := "The tree head signature did not check out against Trooth's keys: " + tr.Reason + "."
 		if tr.OK {
 			detail = ternary(same, fmt.Sprintf("The tree head of size %d is signed by Trooth (key %s).", tr.TreeSize, tr.Kid), "The signed tree head names a different tree.")
 		}
 		c.add("tree_head", same, detail, ternary(tr.OK, "tree_head_mismatch", "tree_head_"+tr.Reason))
+	} else {
+		c.add("log", opts.AllowUnlogged, ternary(opts.AllowUnlogged, "Absent: the proof carries no log entry (allowed by the caller).", "Absent: the proof carries no log entry."), "log_absent")
 	}
 
 	r := c.result()
@@ -613,9 +665,17 @@ type ResponseOptions struct {
 }
 
 // VerifyResponse checks a signed HTTP response: Content-Digest, the RFC 9421
-// signature with tag trooth-semanto, and Trooth-Page-Hash against the body.
+// signature with tag trooth-semanto, and Trooth-Page-Hash, which is always the
+// digest of the body. The covered list is read from Signature-Input; the
+// Trooth headers and Location must be covered when present. A response that
+// says Trooth-Signed-By: witness resolves against Trooth's keys, any other
+// against the company's.
 func VerifyResponse(status int, headers map[string]string, body []byte, keys KeySet, now time.Time, opts ResponseOptions) Result {
 	c := &checks{}
+	role, who := "company", "company"
+	if sb, ok := HeaderGet(headers, "trooth-signed-by"); ok && strings.EqualFold(strings.TrimSpace(sb), "witness") {
+		role, who = "trooth", "Trooth"
+	}
 	cd, _ := HeaderGet(headers, "content-digest")
 	ok := VerifyContentDigest(cd, body)
 	c.add("content_digest", ok, ternary(ok, "Content-Digest matches the body.", "Content-Digest does not match the body, or is missing."), "content_digest_mismatch")
@@ -627,22 +687,63 @@ func VerifyResponse(status int, headers map[string]string, body []byte, keys Key
 	if req == nil {
 		req = SemantoResponseComponents
 	}
-	v := VerifyMessage(Message{Kind: "response", Status: status, Headers: headers}, keys, VerifyOptions{Required: req, Tag: tag, Now: now.Unix(), MaxAgeSeconds: opts.MaxAgeSeconds})
-	c.add("signature", v.OK, ternary(v.OK, "The response is signed by key "+v.KeyID+" with tag "+v.Params.Tag+", covering "+strings.Join(v.Components, ", ")+".", "The response signature did not check out: "+v.Reason+"."), v.Reason)
-	if ph, ok := HeaderGet(headers, "trooth-page-hash"); ok && ph != "" {
-		d := Digest(body)
-		c.add("page_hash", d == ph, ternary(d == ph, "Trooth-Page-Hash is the digest of the body: "+d, "Trooth-Page-Hash "+ph+" is not the digest of the body ("+d+")."), "page_hash_mismatch")
+	v := VerifyMessage(Message{Kind: "response", Status: status, Headers: headers}, keys.Role(role), VerifyOptions{Required: req, Tag: tag, Now: now.Unix(), MaxAgeSeconds: opts.MaxAgeSeconds})
+	c.add("signature", v.OK, ternary(v.OK, "The response is signed by the "+who+" key "+v.KeyID+" with tag "+v.Params.Tag+", covering "+strings.Join(v.Components, ", ")+".", "The response signature did not check out against the "+who+" keys: "+v.Reason+"."), v.Reason)
+	if v.OK {
+		c.addNotes("Response signature: ", v.Notes)
+		covered := map[string]bool{}
+		for _, x := range v.Components {
+			covered[strings.ToLower(x)] = true
+		}
+		var uncovered []string
+		for _, n := range SemantoResponseMustCoverWhenPresent {
+			if _, present := HeaderGet(headers, n); present && !covered[n] {
+				uncovered = append(uncovered, n)
+			}
+		}
+		c.add("covered_headers", len(uncovered) == 0, ternary(len(uncovered) == 0, "Every Trooth header the response carries is covered by the signature.", "These headers are present but not covered by the signature: "+strings.Join(uncovered, ", ")+"."), "header_not_covered")
+		for _, n := range []string{"content-signal", "link"} {
+			if _, present := HeaderGet(headers, n); present && !covered[n] {
+				c.notes = append(c.notes, n+" is present but not covered by the signature; do not rely on it.")
+			}
+		}
 	}
+	ph, _ := HeaderGet(headers, "trooth-page-hash")
+	d := Digest(body)
+	detail := "Trooth-Page-Hash is the digest of the body: " + d
+	if ph == "" {
+		detail = "The response carries no Trooth-Page-Hash."
+	} else if ph != d {
+		detail = "Trooth-Page-Hash " + ph + " is not the digest of the body (" + d + ")."
+	}
+	c.add("page_hash", ph == d, detail, "page_hash_mismatch")
 	r := c.result()
+	r.SignedBy = role
 	if v.OK {
 		r.KeyID = v.KeyID
 	}
 	return r
 }
 
-// VerifyWebBotAuthRequest checks a Web Bot Auth signed request and returns the Signature-Agent it names.
+// VerifyWebBotAuthRequest checks a Web Bot Auth signed request against the
+// agent's keys and returns the Signature-Agent it names. Exactly one
+// web-bot-auth label is accepted.
 func VerifyWebBotAuthRequest(method, url string, headers map[string]string, keys KeySet, now time.Time) MessageResult {
-	v := VerifyMessage(Message{Kind: "request", Method: method, URL: url, Headers: headers}, keys, VerifyOptions{Required: WebBotAuthRequired, Tag: WebBotAuthTag, Now: now.Unix()})
+	si, _ := HeaderGet(headers, "signature-input")
+	var labels []string
+	for l, in := range ParseSignatureInput(si) {
+		if in.Params.Tag == WebBotAuthTag {
+			labels = append(labels, l)
+		}
+	}
+	if len(labels) > 1 {
+		return MessageResult{Reason: "more_than_one_label"}
+	}
+	o := VerifyOptions{Required: WebBotAuthRequired, Tag: WebBotAuthTag, Now: now.Unix()}
+	if len(labels) == 1 {
+		o.Label = labels[0]
+	}
+	v := VerifyMessage(Message{Kind: "request", Method: method, URL: url, Headers: headers}, keys.Role("agent"), o)
 	if !v.OK {
 		return v
 	}
@@ -661,10 +762,12 @@ type TreeHeadResult struct {
 	TreeSize int
 	RootHash string
 	Payload  map[string]any
+	Notes    []string
 }
 
-// VerifyTreeHead checks a signed tree head: a compact JWS (typ signed-tree-head)
-// over { tree_size, root_hash, signed_at }, given as { "jws" } or { "payload", "jws" }.
+// VerifyTreeHead checks a signed tree head against Trooth's keys: a compact
+// JWS (typ signed-tree-head) over { tree_size, root_hash, signed_at }, given
+// as { "jws" } or { "payload", "jws" }.
 func VerifyTreeHead(th map[string]any, keys KeySet, now time.Time) TreeHeadResult {
 	if th == nil {
 		return TreeHeadResult{Reason: "malformed"}
@@ -678,16 +781,13 @@ func VerifyTreeHead(th map[string]any, keys KeySet, now time.Time) TreeHeadResul
 	if payload != nil {
 		p = payload
 	}
-	v := VerifyJWS(jws, keys, JWSTypes["treeHead"], p, now)
+	v := VerifyJWS(jws, keys.Role("trooth"), JWSTypes["treeHead"], p, now)
 	if !v.OK {
 		return TreeHeadResult{Reason: v.Reason}
 	}
 	pm, _ := v.Payload.(map[string]any)
-	if payload != nil && MustCanonicalize(payload) != MustCanonicalize(pm) {
-		return TreeHeadResult{Reason: "payload_mismatch"}
-	}
 	size, ok := getInt(pm, "tree_size")
-	if !ok || !IsDigest(pm["root_hash"]) {
+	if pm == nil || !ok || !IsDigest(pm["root_hash"]) {
 		return TreeHeadResult{Reason: "malformed"}
 	}
 	if given := getStr(th, "root_hash"); given != "" {
@@ -698,7 +798,7 @@ func VerifyTreeHead(th map[string]any, keys KeySet, now time.Time) TreeHeadResul
 			return TreeHeadResult{Reason: "payload_mismatch"}
 		}
 	}
-	return TreeHeadResult{OK: true, Kid: v.Kid, TreeSize: size, RootHash: getStr(pm, "root_hash"), Payload: pm}
+	return TreeHeadResult{OK: true, Kid: v.Kid, TreeSize: size, RootHash: getStr(pm, "root_hash"), Payload: pm, Notes: v.Notes}
 }
 
 // VerifyInclusionInLog checks { leaf_hash | leaf, index, tree_size, path, root_hash }.
@@ -746,11 +846,20 @@ type CheckpointResult struct {
 	Kid      string
 }
 
-// VerifyCheckpoint checks a signed note (golang.org/x/mod/sumdb/note): origin,
-// size, base64 root, a blank line, then signature lines "\u2014 name base64(keyhash4||sig)",
-// keyhash4 being the first 4 bytes of SHA-256(name || "\n" || 0x01 || pubkey).
-// The signer name is the log operator's (Trooth: "trooth.co"); the origin is the log's.
+// VerifyCheckpoint checks a signed note (golang.org/x/mod/sumdb/note) with
+// Trooth's signer name and origin: see VerifyCheckpointAs.
 func VerifyCheckpoint(text string, keys KeySet, expectedOrigin string) CheckpointResult {
+	if expectedOrigin == "" {
+		expectedOrigin = TroothLogOrigin
+	}
+	return VerifyCheckpointAs(text, keys, expectedOrigin, TroothLogSignerName)
+}
+
+// VerifyCheckpointAs checks a signed note: origin, size, base64 root, a blank
+// line, then signature lines "\u2014 name base64(keyhash4||sig)", keyhash4 being
+// the first 4 bytes of SHA-256(name || "\n" || 0x01 || pubkey). Only Trooth's
+// keys are tried and only a line with the expected signer name counts.
+func VerifyCheckpointAs(text string, keys KeySet, expectedOrigin, expectedName string) CheckpointResult {
 	split := strings.Index(text, "\n\n")
 	if split < 0 {
 		return CheckpointResult{Reason: "malformed"}
@@ -764,12 +873,16 @@ func VerifyCheckpoint(text string, keys KeySet, expectedOrigin string) Checkpoin
 	if expectedOrigin != "" && origin != expectedOrigin {
 		return CheckpointResult{Reason: "wrong_origin"}
 	}
+	if !regexp.MustCompile(`^[0-9]+$`).MatchString(lines[1]) {
+		return CheckpointResult{Reason: "malformed"}
+	}
 	size, err := strconv.Atoi(lines[1])
 	root, err2 := base64.StdEncoding.DecodeString(lines[2])
 	if err != nil || err2 != nil {
 		return CheckpointResult{Reason: "malformed"}
 	}
-	sawLine := false
+	candidates := keys.Role("trooth").Keys
+	sawLine, sawName := false, false
 	for _, line := range strings.Split(sigBlock, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 3 || fields[0] != "\u2014" {
@@ -777,12 +890,16 @@ func VerifyCheckpoint(text string, keys KeySet, expectedOrigin string) Checkpoin
 		}
 		sawLine = true
 		name := fields[1]
+		if expectedName != "" && name != expectedName {
+			continue
+		}
+		sawName = true
 		blob, err := base64.StdEncoding.DecodeString(fields[2])
 		if err != nil || len(blob) < 5 {
 			continue
 		}
 		keyHash, sig := blob[:4], blob[4:]
-		for _, jwk := range keys.Keys {
+		for _, jwk := range candidates {
 			pub, err := jwk.PublicKey()
 			if err != nil {
 				continue
@@ -800,17 +917,20 @@ func VerifyCheckpoint(text string, keys KeySet, expectedOrigin string) Checkpoin
 			return CheckpointResult{Reason: "bad_signature"}
 		}
 	}
-	if !sawLine {
+	switch {
+	case !sawLine:
 		return CheckpointResult{Reason: "malformed"}
+	case !sawName:
+		return CheckpointResult{Reason: "wrong_signer"}
 	}
 	return CheckpointResult{Reason: "unknown_key"}
 }
 
 // ---------------------------------------------------------------- offers and revocations
 
-// VerifyOffer checks a signed offer (typ signed-offer) at now and returns its id.
+// VerifyOffer checks a signed offer (typ signed-offer) at now against the company's keys and returns its id.
 func VerifyOffer(jws string, keys KeySet, now time.Time) (JWSResult, string) {
-	v := VerifyJWS(jws, keys, JWSTypes["offer"], nil, now)
+	v := VerifyJWS(jws, keys.Role("company"), JWSTypes["offer"], nil, now)
 	if !v.OK {
 		return v, ""
 	}
@@ -822,9 +942,20 @@ func VerifyOffer(jws string, keys KeySet, now time.Time) (JWSResult, string) {
 	return v, id
 }
 
-// VerifyRevocationList checks a signed revocation list (typ revocation-list) and returns its payload.
+// VerifyRevocationList checks a signed revocation list (typ revocation-list) against Trooth's keys and returns its payload.
 func VerifyRevocationList(jws string, keys KeySet, now time.Time) JWSResult {
-	return VerifyJWS(jws, keys, JWSTypes["revocation"], nil, now)
+	v := VerifyJWS(jws, keys.Role("trooth"), JWSTypes["revocation"], nil, now)
+	if !v.OK {
+		return v
+	}
+	pm, ok := v.Payload.(map[string]any)
+	if !ok {
+		return JWSResult{Reason: "malformed"}
+	}
+	if _, isList := pm["revocations"].([]any); !isList {
+		return JWSResult{Reason: "malformed"}
+	}
+	return v
 }
 
 // ParseLink reads a Link header into (url, params) pairs.

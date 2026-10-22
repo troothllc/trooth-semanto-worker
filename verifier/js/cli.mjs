@@ -8,12 +8,19 @@
 // the test vectors need no network; `page`, `response` and `log` fetch.
 //
 //   semanto-verify file <semanto.json> --pages <dir> [--keys <keys.json>] [--now <iso>] [--revocations <file>]
-//   semanto-verify page <url>          [--trooth <base>] [--now <iso>]
+//   semanto-verify page <url>          [--trooth <base>] [--now <iso>] [--allow-unwitnessed] [--allow-unlogged]
 //   semanto-verify response <url>      [--keys <keys.json>]
 //   semanto-verify log --from <n> --to <m> [--log <url>] [--keys <keys.json>]
 //
 // Pages for `file` are read from <dir>/<page id>.md (the smp_ id in the
 // manifest), the layout verifier/test-vectors/v1/pages uses.
+//
+// Keys are kept apart by role: the company's JWK Set (from its domain) checks
+// company signatures, Trooth's (from api.trooth.co) checks witness
+// statements, tree heads, checkpoints and revocation lists. A --keys file in
+// the { company, trooth } shape is used as is. `page` is strict by default:
+// the version header must be fetched, the company signature must check out,
+// and a missing witness statement or log entry fails unless allowed.
 
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -27,7 +34,6 @@ import {
   verifyRevocationList,
   parseLink,
   parseDnsKeyRecords,
-  keyResolver,
   stateOf,
 } from "./verify.mjs";
 
@@ -57,7 +63,7 @@ function usage(code = 2) {
       "semanto-verify: check a Semanto file, a page, a signed response or the public log.",
       "",
       "  semanto-verify file <semanto.json> --pages <dir> [--keys <keys.json>] [--now <iso>] [--revocations <file>]",
-      "  semanto-verify page <url> [--trooth <base>] [--now <iso>]",
+      "  semanto-verify page <url> [--trooth <base>] [--now <iso>] [--allow-unwitnessed] [--allow-unlogged]",
       "  semanto-verify response <url> [--keys <keys.json>]",
       "  semanto-verify log --from <n> --to <m> [--log <url>] [--keys <keys.json>]",
       "",
@@ -74,6 +80,7 @@ function printChecks(title, result) {
   process.stdout.write(`${title}\n`);
   for (const c of result.checks ?? []) process.stdout.write(`  ${c.ok ? "ok  " : "FAIL"} ${c.name}: ${c.detail}\n`);
   if (!result.checks) process.stdout.write(`  ${result.ok ? "ok  " : "FAIL"} ${result.reason ?? ""}\n`);
+  for (const n of result.notes ?? []) process.stdout.write(`  note ${n}\n`);
   process.stdout.write(`${result.ok ? "Every check passed." : `Failed: ${result.reason}.`}\n\n`);
   return result.ok;
 }
@@ -84,20 +91,24 @@ async function fetchJson(url) {
   return r.json();
 }
 
+/** The company's set from its domain and Trooth's from api.trooth.co, kept apart by role. */
 async function loadKeysFor(domain, args) {
-  if (args.keys) return readJson(args.keys);
+  if (args.keys) return { keys: readJson(args.keys), notes: [] };
   const troothBase = args.trooth ?? TROOTH_API;
-  const sets = [];
+  const keys = { company: { keys: [] }, trooth: { keys: [] } };
   const notes = [];
-  for (const url of [`https://${domain}/.well-known/trooth-keys.json`, `${troothBase}/.well-known/trooth-keys.json`]) {
+  for (const [role, url] of [
+    ["company", `https://${domain}/.well-known/trooth-keys.json`],
+    ["trooth", `${troothBase}/.well-known/trooth-keys.json`],
+  ]) {
     try {
-      sets.push(await fetchJson(url));
-      notes.push(`  ok   fetched the JWK Set at ${url}`);
+      keys[role] = await fetchJson(url);
+      notes.push(`  ok   fetched the ${role === "company" ? "company's" : "Trooth"} JWK Set at ${url}`);
     } catch (e) {
       notes.push(`  note ${url} could not be read (${e.message})`);
     }
   }
-  return { keys: sets, notes };
+  return { keys, notes };
 }
 
 async function dnsCheck(domain, kid) {
@@ -190,10 +201,11 @@ async function cmdResponse(args, { alsoProof = false } = {}) {
             header = version.header ?? null;
             process.stdout.write(`  ok   fetched the version header at ${versionUrl}\n`);
           } catch (e) {
-            process.stdout.write(`  note ${versionUrl} could not be read (${e.message}); the company signature is not checked.\n`);
+            // Strict: a header that cannot be fetched is a failure, not a skip.
+            process.stdout.write(`  FAIL ${versionUrl} could not be read (${e.message}); without the header the proof is not tied to a signed version.\n`);
           }
         }
-        const pr = await verifyPageProof(proof, body, keys, { now: args.now, header });
+        const pr = await verifyPageProof(proof, body, keys, { now: args.now, header, allowUnwitnessed: args["allow-unwitnessed"] === true, allowUnlogged: args["allow-unlogged"] === true });
         ok = printChecks(`Proof at ${proofUrl}`, pr) && ok;
         if (header) process.stdout.write(`State now: ${stateOf({ header, root_hash: proof.root_hash, signature: proof.signature }, args.now ? new Date(args.now) : new Date())}.\n\n`);
       } catch (e) {
@@ -210,9 +222,8 @@ async function cmdLog(args) {
   const to = Number(args.to);
   if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < from) usage();
   const log = args.log ?? DEFAULT_LOG;
-  const keys = args.keys ? readJson(args.keys) : await fetchJson(args.trooth ? `${args.trooth}/.well-known/trooth-keys.json` : TROOTH_KEYS);
-  const resolve = keyResolver(keys);
-  if (!resolve) usage();
+  // Tree heads are Trooth's statements: only Trooth's keys check them.
+  const keys = args.keys ? readJson(args.keys) : { trooth: await fetchJson(args.trooth ? `${args.trooth}/.well-known/trooth-keys.json` : TROOTH_KEYS) };
   const oldHead = await fetchJson(`${log}/tree-head?size=${from}`);
   const newHead = await fetchJson(`${log}/tree-head?size=${to}`);
   const consistency = await fetchJson(`${log}/consistency?from=${from}&to=${to}`);

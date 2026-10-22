@@ -21,7 +21,8 @@ async function serve(request: Request): Promise<Response> {
   const manifest = manifestCache ? await manifestCache.get() : null;
   const decision = decide(original, request.headers.get("accept"), manifest, { ...cfg, method: request.method });
   if (!decision.serve) return new Response(null, { status: 404 });
-  return fetchSigned(decision, request, fetch, { cache: "no-store" });
+  // With TROOTH_CONNECTOR_KEY, a signed reader's request goes on with the host it addressed and its address, signed.
+  return fetchSigned(decision, request, fetch, { cache: "no-store" }, cfg);
 }
 
 export const GET = serve;

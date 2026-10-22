@@ -27,6 +27,9 @@ final class Trooth_Semanto_Negotiate {
 		'Trooth-Contract',
 		'Trooth-Semanto-Version',
 		'Trooth-Page-Hash',
+		'Trooth-Signed-Page-Hash',
+		'Trooth-Signed-By',
+		'Trooth-Semanto-State',
 		'Link',
 		'Content-Signal',
 		'x-markdown-tokens',
@@ -228,12 +231,20 @@ final class Trooth_Semanto_Negotiate {
 		if ( 'html' === $rep ) {
 			return array( 'serve' => false, 'reason' => 'html' );
 		}
-		if ( 'jsonld' === $rep ) {
-			return array( 'serve' => true, 'url' => $api_root . '/facts.jsonld', 'kind' => 'facts' );
-		}
 		$page = self::find_page( $manifest, $by_suffix['base'] );
+		if ( 'jsonld' === $rep ) {
+			// The site root's /facts.jsonld is the company's facts; any other JSON-LD request is the page's JSON-LD, as the API answers it.
+			if ( '/facts.jsonld' === $path ) {
+				return array( 'serve' => true, 'url' => $api_root . '/facts.jsonld', 'kind' => 'facts' );
+			}
+			if ( ! $page && 'semanto_then_cloudflare_for_unsigned' === $mode ) {
+				return array( 'serve' => false, 'reason' => 'not_listed' );
+			}
+			return array( 'serve' => true, 'url' => $api_root . '/by-path' . $path, 'kind' => 'page_jsonld' );
+		}
 		if ( $page && ! empty( $page['id'] ) ) {
-			return array( 'serve' => true, 'url' => $api_root . '/pages/' . rawurlencode( (string) $page['id'] ), 'kind' => 'page', 'page' => $page );
+			// The ".md" suffix fixes the representation at the API whatever Accept the reader sent.
+			return array( 'serve' => true, 'url' => $api_root . '/pages/' . rawurlencode( (string) $page['id'] ) . '.md', 'kind' => 'page', 'page' => $page );
 		}
 		if ( 'semanto_then_cloudflare_for_unsigned' === $mode ) {
 			return array( 'serve' => false, 'reason' => 'not_listed' );

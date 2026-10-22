@@ -17,7 +17,7 @@ from .httpsig import (
     verify_content_digest,
     verify_message,
 )
-from .jws import JWS_TYPES, key_resolver, key_valid_at, parse_dns_key_records, thumbprint, verify_jws
+from .jws import JWS_TYPES, has_roles, key_resolver, key_valid_at, key_valid_at_signing, parse_dns_key_records, role_keys, role_resolver, thumbprint, verify_jws
 from .merkle import digest, digest_bytes, is_digest, leaf_hash, node_hash, root_from_leaf_hashes, verify_inclusion
 from .verify import (
     fact_id,
@@ -56,6 +56,10 @@ __all__ = [
     "JWS_TYPES",
     "key_resolver",
     "key_valid_at",
+    "key_valid_at_signing",
+    "has_roles",
+    "role_keys",
+    "role_resolver",
     "parse_dns_key_records",
     "thumbprint",
     "verify_jws",

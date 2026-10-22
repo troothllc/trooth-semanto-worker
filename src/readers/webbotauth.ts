@@ -15,9 +15,24 @@
 // It names a key directory, not an operator and not a product. The result
 // carries the directory URL and the keyid and nothing else. User-Agent is
 // never read here and never proves anything.
+//
+// The directory fetch is an outbound request to a URL a stranger chose, so it
+// follows OWASP's SSRF guidance: everything that can be checked without keys
+// is checked first (one web-bot-auth label, tag, components, created,
+// expires, nonce present and not yet seen); the directory URL is always
+// <origin of Signature-Agent>/.well-known/http-message-signatures-directory
+// (path and query dropped); the origin passes src/core/ssrf.ts (https, a host
+// name and never an IP literal, no private, reserved or local name, and the
+// resolved addresses when a resolver is wired); redirects are refused; the
+// body is capped at 64 KB and the fetch at 3 seconds; a good directory is
+// cached between 5 minutes and 24 hours, and a failure is remembered per
+// origin for 5 minutes so a flood cannot make the Worker fetch it again.
+// Then the one chosen label is checked, and only then its nonce is claimed
+// (atomically, src/readers/nonce-do.ts).
 
 import { parseSignatureInput, verifyContentDigest, verifyMessage, WEB_BOT_AUTH_REQUIRED, type HeaderBag } from "@/core/httpsig";
 import { thumbprint, keyValidAt, type Jwks, type PublicJwk } from "@/core/keys";
+import { checkUrlResolved, type Resolver } from "@/core/ssrf";
 import type { CachedDirectory, HttpPort, KeyCache, NonceStore } from "./ports";
 
 export const WEB_BOT_AUTH_TAG = "web-bot-auth";
@@ -28,6 +43,12 @@ export const DIRECTORY_MEDIA = "application/http-message-signatures-directory+js
 export const REPLAY_WINDOW_SECONDS = 300;
 export const CLOCK_SKEW_SECONDS = 60;
 export const DEFAULT_DIRECTORY_TTL_SECONDS = 3600;
+export const MIN_DIRECTORY_TTL_SECONDS = 300;
+export const MAX_DIRECTORY_TTL_SECONDS = 86400;
+/** After a failed directory fetch, the origin is not tried again for this long. */
+export const DIRECTORY_FAILURE_TTL_SECONDS = 300;
+export const DIRECTORY_MAX_BYTES = 64 * 1024;
+export const DIRECTORY_TIMEOUT_MS = 3000;
 
 export type WebBotAuthResult =
   | { proven: true; agent_key_url: string; keyid: string; directory_signed: boolean }
@@ -42,6 +63,8 @@ export type WebBotAuthResult =
         | "missing_created_or_expires"
         | "expires_too_far"
         | "missing_nonce"
+        | "more_than_one_label"
+        | "directory_refused"
         | "expired"
         | "not_yet_valid"
         | "too_old"
@@ -70,6 +93,8 @@ export interface WebBotAuthDeps {
   nonces: NonceStore;
   /** Unix seconds. */
   now?: () => number;
+  /** Resolves the directory's host so its addresses are checked too (DNS over HTTPS in the Worker). A resolver error is a refusal. */
+  resolve?: Resolver;
 }
 
 // ---------------------------------------------------------------- Signature-Agent
@@ -90,11 +115,9 @@ export function parseSignatureAgent(value: string | null): { ok: true; url: stri
   return { ok: true, url: u.href };
 }
 
-/** The directory URL for a Signature-Agent: the well-known path on its origin, unless a specific path was given. */
+/** The directory URL for a Signature-Agent: ALWAYS the well-known path on its origin. A path or query the requester sent is dropped. */
 export function directoryUrl(agentUrl: string): string {
-  const u = new URL(agentUrl);
-  if (u.pathname === "/" || u.pathname === "") return `${u.origin}${DIRECTORY_PATH}`;
-  return u.href;
+  return `${new URL(agentUrl).origin}${DIRECTORY_PATH}`;
 }
 
 // ---------------------------------------------------------------- known directories (by URL only)
@@ -130,7 +153,7 @@ export interface Directory {
   signed: boolean;
 }
 
-export type DirectoryFetch = { ok: true; directory: Directory } | { ok: false; reason: "directory_unreachable" | "directory_malformed" | "directory_signature_failed"; sentence: string };
+export type DirectoryFetch = { ok: true; directory: Directory } | { ok: false; reason: "directory_unreachable" | "directory_malformed" | "directory_signature_failed" | "directory_refused"; sentence: string };
 
 function parseMaxAge(cacheControl: string | undefined): number | null {
   if (!cacheControl) return null;
@@ -140,19 +163,34 @@ function parseMaxAge(cacheControl: string | undefined): number | null {
 
 export async function fetchDirectory(agentUrl: string, deps: WebBotAuthDeps): Promise<DirectoryFetch> {
   const url = directoryUrl(agentUrl);
+  const origin = new URL(url).origin;
   const nowMs = (deps.now ? deps.now() : Math.floor(Date.now() / 1000)) * 1000;
   let cached = await deps.cache.get(url);
   if (!cached || cached.expires_at <= nowMs) {
+    const failedUntil = await deps.cache.getFailure(origin);
+    if (failedUntil !== null && failedUntil > nowMs) return { ok: false, reason: "directory_unreachable", sentence: `The key directory at ${url} failed recently; it is not fetched again until ${new Date(failedUntil).toISOString()}.` };
+    const failed = async (r: Exclude<DirectoryFetch, { ok: true }>): Promise<DirectoryFetch> => {
+      await deps.cache.putFailure(origin, nowMs + DIRECTORY_FAILURE_TTL_SECONDS * 1000);
+      return r;
+    };
+    const guard = await checkUrlResolved(url, deps.resolve, { refuseIpLiterals: true });
+    if (!guard.ok) return failed({ ok: false, reason: "directory_refused", sentence: `The key directory at ${url} is not fetched: ${guard.detail} (${guard.reason}).` });
     let res: Awaited<ReturnType<HttpPort["get"]>>;
     try {
-      res = await deps.http.get(url, { accept: DIRECTORY_MEDIA });
+      res = await deps.http.get(url, { accept: DIRECTORY_MEDIA }, { maxBytes: DIRECTORY_MAX_BYTES, timeoutMs: DIRECTORY_TIMEOUT_MS });
     } catch (e) {
-      return { ok: false, reason: "directory_unreachable", sentence: `The key directory at ${url} could not be fetched: ${(e as Error).message}` };
+      return failed({ ok: false, reason: "directory_unreachable", sentence: `The key directory at ${url} could not be fetched: ${(e as Error).message}` });
     }
-    if (res.status !== 200) return { ok: false, reason: "directory_unreachable", sentence: `The key directory at ${url} answered HTTP ${res.status}.` };
-    const ttl = parseMaxAge(res.headers["cache-control"]) ?? DEFAULT_DIRECTORY_TTL_SECONDS;
-    cached = { body: res.body, headers: res.headers, fetched_at: new Date(nowMs).toISOString(), expires_at: nowMs + ttl * 1000 } satisfies CachedDirectory;
-    await deps.cache.put(url, cached);
+    if (res.status >= 300 && res.status < 400) return failed({ ok: false, reason: "directory_unreachable", sentence: `The key directory at ${url} answered a redirect (HTTP ${res.status}); redirects are not followed.` });
+    if (res.status !== 200) return failed({ ok: false, reason: "directory_unreachable", sentence: `The key directory at ${url} answered HTTP ${res.status}.` });
+    if (res.tooLarge || new TextEncoder().encode(res.body).length > DIRECTORY_MAX_BYTES) return failed({ ok: false, reason: "directory_malformed", sentence: `The key directory at ${url} is larger than 64 KB.` });
+    const asked = parseMaxAge(res.headers["cache-control"]) ?? DEFAULT_DIRECTORY_TTL_SECONDS;
+    const ttl = Math.min(MAX_DIRECTORY_TTL_SECONDS, Math.max(MIN_DIRECTORY_TTL_SECONDS, asked));
+    const fresh = { body: res.body, headers: res.headers, fetched_at: new Date(nowMs).toISOString(), expires_at: nowMs + ttl * 1000 } satisfies CachedDirectory;
+    const checked = await parseAndCheckDirectory(url, fresh, Math.floor(nowMs / 1000));
+    if (!checked.ok) return failed(checked);
+    await deps.cache.put(url, fresh);
+    return checked;
   }
   return parseAndCheckDirectory(url, cached, Math.floor(nowMs / 1000));
 }
@@ -212,6 +250,8 @@ const SENTENCES: Record<Exclude<WebBotAuthResult, { proven: true }>["reason"], s
   missing_created_or_expires: "The signature does not carry both created and expires.",
   expires_too_far: "The signature's expires is more than five minutes after created.",
   missing_nonce: "The signature carries no nonce, so a replay cannot be told from the original.",
+  more_than_one_label: "The request carries more than one web-bot-auth signature; exactly one is accepted.",
+  directory_refused: "The key directory address is not one Trooth fetches (not https, an address instead of a name, or a private or reserved host).",
   expired: "The signature has expired.",
   not_yet_valid: "The signature's created is in the future beyond the allowed skew.",
   too_old: "The signature was created more than five minutes ago.",
@@ -239,35 +279,42 @@ function header(h: HeaderBag, name: string): string | null {
 }
 
 /**
- * Verify one request. The order: the Signature-Agent URL, then the signature
- * parameters (tag, components, created, expires, nonce), then the key
- * directory, then the signature itself, and only then the nonce is claimed so
- * an unsigned flood cannot fill the nonce store.
+ * Verify one request. The order: one web-bot-auth label is chosen (more than
+ * one is refused); the Signature-Agent URL; that label's parameters (tag,
+ * components, created and expires as Integers, nonce); the nonce must not be
+ * seen yet; only then the key directory is fetched (with the guards above);
+ * then THAT label's signature is checked; and only then THAT label's nonce
+ * is claimed, atomically, so an unsigned flood cannot fill the nonce store and
+ * a decoy label cannot lend its fresh nonce to a replayed signature.
  */
 export async function verifyWebBotAuth(req: IncomingRequest, deps: WebBotAuthDeps): Promise<WebBotAuthResult> {
   const now = deps.now ? deps.now() : Math.floor(Date.now() / 1000);
   const si = header(req.headers, "signature-input");
   const sg = header(req.headers, "signature");
   if (!si || !sg) return fail("no_signature");
-  const agent = parseSignatureAgent(header(req.headers, "signature-agent"));
-  if (!agent.ok) return fail(agent.reason);
 
   const inputs = parseSignatureInput(si);
   const labels = Object.keys(inputs);
   if (labels.length === 0) return fail("malformed");
-  // Pick the web-bot-auth labelled signature; any label name is allowed by the draft.
+  // Exactly one web-bot-auth labelled signature; any label name is allowed by the draft.
   const candidates = labels.filter((l) => inputs[l]!.params.tag === WEB_BOT_AUTH_TAG);
   if (candidates.length === 0) return fail("missing_tag");
+  if (candidates.length > 1) return fail("more_than_one_label");
   const label = candidates[0]!;
+  const agent = parseSignatureAgent(header(req.headers, "signature-agent"));
+  if (!agent.ok) return fail(agent.reason);
   const { params, components } = inputs[label]!;
   const lower = components.map((c) => c.toLowerCase());
   if (WEB_BOT_AUTH_REQUIRED.some((r) => !lower.includes(r))) return fail("missing_component");
-  if (typeof params.created !== "number" || typeof params.expires !== "number" || !Number.isFinite(params.created) || !Number.isFinite(params.expires)) return fail("missing_created_or_expires");
+  if (params.created === undefined || params.expires === undefined) return fail("missing_created_or_expires");
+  if (!Number.isInteger(params.created) || !Number.isInteger(params.expires)) return fail("malformed");
   if (params.expires - params.created > REPLAY_WINDOW_SECONDS + CLOCK_SKEW_SECONDS) return fail("expires_too_far");
   if (!params.nonce) return fail("missing_nonce");
   if (now >= params.expires) return fail("expired");
   if (params.created > now + CLOCK_SKEW_SECONDS) return fail("not_yet_valid");
   if (now - params.created > REPLAY_WINDOW_SECONDS) return fail("too_old");
+  const nonceKey = `${params.keyid}:${params.nonce}`;
+  if (await deps.nonces.seen(nonceKey, now * 1000)) return fail("replayed_nonce");
 
   const dir = await fetchDirectory(agent.url, deps);
   if (!dir.ok) return { proven: false, reason: dir.reason, sentence: dir.sentence };
@@ -278,14 +325,16 @@ export async function verifyWebBotAuth(req: IncomingRequest, deps: WebBotAuthDep
 
   const v = await verifyMessage(
     { kind: "request", method: req.method, url: req.url, headers: req.headers },
-    { resolveKey: (kid) => (kid === key.kid ? key : null), required: [...WEB_BOT_AUTH_REQUIRED], tag: WEB_BOT_AUTH_TAG, now, maxAgeSeconds: REPLAY_WINDOW_SECONDS, skewSeconds: CLOCK_SKEW_SECONDS },
+    { resolveKey: (kid) => (kid === key.kid ? key : null), required: [...WEB_BOT_AUTH_REQUIRED], tag: WEB_BOT_AUTH_TAG, now, maxAgeSeconds: REPLAY_WINDOW_SECONDS, skewSeconds: CLOCK_SKEW_SECONDS, label },
   );
   if (!v.ok) {
     const r = v.reason;
     if (r === "wrong_tag") return fail("missing_tag");
     if (r === "no_signature") return fail("no_signature");
+    if (r === "key_not_yet_valid" || r === "key_expired" || r === "key_revoked") return fail("key_not_valid_now");
     return fail(r);
   }
+  // The nonce of the label that checked out, and no other, claimed atomically.
   const fresh = await deps.nonces.claim(`${key.kid}:${params.nonce}`, params.expires * 1000, now * 1000);
   if (!fresh) return fail("replayed_nonce");
   return { proven: true, agent_key_url: agent.url, keyid: key.kid, directory_signed: dir.directory.signed };

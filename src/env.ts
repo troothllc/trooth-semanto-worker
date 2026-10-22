@@ -36,6 +36,10 @@ export interface Env {
   HOSTED_KEY_SEAL_SECRET?: string;
   /** Service binding to trooth-os-worker-f, whose session check accepts workspace bearer tokens for /os routes. Without it, every /os call is refused. */
   TROOTH_OS?: Fetcher;
+  /** Durable Object NonceDO (src/readers/nonce-do.ts): atomic nonce claims for Web Bot Auth and the connector routes. Without it, the KV fallback (not atomic) is used. */
+  NONCES?: DurableObjectNamespace;
+  /** Durable Object LogDO (src/ledger/log-do.ts): the one writer for the public log, so appends are serialized. */
+  LOG?: DurableObjectNamespace;
   ENVIRONMENT: "development" | "production";
 }
 

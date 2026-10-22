@@ -13,6 +13,8 @@ export function semantoConfig(): AdapterConfig {
     TROOTH_ID: process.env.TROOTH_ID,
     TROOTH_API_BASE: process.env.TROOTH_API_BASE,
     MODE: process.env.MODE || process.env.TROOTH_MODE,
+    // The connector private JWK as JSON: signs a forwarded Web Bot Auth request so Trooth can prove the reader.
+    TROOTH_CONNECTOR_KEY: process.env.TROOTH_CONNECTOR_KEY,
   });
 }
 

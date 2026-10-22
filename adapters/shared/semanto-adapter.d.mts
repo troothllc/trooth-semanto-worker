@@ -30,6 +30,12 @@ export interface AdapterConfig {
   apiBase?: string;
   mode?: Mode | string;
   method?: string;
+  /** The connector private JWK, or its JSON (TROOTH_CONNECTOR_KEY): signs forwarded reader requests. */
+  connectorKey?: string | { kty: string; crv: string; x: string; d: string; kid: string };
+  /** The client address, when the host knows it better than the request headers do. */
+  clientAddress?: string;
+  /** Unix seconds, for the forwarding signature's created (tests pin it). */
+  now?: () => number;
 }
 
 export interface ManifestPage {
@@ -42,7 +48,7 @@ export interface ManifestPage {
 export type Manifest = unknown;
 
 export type Decision =
-  | { serve: true; url: string; kind: "well_known" | "llms" | "facts" | "page" | "page_lookup"; representation: Representation | null; page?: ManifestPage }
+  | { serve: true; url: string; kind: "well_known" | "llms" | "facts" | "page" | "page_lookup" | "page_jsonld"; representation: Representation | null; page?: ManifestPage }
   | { serve: false; reason: "method" | "html" | "mode" | "not_listed" };
 
 export function parseAccept(accept: string | null | undefined): { type: string; subtype: string; q: number; order: number; specificity: number }[];
@@ -77,7 +83,11 @@ export function createManifestCache(options: {
 }): ManifestCache;
 export function memoryStore(): ManifestStore;
 
-export function fetchSigned(decision: Extract<Decision, { serve: true }>, request: Request, fetchImpl?: typeof fetch, extraInit?: RequestInit): Promise<Response>;
+export function mergeVary(existing: string | null | undefined): string;
+export function clientAddress(request: Request, config?: AdapterConfig): string;
+export function connectorKeyOf(config?: AdapterConfig): { kty: string; crv: string; x: string; d: string; kid: string } | null;
+export function forwardingHeaders(decision: Extract<Decision, { serve: true }>, request: Request, config?: AdapterConfig, now?: () => number): Promise<Headers>;
+export function fetchSigned(decision: Extract<Decision, { serve: true }>, request: Request, fetchImpl?: typeof fetch, extraInit?: RequestInit, config?: AdapterConfig): Promise<Response>;
 export function handleRequest(options: {
   request: Request;
   config: AdapterConfig;

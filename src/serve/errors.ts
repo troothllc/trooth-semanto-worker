@@ -28,7 +28,8 @@ export type ProblemCode =
   | "conflict"
   | "signature_invalid"
   | "log_entry_not_found"
-  | "upstream_unavailable";
+  | "upstream_unavailable"
+  | "payload_too_large";
 
 export interface Problem {
   type: string;
@@ -183,6 +184,14 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
     what_happened: "Trooth asked an outside source (a registry or the company's site) and got no usable answer.",
     what_to_do: "Try again in a few minutes.",
   },
+  payload_too_large: {
+    status: 413,
+    title: "The request body is too large",
+    retryable: false,
+    terminal: true,
+    what_happened: "The body is larger than this route reads. Nothing was read or stored.",
+    what_to_do: "Send it in smaller parts.",
+  },
 };
 
 export function problem(code: ProblemCode, opts: { detail?: string; instance?: string; retry_after?: number } = {}): Problem {
@@ -225,9 +234,9 @@ export function renderProblem(p: Problem, accept: string | null | undefined): { 
 /**
  * When the live page changed after the last signature, the last signed bytes
  * are served with this front matter in front of them. The signed bytes follow
- * unchanged, so Trooth-Page-Hash still names them; the ETag and Content-Digest
- * cover what was actually sent. A verifier strips the notice with
- * stripBehindNotice before hashing.
+ * unchanged; Trooth-Page-Hash, the ETag and Content-Digest cover what was
+ * actually sent, and Trooth-Signed-Page-Hash names the signed bytes. A
+ * verifier strips the notice with stripBehindNotice before hashing.
  */
 export function behindNotice(signed_at: string, version_id: string): string {
   const c = PROBLEMS.page_behind;
@@ -244,7 +253,16 @@ export function behindNotice(signed_at: string, version_id: string): string {
   ].join("\n");
 }
 
-const BEHIND_RE = /^---\ntrooth_state: behind\n(?:[^\n]*\n)*?---\n\n/;
+/**
+ * Semanto Basic: every markdown body of a record Trooth witnessed and the
+ * company did not sign carries this front matter first, in the same shape as
+ * the behind notice and stripped the same way.
+ */
+export function basicNotice(notice: string): string {
+  return ["---", "trooth_state: witnessed-not-signed", `notice: ${notice}`, "---", "", ""].join("\n");
+}
+
+const BEHIND_RE = /^---\ntrooth_state: (?:behind|witnessed-not-signed)\n(?:[^\n]*\n)*?---\n\n/;
 
 export function stripBehindNotice(body: Uint8Array): Uint8Array {
   const text = new TextDecoder().decode(body);

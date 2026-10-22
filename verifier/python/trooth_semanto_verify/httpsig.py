@@ -15,9 +15,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import urlsplit
 
-from .jws import ed25519_verify, key_valid_at
+from .jws import ed25519_verify, key_valid_at_signing
 
 SEMANTO_RESPONSE_COMPONENTS = ["@status", "content-type", "content-digest", "trooth-semanto-version", "trooth-page-hash"]
+# Covered whenever the response carries them; the Trooth ones and Location must be covered when present.
+SEMANTO_RESPONSE_OPTIONAL_COMPONENTS = ["trooth-signed-page-hash", "trooth-signed-by", "trooth-semanto-state", "location", "content-signal", "link"]
+SEMANTO_RESPONSE_MUST_COVER_WHEN_PRESENT = ["trooth-signed-page-hash", "trooth-signed-by", "trooth-semanto-state", "location"]
 SEMANTO_RESPONSE_TAG = "trooth-semanto"
 WEB_BOT_AUTH_TAG = "web-bot-auth"
 WEB_BOT_AUTH_REQUIRED = ["@authority", "signature-agent"]
@@ -96,13 +99,11 @@ def parse_signature_input(value: str) -> Dict[str, dict]:
             elif v.startswith('"'):
                 v = re.sub(r"\\(.)", r"\1", v[1:-1])
             if k in ("created", "expires"):
-                try:
-                    params[k] = int(v)
-                except ValueError:
-                    params[k] = None
+                # RFC 9421 2.3: Integers only; anything else is kept as "bad" and refused as malformed.
+                params[k] = int(v) if re.fullmatch(r"-?\d{1,15}", v) else "bad"
             elif k in ("keyid", "alg", "nonce", "tag"):
                 params[k] = v
-        if not isinstance(params.get("created"), int) or not isinstance(params.get("keyid"), str):
+        if "created" not in params or not isinstance(params.get("keyid"), str):
             continue
         out[label] = {"components": components, "params": params, "raw": f"({comps_raw.strip()}){params_raw}"}
     return out
@@ -149,22 +150,29 @@ def verify_message(
     now: Optional[int] = None,
     max_age_seconds: Optional[int] = None,
     skew_seconds: int = 60,
+    label: Optional[str] = None,
 ) -> dict:
-    """m = {"kind": "request"|"response", "method", "url", "status", "headers"}."""
+    """m = {"kind": "request"|"response", "method", "url", "status", "headers"}.
+
+    label: verify that label only. The key is judged at the signature's created.
+    """
     si = header_get(m["headers"], "signature-input")
     sg = header_get(m["headers"], "signature")
     if not si or not sg:
         return {"ok": False, "reason": "no_signature"}
     inputs = parse_signature_input(si)
     sigs = parse_signature(sg)
-    labels = [l for l in inputs if l in sigs]
+    labels = [l for l in inputs if l in sigs and (label is None or l == label)]
     if not labels:
         return {"ok": False, "reason": "malformed"}
     now = int(time.time()) if now is None else now
     last = {"ok": False, "reason": "malformed"}
     req = [r.lower() for r in (required or [])]
-    for label in labels:
-        components, params, raw = inputs[label]["components"], inputs[label]["params"], inputs[label]["raw"]
+    for lb in labels:
+        components, params, raw = inputs[lb]["components"], inputs[lb]["params"], inputs[lb]["raw"]
+        if not isinstance(params.get("created"), int) or params.get("expires") == "bad":
+            last = {"ok": False, "reason": "malformed"}
+            continue
         if params.get("alg") and params["alg"] != "ed25519":
             last = {"ok": False, "reason": "unsupported_alg"}
             continue
@@ -188,17 +196,22 @@ def verify_message(
         if jwk is None:
             last = {"ok": False, "reason": "unknown_key"}
             continue
-        kv = key_valid_at(jwk, datetime.fromtimestamp(now, tz=timezone.utc))
-        if kv:
-            last = {"ok": False, "reason": kv}
+        try:
+            created_at = datetime.fromtimestamp(params["created"], tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            last = {"ok": False, "reason": "malformed"}
+            continue
+        kv = key_valid_at_signing(jwk, created_at)
+        if not kv["ok"]:
+            last = {"ok": False, "reason": kv["reason"]}
             continue
         try:
             base = signature_base(m, components, raw)
         except ValueError:
             last = {"ok": False, "reason": "missing_component"}
             continue
-        if not ed25519_verify(jwk, sigs[label], base.encode("utf-8")):
+        if not ed25519_verify(jwk, sigs[lb], base.encode("utf-8")):
             last = {"ok": False, "reason": "bad_signature"}
             continue
-        return {"ok": True, "label": label, "keyid": params["keyid"], "params": params, "components": components}
+        return {"ok": True, "label": lb, "keyid": params["keyid"], "params": params, "components": components, "notes": kv["notes"]}
     return last

@@ -5,6 +5,8 @@
 
 export const CONNECTOR_TAG: string;
 export const CONNECTOR_COMPONENTS: readonly string[];
+export const FORWARDING_COMPONENTS: readonly string[];
+export function randomNonce(): string;
 
 export interface ConnectorPublicJwk {
   kty: "OKP";
@@ -29,5 +31,16 @@ export function signPost(options: {
   created?: number;
   ttlSeconds?: number;
   label?: string;
+  nonce?: string;
 }): Promise<{ "Content-Type": string; "Content-Digest": string; "Signature-Input": string; Signature: string }>;
+export function signForwarding(options: {
+  method?: string;
+  url: string;
+  headers: Headers | Record<string, string>;
+  privateJwk: ConnectorPrivateJwk;
+  created?: number;
+  ttlSeconds?: number;
+  label?: string;
+  nonce?: string;
+}): Promise<{ "Trooth-Connector-Signature-Input": string; "Trooth-Connector-Signature": string }>;
 export function postSigned(options: { url: string; document: unknown; privateJwk: ConnectorPrivateJwk; fetchImpl?: typeof fetch }): Promise<Response>;

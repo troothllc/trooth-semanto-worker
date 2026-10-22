@@ -113,9 +113,14 @@ func VerifyConsistencyProof(oldSize, newSize int, oldRoot, newRoot []byte, proof
 	isPow2 := oldSize&(oldSize-1) == 0
 	var p [][]byte
 	if isPow2 {
-		p = append([][]byte{oldRoot}, proof...)
+		p = make([][]byte, 0, len(proof)+1)
+		p = append(p, oldRoot)
+		for _, x := range proof {
+			p = append(p, x)
+		}
 	} else {
-		p = append([][]byte{}, proof...)
+		p = make([][]byte, len(proof))
+		copy(p, proof)
 	}
 	if len(p) == 0 {
 		return false

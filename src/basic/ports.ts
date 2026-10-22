@@ -20,6 +20,8 @@ export interface BuiltRecord {
   page_count: number;
   fact_count: number;
   built_at: string;
+  /** True once Trooth's witness statement for this version is signed and logged (witness-only finalize). */
+  witnessed?: boolean;
 }
 
 /** The compiler, as Basic sees it: build from the public site, state "read". */

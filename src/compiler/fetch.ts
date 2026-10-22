@@ -5,12 +5,13 @@
 // so tests run on an in-memory site, and it enforces the guards a crawler
 // needs when the url comes from someone else's page:
 //
-//   SSRF     refuse anything that is not https; refuse hosts that are, or
-//            resolve to, loopback, private (RFC 1918), link-local, carrier-grade
-//            NAT, multicast, unspecified and cloud metadata addresses (RFC 6890
-//            special-purpose registry, plus 169.254.169.254 and fd00:ec2::254);
-//            refuse redirects that leave the registrable domain; at most five
-//            hops (RFC 9110 section 15.4)
+//   SSRF     src/core/ssrf.ts: refuse anything that is not https; refuse
+//            hosts that are, or resolve to, loopback, private, link-local,
+//            carrier-grade NAT, multicast, unspecified, reserved and cloud
+//            metadata addresses (RFC 6890 registries), including IPv4 carried
+//            in IPv6 forms; a resolver error or an empty answer is a refusal
+//            (fail closed); refuse redirects that leave the registrable
+//            domain; at most five hops (RFC 9110 section 15.4)
 //   size     read at most 2 MB of body per page and say when it was cut
 //   polite   one request per host per interval, identified by the user agent
 //            "TroothSemanto/1.0 (+https://trooth.co/semanto; witness)"; the
@@ -26,137 +27,14 @@ import { digest } from "../core/hash";
 import { fromUtf8 } from "../core/encoding";
 import type { CompilerPorts, HttpResponse } from "./ports";
 import { hostOf, sameRegistrableDomain } from "./url";
+import { checkUrl, checkResolved, type SsrfReason } from "../core/ssrf";
 
 export const USER_AGENT = "TroothSemanto/1.0 (+https://trooth.co/semanto; witness)";
 export const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
-export type SsrfReason = "not_https" | "no_host" | "loopback" | "private" | "link_local" | "metadata" | "unspecified" | "multicast" | "reserved" | "local_name";
-
-export type UrlCheck = { ok: true; host: string } | { ok: false; reason: SsrfReason; detail: string };
-
-// ---------------------------------------------------------------- address guards
-
-function parseIpv4(s: string): number[] | null {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
-  if (!m) return null;
-  const parts = m.slice(1).map(Number);
-  return parts.every((p) => p <= 255) ? parts : null;
-}
-
-function expandIpv6(s: string): number[] | null {
-  let str = s.toLowerCase();
-  if (str.startsWith("[") && str.endsWith("]")) str = str.slice(1, -1);
-  const zone = str.indexOf("%");
-  if (zone >= 0) str = str.slice(0, zone);
-  // Embedded IPv4 tail.
-  const tail = /:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(str);
-  if (tail) {
-    const v4 = parseIpv4(tail[1]!);
-    if (!v4) return null;
-    str = str.slice(0, tail.index) + `:${((v4[0]! << 8) | v4[1]!).toString(16)}:${((v4[2]! << 8) | v4[3]!).toString(16)}`;
-  }
-  const halves = str.split("::");
-  if (halves.length > 2) return null;
-  const head = halves[0] ? halves[0].split(":") : [];
-  const rest = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
-  if (halves.length === 1 && head.length !== 8) return null;
-  const missing = 8 - head.length - rest.length;
-  if (missing < 0) return null;
-  const groups = [...head, ...(halves.length === 2 ? Array<string>(missing).fill("0") : []), ...rest];
-  if (groups.length !== 8) return null;
-  const out: number[] = [];
-  for (const g of groups) {
-    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
-    out.push(parseInt(g, 16));
-  }
-  return out;
-}
-
-/** Classify a literal IP address. `null` means a public address. */
-export function classifyAddress(ip: string): SsrfReason | null {
-  const v4 = parseIpv4(ip);
-  if (v4) return classifyV4(v4);
-  const v6 = expandIpv6(ip);
-  if (!v6) return null;
-  const allZero = v6.every((g) => g === 0);
-  if (allZero) return "unspecified";
-  if (v6.slice(0, 7).every((g) => g === 0) && v6[7] === 1) return "loopback";
-  // IPv4-mapped ::ffff:a.b.c.d and IPv4-compatible.
-  if (v6.slice(0, 5).every((g) => g === 0) && (v6[5] === 0xffff || v6[5] === 0)) {
-    const a = v6[6]!;
-    const b = v6[7]!;
-    return classifyV4([a >> 8, a & 255, b >> 8, b & 255]);
-  }
-  const first = v6[0]!;
-  if ((first & 0xfe00) === 0xfc00) {
-    // fd00:ec2::254 is the AWS IMDS address on IPv6.
-    if (first === 0xfd00 && v6[1] === 0x0ec2 && v6[7] === 0x254 && v6.slice(2, 7).every((g) => g === 0)) return "metadata";
-    return "private";
-  }
-  if ((first & 0xffc0) === 0xfe80) return "link_local";
-  if ((first & 0xff00) === 0xff00) return "multicast";
-  if (first === 0x2001 && v6[1] === 0x0db8) return "reserved";
-  if (first === 0x0064 && v6[1] === 0xff9b) {
-    // 64:ff9b::/96 NAT64: judge the embedded IPv4.
-    const a = v6[6]!;
-    const b = v6[7]!;
-    return classifyV4([a >> 8, a & 255, b >> 8, b & 255]);
-  }
-  return null;
-}
-
-function classifyV4(p: number[]): SsrfReason | null {
-  const [a, b, c, d] = p as [number, number, number, number];
-  if (a === 169 && b === 254 && c === 169 && d === 254) return "metadata";
-  if (a === 10) return "private";
-  if (a === 172 && b >= 16 && b <= 31) return "private";
-  if (a === 192 && b === 168) return "private";
-  if (a === 127) return "loopback";
-  if (a === 0) return "unspecified";
-  if (a === 169 && b === 254) return "link_local";
-  if (a === 100 && b >= 64 && b <= 127) return "private";
-  if (a >= 224 && a <= 239) return "multicast";
-  if (a >= 240) return "reserved";
-  if (a === 192 && b === 0 && c === 0) return "reserved";
-  if (a === 192 && b === 0 && c === 2) return "reserved";
-  if (a === 198 && (b === 18 || b === 19)) return "reserved";
-  if (a === 198 && b === 51 && c === 100) return "reserved";
-  if (a === 203 && b === 0 && c === 113) return "reserved";
-  return null;
-}
-
-const LOCAL_NAME_RE = /(^|\.)(localhost|local|internal|localdomain|home|lan|corp|intranet|test|example|invalid)$/i;
-
-/** Check a url before any request is made. Names are checked by suffix; addresses by range. */
-export function checkUrl(raw: string): UrlCheck {
-  let u: URL;
-  try {
-    u = new URL(raw);
-  } catch {
-    return { ok: false, reason: "no_host", detail: "not a url" };
-  }
-  if (u.protocol !== "https:") return { ok: false, reason: "not_https", detail: `scheme ${u.protocol.replace(":", "")} is not https` };
-  const host = u.hostname.toLowerCase();
-  if (!host) return { ok: false, reason: "no_host", detail: "no host" };
-  if (host === "metadata.google.internal" || host === "metadata" || host === "instance-data") return { ok: false, reason: "metadata", detail: host };
-  const literal = host.startsWith("[") || /^[0-9.]+$/.test(host) || host.includes(":");
-  if (literal) {
-    const cls = classifyAddress(host);
-    if (cls) return { ok: false, reason: cls, detail: host };
-    return { ok: true, host };
-  }
-  if (LOCAL_NAME_RE.test(host)) return { ok: false, reason: "local_name", detail: host };
-  return { ok: true, host };
-}
-
-/** Check the addresses a name resolves to, when a resolver is available. */
-export function checkResolved(host: string, addresses: string[]): UrlCheck {
-  for (const a of addresses) {
-    const cls = classifyAddress(a);
-    if (cls) return { ok: false, reason: cls, detail: `${host} resolves to ${a}` };
-  }
-  return { ok: true, host };
-}
+// The address guards live in src/core/ssrf.ts, shared with the Web Bot Auth
+// key directory fetch; they are re-exported here for the compiler's callers.
+export { checkUrl, checkResolved, classifyAddress, type SsrfReason, type UrlCheck } from "../core/ssrf";
 
 // ---------------------------------------------------------------- fetch results
 
@@ -247,13 +125,15 @@ export class Fetcher {
       const check = checkUrl(current);
       if (!check.ok) return { ok: false, url, reason: check.reason, detail: check.detail, fetchedAt: started };
       if (this.ports.resolve) {
-        let addrs: string[] = [];
+        // Fail closed: a resolver error is a refusal, never "no addresses, go ahead".
+        let addrs: string[];
         try {
           addrs = await this.ports.resolve(check.host);
-        } catch {
-          addrs = [];
+        } catch (e) {
+          return { ok: false, url, reason: "unresolvable", detail: `${check.host} could not be resolved (${e instanceof Error ? e.message : String(e)})`, fetchedAt: started };
         }
-        const r = checkResolved(check.host, addrs);
+        const literal = /^[0-9.]+$/.test(check.host) || check.host.includes(":");
+        const r = literal ? check : checkResolved(check.host, addrs);
         if (!r.ok) return { ok: false, url, reason: r.reason, detail: r.detail, fetchedAt: started };
       }
       await this.politeWait(check.host);

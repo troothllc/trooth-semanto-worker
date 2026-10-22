@@ -24,8 +24,9 @@ import { digest, digestBytes, isDigest, sha256 } from "@/core/hash";
 import { semantoId } from "@/core/ids";
 import { JWS_TYPES, signObject, verifyJws } from "@/core/jws";
 import { importPrivate, importPublic, publicKeyBytes, sign as rawSign, verify as rawVerify, type PrivateJwk, type PublicJwk } from "@/core/keys";
-import { consistencyProof as merkleConsistency, inclusionProof as merkleInclusion, rootFromLeafHashes, verifyConsistency, verifyInclusion } from "@/core/merkle";
+import { verifyConsistency, verifyInclusion } from "@/core/merkle";
 import { hashLeaf, LEAF_KINDS, type LogLeaf, type LogStore, type StoredTreeHead } from "./ports";
+import { consistencyFromTiles, frontierAppend, frontierRoot, inclusionFromTiles, rangeRoot } from "./tiles";
 
 export type { LogLeaf, LeafKind, StoredTreeHead, LogStore } from "./ports";
 export { MemoryLogStore, hashLeaf, leafBytes } from "./ports";
@@ -83,27 +84,39 @@ export class TransparencyLog implements LogReader {
     return this.store.size();
   }
 
+  /**
+   * Append one leaf: O(log n). The new root comes from the compact range (the
+   * right edge), never from rereading the leaves. Callers in production go
+   * through the LogDO Durable Object so appends are serialized.
+   */
   async append(leaf: LogLeaf): Promise<AppendResult> {
     const problems = validateLeaf(leaf);
     if (problems.length) throw new Error(`append: ${problems.join("; ")}`);
     const lh = await hashLeaf(leaf);
-    const index = await this.store.appendLeaf(leaf, lh);
+    const before = await this.store.frontier();
+    const next = await frontierAppend(before, lh);
+    const index = await this.store.appendLeaf(leaf, lh, next);
+    if (index !== before.size) throw new Error("append: the log moved under this append (appends must be serialized)");
     const tree_size = index + 1;
-    const head = await this.signTreeHead(tree_size);
+    const head = await this.signHead(tree_size, printDigest(await frontierRoot(next)));
     return { index, tree_size, root: head.root_hash, tree_head: head };
   }
 
-  /** Root over the first `treeSize` leaves. */
+  /** Root over the first `treeSize` leaves: from the compact range at the current size, from the tiles for an earlier one. */
   async rootAt(treeSize: number): Promise<string> {
-    const n = await this.store.size();
-    if (treeSize < 0 || treeSize > n) throw new Error("rootAt: size out of range");
-    return printDigest(await rootFromLeafHashes(await this.store.leafHashes(0, treeSize)));
+    const f = await this.store.frontier();
+    if (treeSize < 0 || treeSize > f.size) throw new Error("rootAt: size out of range");
+    if (treeSize === f.size) return printDigest(await frontierRoot(f));
+    return printDigest(await rangeRoot(this.store.tiles(), 0, treeSize, treeSize));
   }
 
   /** Sign and store a tree head for `treeSize` (the current size when omitted). */
   async signTreeHead(treeSize?: number): Promise<StoredTreeHead> {
     const size = treeSize ?? (await this.store.size());
-    const root_hash = await this.rootAt(size);
+    return this.signHead(size, await this.rootAt(size));
+  }
+
+  private async signHead(size: number, root_hash: string): Promise<StoredTreeHead> {
     const head: TreeHead = { tree_size: size, root_hash, signed_at: this.now().toISOString() };
     const jws = await signObject(head, this.witnessKey, JWS_TYPES.treeHead, { iat: new Date(head.signed_at) });
     const stored: StoredTreeHead = { ...head, jws: jws.compact };
@@ -127,16 +140,14 @@ export class TransparencyLog implements LogReader {
     const n = await this.store.size();
     if (treeSize > n) throw new Error("inclusionProof: tree size is beyond the log");
     if (index < 0 || index >= treeSize) throw new Error("inclusionProof: index out of range");
-    const hashes = await this.store.leafHashes(0, treeSize);
-    return (await merkleInclusion(hashes, index)).map(printDigest);
+    return (await inclusionFromTiles(this.store.tiles(), index, treeSize)).map(printDigest);
   }
 
   async consistencyProof(from: number, to: number): Promise<string[]> {
     const n = await this.store.size();
     if (to > n) throw new Error("consistencyProof: tree size is beyond the log");
     if (from < 0 || from > to) throw new Error("consistencyProof: from must be at most to");
-    const hashes = await this.store.leafHashes(0, to);
-    return (await merkleConsistency(hashes, from)).map(printDigest);
+    return (await consistencyFromTiles(this.store.tiles(), from, to)).map(printDigest);
   }
 
   /** The checkpoint text for a published size, signed with the witness key in note form. */

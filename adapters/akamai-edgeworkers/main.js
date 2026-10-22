@@ -7,13 +7,18 @@
 // request.route(), so the API's body streams back at any size with its own
 // headers; the manifest is read with httpRequest() and kept in memory with its
 // ETag. onClientResponse adds the Trooth-Semanto-Version and Link headers to
-// the site's HTML. Follows the EdgeWorkers request object API
+// the site's HTML and Vary: Accept to every response it touches. With a
+// connector private JWK in PMUSER_TROOTH_CONNECTOR_KEY and WebCrypto Ed25519
+// available, a reader's Web Bot Auth request is routed with the host it
+// addressed and its True-Client-IP, signed (Trooth-Connector-Signature), so
+// Trooth can prove the reader; without them the reader is unproven. Follows
+// the EdgeWorkers request object API
 // (techdocs.akamai.com/edgeworkers/docs/request-object) and the http-request
 // module (techdocs.akamai.com/edgeworkers/docs/http-request).
 
 import { httpRequest } from "http-request";
 import { logger } from "log";
-import { decide, proofHeaders, apiRoot, configFromEnv, API_PATHS } from "./semanto-adapter.mjs";
+import { decide, proofHeaders, apiRoot, configFromEnv, API_PATHS, mergeVary, forwardingHeaders } from "./semanto-adapter.mjs";
 
 // The three settings. Set them here or as property variables PMUSER_TROOTH_ID,
 // PMUSER_TROOTH_MODE and PMUSER_TROOTH_API_BASE (variables win).
@@ -34,6 +39,7 @@ function settings(request) {
     TROOTH_ID: request.getVariable("PMUSER_TROOTH_ID") || DEFAULTS.TROOTH_ID,
     TROOTH_API_BASE: request.getVariable("PMUSER_TROOTH_API_BASE") || DEFAULTS.TROOTH_API_BASE,
     MODE: request.getVariable("PMUSER_TROOTH_MODE") || DEFAULTS.MODE,
+    TROOTH_CONNECTOR_KEY: request.getVariable("PMUSER_TROOTH_CONNECTOR_KEY") || undefined,
   });
 }
 
@@ -70,17 +76,39 @@ export async function onClientRequest(request) {
     return;
   }
   request.setVariable("PMUSER_SEMANTO_SERVED", "1");
+  await addForwarding(request, decision, config);
   // Route to the Trooth API: path and query of the decided url, same Accept header.
   const target = decision.url.replace(/^https?:\/\/[^/]+/, "");
   const q = target.indexOf("?");
   request.route({ origin: API_ORIGIN, path: q >= 0 ? target.slice(0, q) : target, query: q >= 0 ? target.slice(q + 1) : "" });
 }
 
-export async function onClientResponse(request, response) {
-  if (request.getVariable("PMUSER_SEMANTO_SERVED") === "1") {
-    if (!response.getHeader("Vary")) response.setHeader("Vary", "Accept");
-    return;
+/** A signed reader's request: add the forwarding headers and the connector signature. Any failure leaves the reader unproven. */
+async function addForwarding(request, decision, config) {
+  const h = (name) => {
+    const v = request.getHeader(name);
+    return v ? v[0] : null;
+  };
+  if (!h("Signature-Input") || !h("Signature") || !h("Signature-Agent")) return;
+  try {
+    const headers = new Headers();
+    for (const name of ["Accept", "Accept-Language", "If-None-Match", "Signature-Input", "Signature", "Signature-Agent", "True-Client-IP"]) if (h(name)) headers.set(name, h(name));
+    const shaped = { url: `https://${request.host}${request.url}`, method: "GET", headers };
+    const out = await forwardingHeaders(decision, shaped, { ...config, clientAddress: h("True-Client-IP") || "" });
+    for (const name of ["Trooth-Forwarded-Authority", "Trooth-Forwarded-For", "Trooth-Connector-Signature-Input", "Trooth-Connector-Signature"]) {
+      const v = out.get(name);
+      if (v) request.setHeader(name, v);
+    }
+  } catch (e) {
+    logger.log("semanto forwarding not signed: %s", String(e));
   }
+}
+
+export async function onClientResponse(request, response) {
+  // Every response here varies on Accept, the site's HTML included.
+  const vary = response.getHeader("Vary");
+  response.setHeader("Vary", mergeVary(vary ? vary.join(", ") : ""));
+  if (request.getVariable("PMUSER_SEMANTO_SERVED") === "1") return;
   const ct = response.getHeader("Content-Type");
   if (!ct || !/^text\/html/i.test(ct[0])) return;
   const config = settings(request);

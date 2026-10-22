@@ -34,7 +34,7 @@ Semanto does not make AI believe a company; it makes what the company said impos
 ## House rules (these are not optional)
 
 1. **Provenance words are exactly four:** witnessed, public_record, attested, declared. A declared fact is never shown as witnessed. Three negatives stay apart: `no`, `not_published`, `not_read`.
-2. **Trooth witnesses and never judges.** No module produces a number or a verdict about a company. The words "score", "verified" and "certified" never describe a company, a fact or a record, in code, comments, copy or tests. Say "checked", "proven", "witnessed", "matches", "mismatch".
+2. **Trooth witnesses and never judges.** No module produces a number or a verdict about a company. Three words never appear, in code, comments, copy, docs or tests: the noun a ranking gives (s, c, o, r, e), and the past participles of "verify" and "certify". The test in `test/integration.test.ts` builds them from parts and scans every folder for them. Say "checked", "proven", "witnessed", "matches", "mismatch".
 3. **Never switch on User-Agent.** Format is chosen by the Accept header or a path suffix. Every representation carries the same content. A test fails if two readers of the same URL and Accept get different bytes.
 4. **No sample figure presented as real.** Fixtures are named as fixtures. Copy never cites a number Trooth did not measure.
 5. **No ellipses** (the three-dot character or three periods) anywhere: code, comments, copy, docs. Hashes and paths are printed in full.
@@ -42,7 +42,7 @@ Semanto does not make AI believe a company; it makes what the company said impos
 7. **Every statement Trooth or a company signs carries a `typ` from `JWS_TYPES`** and a validity window where one makes sense. A verifier always checks the type.
 8. **Every module is pure where it can be:** handlers turn `{ status, headers, body }` into a Response; logic takes plain values. Tests run in Node with vitest and need no Cloudflare runtime.
 9. **Errors are RFC 9457 problems** (`application/problem+json`) with `code`, `retryable`, `next_action`, `terminal`, and a markdown form for `Accept: text/markdown`.
-10. **Headers:** `Trooth-Contract`, `Trooth-Semanto-Version`, `Trooth-Page-Hash`, `Signature-Input`, `Signature`, `Content-Digest`, `Vary: Accept`, `ETag` kept, `x-markdown-tokens` and `x-original-tokens` under Cloudflare's names, `Content-Signal` passed through from the customer's policy. No `X-Semanto-*` header, ever (RFC 6648).
+10. **Headers:** `Trooth-Contract`, `Trooth-Semanto-Version`, `Trooth-Page-Hash`, `Signature-Input`, `Signature`, `Content-Digest`, `Vary: Accept`, `ETag` kept, `x-markdown-tokens` and `x-original-tokens` under Cloudflare's names, `Content-Signal` passed through from the customer's policy. No header with an `X-` prefix, ever (RFC 6648).
 11. **Copy and UI:** Open Sauce One; Ink #202124, Paper #F7F8F8, blue #1A73E8 on actions only, the dark site canvas #0E1014. Plain words. No jargon in anything a small business owner reads.
 12. **File header** on every source file: the SPDX line and the copyright line, then a comment saying what the module is for and which leader's practice it follows, where there is one.
 13. **Tests** live in `test/<area>.test.ts`. Every module ships with tests that would fail if its rule were broken.

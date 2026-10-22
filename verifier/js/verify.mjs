@@ -31,6 +31,7 @@ export const JWS_TYPES = {
   productRecord: "https://trooth.co/types/product-record",
   sellerAttestation: "https://trooth.co/types/seller-attestation",
   recall: "https://trooth.co/types/recall-notice",
+  marketplaceCatalog: "https://trooth.co/types/marketplace-catalog",
   firstPublication: "https://trooth.co/types/first-publication",
   readReceipt: "https://trooth.co/types/read-receipt",
   revocation: "https://trooth.co/types/revocation-list",
@@ -38,6 +39,12 @@ export const JWS_TYPES = {
 };
 
 export const SEMANTO_RESPONSE_COMPONENTS = ["@status", "content-type", "content-digest", "trooth-semanto-version", "trooth-page-hash"];
+/** Covered whenever the response carries them; the Trooth ones and Location must be covered when present. */
+export const SEMANTO_RESPONSE_OPTIONAL_COMPONENTS = ["trooth-signed-page-hash", "trooth-signed-by", "trooth-semanto-state", "location", "content-signal", "link"];
+export const SEMANTO_RESPONSE_MUST_COVER_WHEN_PRESENT = ["trooth-signed-page-hash", "trooth-signed-by", "trooth-semanto-state", "location"];
+/** Trooth's log: the checkpoint signer name and origin a Trooth checkpoint must carry. */
+export const TROOTH_LOG_SIGNER_NAME = "trooth.co";
+export const TROOTH_LOG_ORIGIN = "trooth.co/semanto/log/v1";
 export const SEMANTO_RESPONSE_TAG = "trooth-semanto";
 export const WEB_BOT_AUTH_TAG = "web-bot-auth";
 export const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
@@ -299,13 +306,7 @@ export async function thumbprint(jwk) {
   return toBase64Url(await sha256(utf8(canonicalize({ crv: jwk.crv, kty: jwk.kty, x: jwk.x }))));
 }
 
-/**
- * Build a key resolver from one or more JWK Sets. `keys` may be a JWKS
- * ({ keys: [] }), an array of JWKS, a map of name to JWKS, or the keys.json
- * vector shape ({ company: { jwks }, trooth: { jwks } }).
- */
-export function keyResolver(keys) {
-  const all = [];
+function collectJwks(keys, all) {
   const add = (k) => {
     if (!k) return;
     if (Array.isArray(k)) return k.forEach(add);
@@ -315,15 +316,87 @@ export function keyResolver(keys) {
     if (typeof k === "object") Object.values(k).forEach(add);
   };
   add(keys);
-  return (kid) => all.find((j) => j.kid === kid && j.kty === "OKP" && j.crv === "Ed25519") ?? null;
+  return all;
 }
 
+const ROLE_NAMES = ["company", "trooth", "agent"];
+
+/** True when `keys` names its sets by role ({ company, trooth, agent }, the keys.json vector shape). */
+export function hasRoles(keys) {
+  return !!keys && typeof keys === "object" && !Array.isArray(keys) && ROLE_NAMES.some((r) => keys[r] !== undefined);
+}
+
+/**
+ * The keys for one role. Company signatures resolve only against the
+ * company's set (its domain JWKS); witness statements, tree heads,
+ * checkpoints and revocation lists only against Trooth's; Web Bot Auth
+ * requests only against the agent's directory. When `keys` is role-shaped,
+ * only that role's set is returned. When it is a plain JWK Set (no roles),
+ * the caller chose exactly these keys for this one check and they are used
+ * as given; functions that check two roles at once (verifySemanto,
+ * verifyPageProof) treat a plain set as the company's only.
+ */
+export function roleKeys(keys, role) {
+  if (hasRoles(keys)) return collectJwks(keys[role], []);
+  return collectJwks(keys, []);
+}
+
+function resolverOf(list) {
+  return (kid) => list.find((j) => j.kid === kid && j.kty === "OKP" && j.crv === "Ed25519") ?? null;
+}
+
+/** A resolver over one role's keys (see roleKeys). */
+export function roleResolver(keys, role) {
+  return resolverOf(roleKeys(keys, role));
+}
+
+/** For checks of two roles at once: a plain set is the company's, and Trooth's is then empty. */
+function strictRoleResolver(keys, role) {
+  if (hasRoles(keys)) return roleResolver(keys, role);
+  return role === "company" ? resolverOf(collectJwks(keys, [])) : () => null;
+}
+
+/**
+ * Build a key resolver over every key in `keys`, whatever its role. Use it
+ * only where the role does not matter; the top-level checks use roleResolver.
+ */
+export function keyResolver(keys) {
+  return resolverOf(collectJwks(keys, []));
+}
+
+/** Is this key valid at `at`? (The window only; signature checks use keyValidAtSigning.) */
 export function keyValidAt(jwk, at) {
   const t = at.getTime();
   if (jwk.nbf && t < Date.parse(jwk.nbf)) return { ok: false, reason: "key_not_yet_valid" };
   if (jwk.exp && t >= Date.parse(jwk.exp)) return { ok: false, reason: "key_expired" };
   if (jwk.revoked_at && t >= Date.parse(jwk.revoked_at)) return { ok: false, reason: "key_revoked" };
   return { ok: true };
+}
+
+/** An ISO 8601 instant: absent is null, present must parse ("bad" otherwise). */
+function instant(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== "string") return "bad";
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? "bad" : t;
+}
+
+/**
+ * Key validity when the statement was signed (iat in ms), not when it is
+ * checked: a key valid at iat verifies after rotation; a key revoked at or
+ * before iat fails; a key revoked after iat verifies with a note
+ * "key revoked after signing on <date>". Revocation for compromise backdates
+ * revoked_at to the compromise, which invalidates later signatures.
+ */
+export function keyValidAtSigning(jwk, iatMs) {
+  const nbf = instant(jwk.nbf);
+  const exp = instant(jwk.exp);
+  const rev = instant(jwk.revoked_at);
+  if (nbf === "bad" || exp === "bad" || rev === "bad") return { ok: false, reason: "malformed" };
+  if (nbf !== null && iatMs < nbf) return { ok: false, reason: "key_not_yet_valid" };
+  if (exp !== null && iatMs >= exp) return { ok: false, reason: "key_expired" };
+  if (rev !== null && iatMs >= rev) return { ok: false, reason: "key_revoked" };
+  return { ok: true, notes: rev !== null ? [`key revoked after signing on ${jwk.revoked_at}`] : [] };
 }
 
 export function parseDnsKeyRecords(txt) {
@@ -338,9 +411,14 @@ export function parseDnsKeyRecords(txt) {
 // ------------------------------------------------------------------ JWS
 
 /**
- * Verify a compact (h.p.s) or detached (h..s) JWS. For a detached JWS pass
- * opts.payload; its RFC 8785 bytes are what was signed. Returns
- * { ok, header, payload } or { ok: false, reason }.
+ * Verify a compact (h.p.s) or detached (h..s) JWS. When opts.payload is
+ * given, the JWS payload segment must be empty or byte-equal to
+ * base64url(RFC 8785 bytes of opts.payload); anything else is
+ * "payload_mismatch" (a detached signature plus the public old payload must
+ * never verify a new object). Without opts.payload the embedded payload is
+ * returned and the caller compares it with what it meant to check. The key
+ * is judged at the statement's iat (keyValidAtSigning); nbf and exp at
+ * opts.at. Returns { ok, header, payload, notes } or { ok: false, reason }.
  */
 export async function verifyJws(jws, resolveKey, opts = {}) {
   if (typeof jws !== "string") return { ok: false, reason: "malformed" };
@@ -353,15 +431,29 @@ export async function verifyJws(jws, resolveKey, opts = {}) {
   } catch {
     return { ok: false, reason: "malformed" };
   }
+  if (typeof header !== "object" || header === null || Array.isArray(header)) return { ok: false, reason: "malformed" };
   if (header.alg !== "EdDSA" || typeof header.kid !== "string") return { ok: false, reason: "malformed" };
   if (opts.expectTyp && header.typ !== opts.expectTyp) return { ok: false, reason: "wrong_type" };
-  const p = pGiven !== "" ? pGiven : opts.payload !== undefined ? toBase64Url(utf8(canonicalize(opts.payload))) : null;
-  if (p === null) return { ok: false, reason: "malformed" };
+  const iat = instant(header.iat);
+  const nbf = instant(header.nbf);
+  const exp = instant(header.exp);
+  if (iat === "bad" || nbf === "bad" || exp === "bad") return { ok: false, reason: "malformed" };
+  let p;
+  if (opts.payload !== undefined) {
+    let expected;
+    try {
+      expected = toBase64Url(utf8(canonicalize(opts.payload)));
+    } catch {
+      return { ok: false, reason: "malformed" };
+    }
+    if (pGiven !== "" && pGiven !== expected) return { ok: false, reason: "payload_mismatch" };
+    p = expected;
+  } else {
+    if (pGiven === "") return { ok: false, reason: "malformed" };
+    p = pGiven;
+  }
   const jwk = await resolveKey(header.kid);
   if (!jwk) return { ok: false, reason: "unknown_key" };
-  const at = opts.at ?? new Date();
-  const kv = keyValidAt(jwk, at);
-  if (!kv.ok) return { ok: false, reason: kv.reason };
   let sig;
   try {
     sig = fromBase64Url(s);
@@ -369,16 +461,18 @@ export async function verifyJws(jws, resolveKey, opts = {}) {
     return { ok: false, reason: "malformed" };
   }
   if (!(await ed25519Verify(jwk, sig, utf8(`${h}.${p}`)))) return { ok: false, reason: "bad_signature" };
-  const t = at.getTime();
-  if (header.nbf && t < Date.parse(header.nbf)) return { ok: false, reason: "not_yet_valid" };
-  if (header.exp && t >= Date.parse(header.exp)) return { ok: false, reason: "expired" };
+  const t = (opts.at ?? new Date()).getTime();
+  const kv = keyValidAtSigning(jwk, iat ?? t);
+  if (!kv.ok) return { ok: false, reason: kv.reason };
+  if (nbf !== null && t < nbf) return { ok: false, reason: "not_yet_valid" };
+  if (exp !== null && t >= exp) return { ok: false, reason: "expired" };
   let payload;
   try {
     payload = JSON.parse(fromUtf8(fromBase64Url(p)));
   } catch {
     return { ok: false, reason: "malformed" };
   }
-  return { ok: true, header, payload };
+  return { ok: true, header, payload, notes: kv.notes };
 }
 
 // ------------------------------------------------------------------ RFC 9421
@@ -440,7 +534,8 @@ export function parseSignatureInput(value) {
     for (const pm of m[3].matchAll(/;([A-Za-z*][A-Za-z0-9_.*-]*)(?:=("(?:[^"\\]|\\.)*"|[^;,\s]+))?/g)) {
       const k = pm[1];
       const v = pm[2] === undefined ? "" : pm[2].startsWith('"') ? pm[2].slice(1, -1).replace(/\\(.)/g, "$1") : pm[2];
-      if (k === "created" || k === "expires") params[k] = Number(v);
+      // RFC 9421 2.3: Integers only; anything else is NaN and refused as malformed.
+      if (k === "created" || k === "expires") params[k] = /^-?\d{1,15}$/.test(v) ? Number(v) : Number.NaN;
       else if (k === "keyid" || k === "alg" || k === "nonce" || k === "tag") params[k] = v;
     }
     if (typeof params.created !== "number" || typeof params.keyid !== "string") continue;
@@ -487,7 +582,8 @@ export async function verifyContentDigest(header, body) {
  * Verify an RFC 9421 signature on a request or response message:
  * m = { kind: "request" | "response", method?, url?, status?, headers }.
  * opts: resolveKey(kid), required[] components, tag, now (unix seconds),
- * maxAgeSeconds, skewSeconds.
+ * maxAgeSeconds, skewSeconds, label (verify that label only). The key is
+ * judged at the signature's created (keyValidAtSigning).
  */
 export async function verifyMessage(m, opts) {
   const si = headerGet(m.headers, "signature-input");
@@ -495,12 +591,17 @@ export async function verifyMessage(m, opts) {
   if (!si || !sg) return { ok: false, reason: "no_signature" };
   const inputs = parseSignatureInput(si);
   const sigs = parseSignature(sg);
-  const labels = Object.keys(inputs).filter((l) => sigs[l]);
+  let labels = Object.keys(inputs).filter((l) => sigs[l]);
+  if (opts.label !== undefined) labels = labels.filter((l) => l === opts.label);
   if (labels.length === 0) return { ok: false, reason: "malformed" };
   const now = opts.now ?? Math.floor(Date.now() / 1000);
   let last = { ok: false, reason: "malformed" };
   for (const label of labels) {
     const { components, params, raw } = inputs[label];
+    if (!Number.isInteger(params.created) || (params.expires !== undefined && !Number.isInteger(params.expires))) {
+      last = { ok: false, reason: "malformed" };
+      continue;
+    }
     if (params.alg && params.alg !== "ed25519") {
       last = { ok: false, reason: "unsupported_alg" };
       continue;
@@ -531,7 +632,7 @@ export async function verifyMessage(m, opts) {
       last = { ok: false, reason: "unknown_key" };
       continue;
     }
-    const kv = keyValidAt(jwk, new Date(now * 1000));
+    const kv = keyValidAtSigning(jwk, params.created * 1000);
     if (!kv.ok) {
       last = { ok: false, reason: kv.reason };
       continue;
@@ -547,7 +648,7 @@ export async function verifyMessage(m, opts) {
       last = { ok: false, reason: "bad_signature" };
       continue;
     }
-    return { ok: true, label, keyid: params.keyid, params, components };
+    return { ok: true, label, keyid: params.keyid, params, components, notes: kv.notes };
   }
   return last;
 }
@@ -611,15 +712,19 @@ export function stateOf(version, now = new Date(), revocations = null, latest = 
 class Checks {
   constructor() {
     this.list = [];
+    this.notes = [];
   }
   add(name, ok, detail, reason) {
     this.list.push({ name, ok, detail });
     if (!ok && !this.reason) this.reason = reason ?? name;
     return ok;
   }
+  note(text) {
+    this.notes.push(text);
+  }
   result(extra = {}) {
     const ok = this.list.every((c) => c.ok);
-    return { ok, reason: ok ? null : this.reason, checks: this.list, ...extra };
+    return { ok, reason: ok ? null : this.reason, checks: this.list, notes: this.notes, ...extra };
   }
 }
 
@@ -629,14 +734,17 @@ const atOf = (opts) => (opts.now instanceof Date ? opts.now : opts.now ? new Dat
  * Verify a whole Semanto file offline.
  *   file            the parsed Semanto JSON
  *   pageBytesByUrl  { url: Uint8Array | string } or a function (entry) => bytes | null; may be empty
- *   keys            the company's and Trooth's JWK Sets (any shape keyResolver accepts)
+ *   keys            { company, trooth } (any JWKS shape each); the company's signature
+ *                   resolves only against `company`, the witness only against `trooth`.
+ *                   A plain JWK Set is the company's, and then no witness can check out.
  *   opts.now        the instant to judge validity at (default: the real clock)
  *   opts.revocations an optional revocation list payload
  */
 export async function verifySemanto(file, pageBytesByUrl = {}, keys = {}, opts = {}) {
   const c = new Checks();
   const at = atOf(opts);
-  const resolve = keyResolver(keys);
+  const companyKey = strictRoleResolver(keys, "company");
+  const troothKey = strictRoleResolver(keys, "trooth");
   const h = file && file.header;
   if (!h || typeof h !== "object") {
     c.add("structure", false, "The file has no header.", "malformed");
@@ -688,19 +796,21 @@ export async function verifySemanto(file, pageBytesByUrl = {}, keys = {}, opts =
   if (pagesChecked > 0) c.add("page_bytes", pagesBad.length === 0, pagesBad.length === 0 ? `${pagesChecked} of ${h.pages_manifest.length} pages were given and every one matches its hash.` : `These pages do not match their hash: ${pagesBad.join(", ")}`, "page_hash_mismatch");
   else c.list.push({ name: "page_bytes", ok: true, detail: "No page bytes were given, so page bytes were not checked." });
 
-  // The company's signature over the header.
+  // The company's signature over the header, against the company's keys only.
   if (file.signature) {
-    const v = await verifyJws(file.signature.jws, resolve, { expectTyp: JWS_TYPES.semantoVersion, payload: h, at });
-    c.add("company_signature", v.ok, v.ok ? `The header is signed by key ${v.header.kid} (typ semanto-version).` : `The company's signature did not check out: ${v.reason}.`, v.ok ? undefined : v.reason);
+    const v = await verifyJws(file.signature.jws, companyKey, { expectTyp: JWS_TYPES.semantoVersion, payload: h, at });
+    c.add("company_signature", v.ok, v.ok ? `The header is signed by the company's key ${v.header.kid} (typ semanto-version).` : `The company's signature did not check out: ${v.reason}.`, v.ok ? undefined : v.reason);
+    if (v.ok) v.notes.forEach((n) => c.note(`Company signature: ${n}.`));
   } else {
     c.add("company_signature", h.state !== "signed", h.state === "signed" ? "The file says it is signed but carries no signature." : "The file is not signed yet; that matches its state.", "unsigned");
   }
 
-  // Trooth's witness statement.
+  // Trooth's witness statement, against Trooth's keys only.
   if (file.witness) {
     const payload = { root_hash: file.root_hash, witnessed_at: file.witness.at };
-    const v = await verifyJws(file.witness.jws, resolve, { expectTyp: JWS_TYPES.witness, payload, at });
-    c.add("witness", v.ok, v.ok ? `Trooth witnessed root_hash at ${file.witness.at} with key ${v.header.kid}.` : `The witness statement did not check out: ${v.reason}.`, v.ok ? undefined : `witness_${v.reason}`);
+    const v = await verifyJws(file.witness.jws, troothKey, { expectTyp: JWS_TYPES.witness, payload, at });
+    c.add("witness", v.ok, v.ok ? `Trooth witnessed root_hash at ${file.witness.at} with Trooth's key ${v.header.kid}.` : `The witness statement did not check out against Trooth's keys: ${v.reason}.`, v.ok ? undefined : `witness_${v.reason}`);
+    if (v.ok) v.notes.forEach((n) => c.note(`Witness statement: ${n}.`));
   } else {
     c.list.push({ name: "witness", ok: true, detail: "No witness statement in the file." });
   }
@@ -742,20 +852,21 @@ function validateStructure(file, out) {
 
 /**
  * Verify a per-page proof document (object "semanto.proof", what
- * /pages/{id}/proof returns) against the page's bytes. The version header is
- * passed in opts.header (a reader fetches the version beside the proof); with
- * it the proof is tied to root_hash and the company's signature is checked.
- * Checks, in order: the page hash, the page's inclusion in pages_root, the
- * header, the company's signature, Trooth's witness statement, the version's
- * leaf and inclusion in the log, and the signed tree head.
+ * /pages/{id}/proof returns) against the page's bytes, strictly. The version
+ * header (opts.header, fetched beside the proof) and the company signature
+ * are required. The witness statement and the log entry are required unless
+ * opts.allowUnwitnessed or opts.allowUnlogged; when one is missing it is a
+ * check named "witness" or "log" that reads "absent", never a silent skip.
+ * Keys: { company, trooth }; the company signature resolves only against
+ * `company`, the witness and the tree head only against `trooth`.
  */
 export async function verifyPageProof(proof, pageBytes, keys = {}, opts = {}) {
   const c = new Checks();
   const at = atOf(opts);
-  const resolve = keyResolver(keys);
+  const companyKey = strictRoleResolver(keys, "company");
   const bytes = typeof pageBytes === "string" ? utf8(pageBytes) : pageBytes;
   const h = opts.header ?? proof.header ?? null;
-  if (proof.object !== "semanto.proof" || !isDigest(proof.page_hash) || !isDigest(proof.pages_root) || !isDigest(proof.root_hash) || !proof.inclusion) {
+  if (!proof || proof.object !== "semanto.proof" || !isDigest(proof.page_hash) || !isDigest(proof.pages_root) || !isDigest(proof.root_hash) || !proof.inclusion) {
     c.add("structure", false, "The proof is not a semanto.proof with full digests and an inclusion block.", "malformed");
     return c.result();
   }
@@ -777,16 +888,31 @@ export async function verifyPageProof(proof, pageBytes, keys = {}, opts = {}) {
     const root = await rootHash(h);
     const bound = h.pages_root === proof.pages_root && root === proof.root_hash && !!entry && entry.id === proof.page_id && entry.hash === proof.page_hash && h.version === proof.version;
     c.add("header", bound, bound ? `The version header hashes to root_hash ${root} and lists this page at index ${index}.` : root !== proof.root_hash ? `The header hashes to ${root}, not the proof's root_hash ${proof.root_hash}.` : "The header does not list this page at that index with this hash.", root !== proof.root_hash ? "root_hash_mismatch" : "manifest_mismatch");
-    const sig = await verifyJws(proof.signature, resolve, { expectTyp: JWS_TYPES.semantoVersion, payload: h, at });
-    c.add("company_signature", sig.ok, sig.ok ? `The header is signed by key ${sig.header.kid} (typ semanto-version).` : `The company's signature did not check out: ${sig.reason}.`, sig.ok ? undefined : sig.reason);
+    if (!proof.signature) c.add("company_signature", false, "The proof carries no company signature.", "signature_absent");
+    else {
+      const sig = await verifyJws(proof.signature, companyKey, { expectTyp: JWS_TYPES.semantoVersion, payload: h, at });
+      c.add("company_signature", sig.ok, sig.ok ? `The header is signed by the company's key ${sig.header.kid} (typ semanto-version).` : `The company's signature did not check out: ${sig.reason}.`, sig.ok ? undefined : sig.reason);
+      if (sig.ok) sig.notes.forEach((n) => c.note(`Company signature: ${n}.`));
+    }
   } else {
-    c.list.push({ name: "header", ok: true, detail: "No version header was given, so the proof was not tied to the signed header and the company signature was not checked." });
+    c.add("header", false, "No version header was given, so the proof is not tied to a signed version. Fetch the version beside the proof.", "header_absent");
+    c.add("company_signature", false, "The company signature cannot be checked without the version header.", "header_absent");
   }
 
-  if (proof.witness) {
+  await witnessAndLog(c, proof, keys, at, opts);
+  return c.result({ version_id: proof.version_id ?? (isDigest(proof.root_hash) ? versionId(proof.root_hash) : null) });
+}
+
+/** The witness and log checks a page proof shares with the CLIs, strict unless allowed. */
+async function witnessAndLog(c, proof, keys, at, opts) {
+  const troothKey = strictRoleResolver(keys, "trooth");
+  if (proof.witness && proof.witnessed_at) {
     const payload = { root_hash: proof.root_hash, witnessed_at: proof.witnessed_at };
-    const w = await verifyJws(proof.witness, resolve, { expectTyp: JWS_TYPES.witness, payload, at });
-    c.add("witness", w.ok, w.ok ? `Trooth witnessed this root_hash at ${proof.witnessed_at} with key ${w.header.kid}.` : `The witness statement did not check out: ${w.reason}.`, w.ok ? undefined : `witness_${w.reason}`);
+    const w = await verifyJws(proof.witness, troothKey, { expectTyp: JWS_TYPES.witness, payload, at });
+    c.add("witness", w.ok, w.ok ? `Trooth witnessed this root_hash at ${proof.witnessed_at} with Trooth's key ${w.header.kid}.` : `The witness statement did not check out against Trooth's keys: ${w.reason}.`, w.ok ? undefined : `witness_${w.reason}`);
+    if (w.ok) w.notes.forEach((n) => c.note(`Witness statement: ${n}.`));
+  } else {
+    c.add("witness", !!opts.allowUnwitnessed, opts.allowUnwitnessed ? "Absent: the proof carries no witness statement (allowed by the caller)." : "Absent: the proof carries no witness statement.", "witness_absent");
   }
 
   if (proof.ledger) {
@@ -810,40 +936,57 @@ export async function verifyPageProof(proof, pageBytes, keys = {}, opts = {}) {
       inLog = false;
     }
     c.add("log_inclusion", inLog, inLog ? `Leaf ${l.index} is in the log of size ${l.tree_size} with root ${l.root_hash}.` : "The log inclusion proof does not lead to the tree head.", "log_inclusion_failed");
-    const th = await verifyTreeHead({ jws: l.tree_head_jws ?? l.tree_head?.jws, payload: l.tree_head?.payload }, keys, { now: at });
+    const th = await verifyTreeHead({ jws: l.tree_head_jws ?? l.tree_head?.jws, payload: l.tree_head?.payload }, hasRoles(keys) ? keys : { trooth: [] }, { now: at });
     const same = th.ok && th.tree_size === l.tree_size && th.root_hash === l.root_hash;
-    c.add("tree_head", same, th.ok ? (same ? `The tree head of size ${th.tree_size} is signed by Trooth (key ${th.kid}).` : "The signed tree head names a different tree.") : `The tree head signature did not check out: ${th.reason}.`, th.ok ? "tree_head_mismatch" : `tree_head_${th.reason}`);
+    c.add("tree_head", same, th.ok ? (same ? `The tree head of size ${th.tree_size} is signed by Trooth (key ${th.kid}).` : "The signed tree head names a different tree.") : `The tree head signature did not check out against Trooth's keys: ${th.reason}.`, th.ok ? "tree_head_mismatch" : `tree_head_${th.reason}`);
+  } else {
+    c.add("log", !!opts.allowUnlogged, opts.allowUnlogged ? "Absent: the proof carries no log entry (allowed by the caller)." : "Absent: the proof carries no log entry.", "log_absent");
   }
-
-  return c.result({ version_id: proof.version_id ?? (isDigest(proof.root_hash) ? versionId(proof.root_hash) : null) });
 }
 
 /**
  * Verify a signed HTTP response: the RFC 9421 signature with tag
  * trooth-semanto over the Semanto components, and the RFC 9530 Content-Digest
- * against the body. opts.now may be a Date or unix seconds.
+ * against the body. The covered list is read from Signature-Input: the fixed
+ * components must be covered, and Trooth-Signed-Page-Hash, Trooth-Signed-By,
+ * Trooth-Semanto-State and Location must be covered whenever the response
+ * carries them. Trooth-Page-Hash is always the digest of the body. A response
+ * that says Trooth-Signed-By: witness resolves against Trooth's keys; any
+ * other against the company's. opts.now may be a Date or unix seconds.
  */
 export async function verifyResponse(status, headers, body, keys = {}, opts = {}) {
   const c = new Checks();
-  const resolve = keyResolver(keys);
+  const signedBy = (headerGet(headers, "trooth-signed-by") ?? "").trim().toLowerCase();
+  const role = signedBy === "witness" ? "trooth" : "company";
+  const resolve = roleResolver(keys, role);
   const nowSec = opts.now instanceof Date ? Math.floor(opts.now.getTime() / 1000) : typeof opts.now === "number" ? opts.now : opts.now ? Math.floor(Date.parse(opts.now) / 1000) : Math.floor(Date.now() / 1000);
-  const digestOk = await verifyContentDigest(headerGet(headers, "content-digest"), body);
+  const bytes = typeof body === "string" ? utf8(body) : body;
+  const digestOk = await verifyContentDigest(headerGet(headers, "content-digest"), bytes);
   c.add("content_digest", digestOk, digestOk ? "Content-Digest matches the body." : "Content-Digest does not match the body, or is missing.", "content_digest_mismatch");
   const v = await verifyMessage({ kind: "response", status, headers }, { resolveKey: resolve, required: opts.required ?? SEMANTO_RESPONSE_COMPONENTS, tag: opts.tag ?? SEMANTO_RESPONSE_TAG, now: nowSec, maxAgeSeconds: opts.maxAgeSeconds, skewSeconds: opts.skewSeconds });
-  c.add("signature", v.ok, v.ok ? `The response is signed by key ${v.keyid} with tag ${v.params.tag}, covering ${v.components.join(", ")}.` : `The response signature did not check out: ${v.reason}.`, v.ok ? undefined : v.reason);
-  const pageHash = headerGet(headers, "trooth-page-hash");
-  if (pageHash) {
-    const d = await digest(typeof body === "string" ? utf8(body) : body);
-    c.add("page_hash", d === pageHash, d === pageHash ? `Trooth-Page-Hash is the digest of the body: ${d}` : `Trooth-Page-Hash ${pageHash} is not the digest of the body (${d}).`, "page_hash_mismatch");
+  c.add("signature", v.ok, v.ok ? `The response is signed by the ${role === "trooth" ? "Trooth" : "company"} key ${v.keyid} with tag ${v.params.tag}, covering ${v.components.join(", ")}.` : `The response signature did not check out against the ${role === "trooth" ? "Trooth" : "company"} keys: ${v.reason}.`, v.ok ? undefined : v.reason);
+  if (v.ok) {
+    v.notes.forEach((n) => c.note(`Response signature: ${n}.`));
+    const covered = v.components.map((x) => x.toLowerCase());
+    const uncovered = SEMANTO_RESPONSE_MUST_COVER_WHEN_PRESENT.filter((name) => headerGet(headers, name) !== null && !covered.includes(name));
+    c.add("covered_headers", uncovered.length === 0, uncovered.length === 0 ? "Every Trooth header the response carries is covered by the signature." : `These headers are present but not covered by the signature: ${uncovered.join(", ")}.`, "header_not_covered");
+    for (const name of ["content-signal", "link"]) if (headerGet(headers, name) !== null && !covered.includes(name)) c.note(`${name} is present but not covered by the signature; do not rely on it.`);
   }
-  return c.result({ keyid: v.ok ? v.keyid : null, params: v.ok ? v.params : null, version: headerGet(headers, "trooth-semanto-version"), page_hash: pageHash });
+  const pageHash = headerGet(headers, "trooth-page-hash");
+  const d = await digest(bytes);
+  c.add("page_hash", pageHash === d, pageHash === d ? `Trooth-Page-Hash is the digest of the body: ${d}` : pageHash ? `Trooth-Page-Hash ${pageHash} is not the digest of the body (${d}).` : "The response carries no Trooth-Page-Hash.", "page_hash_mismatch");
+  const signedPageHash = headerGet(headers, "trooth-signed-page-hash");
+  return c.result({ keyid: v.ok ? v.keyid : null, params: v.ok ? v.params : null, signed_by: role, version: headerGet(headers, "trooth-semanto-version"), page_hash: pageHash, signed_page_hash: signedPageHash });
 }
 
-/** Verify a Web Bot Auth signed request. Returns the Signature-Agent it names when it checks out. */
+/** Verify a Web Bot Auth signed request against the agent's keys. Returns the Signature-Agent it names when it checks out. */
 export async function verifyWebBotAuthRequest(method, url, headers, keys = {}, opts = {}) {
-  const resolve = keyResolver(keys);
+  const resolve = roleResolver(keys, "agent");
   const nowSec = opts.now instanceof Date ? Math.floor(opts.now.getTime() / 1000) : typeof opts.now === "number" ? opts.now : Math.floor(Date.now() / 1000);
-  const v = await verifyMessage({ kind: "request", method, url, headers }, { resolveKey: resolve, required: ["@authority", "signature-agent"], tag: WEB_BOT_AUTH_TAG, now: nowSec, maxAgeSeconds: opts.maxAgeSeconds, skewSeconds: opts.skewSeconds });
+  const inputs = parseSignatureInput(headerGet(headers, "signature-input") ?? "");
+  const labels = Object.keys(inputs).filter((l) => inputs[l].params.tag === WEB_BOT_AUTH_TAG);
+  if (labels.length > 1) return { ok: false, reason: "more_than_one_label" };
+  const v = await verifyMessage({ kind: "request", method, url, headers }, { resolveKey: resolve, required: ["@authority", "signature-agent"], tag: WEB_BOT_AUTH_TAG, now: nowSec, maxAgeSeconds: opts.maxAgeSeconds, skewSeconds: opts.skewSeconds, ...(labels.length === 1 ? { label: labels[0] } : {}) });
   if (!v.ok) return v;
   const agentRaw = headerGet(headers, "signature-agent") ?? "";
   const agent = agentRaw.trim().replace(/^"|"$/g, "");
@@ -851,23 +994,23 @@ export async function verifyWebBotAuthRequest(method, url, headers, keys = {}, o
 }
 
 /**
- * Verify a signed tree head: a compact JWS (typ signed-tree-head) over
- * { tree_size, root_hash, signed_at }. Accepts a string, { jws }, or
- * { payload, jws } (then the payload must match what was signed).
+ * Verify a signed tree head against Trooth's keys: a compact JWS (typ
+ * signed-tree-head) over { tree_size, root_hash, signed_at }. Accepts a
+ * string, { jws }, or { payload, jws } (then the payload must match what was
+ * signed).
  */
 export async function verifyTreeHead(treeHead, keys = {}, opts = {}) {
-  const resolve = keyResolver(keys);
+  const resolve = roleResolver(keys, "trooth");
   const at = atOf(opts);
   const jws = typeof treeHead === "string" ? treeHead : treeHead?.jws ?? treeHead?.tree_head_jws;
   const given = typeof treeHead === "string" ? undefined : treeHead?.payload;
   const v = await verifyJws(jws, resolve, { expectTyp: JWS_TYPES.treeHead, payload: given, at });
   if (!v.ok) return v;
   const p = v.payload;
-  if (given !== undefined && canonicalize(given) !== canonicalize(p)) return { ok: false, reason: "payload_mismatch" };
-  if (!Number.isInteger(p.tree_size) || !isDigest(p.root_hash)) return { ok: false, reason: "malformed" };
+  if (typeof p !== "object" || p === null || !Number.isInteger(p.tree_size) || !isDigest(p.root_hash)) return { ok: false, reason: "malformed" };
   // A stored tree head ({ tree_size, root_hash, signed_at, jws }) must agree with what its JWS says.
   if (typeof treeHead === "object" && treeHead !== null && treeHead.root_hash !== undefined && (treeHead.root_hash !== p.root_hash || (treeHead.tree_size !== undefined && treeHead.tree_size !== p.tree_size))) return { ok: false, reason: "payload_mismatch" };
-  return { ok: true, kid: v.header.kid, payload: p, tree_size: p.tree_size, root_hash: p.root_hash, signed_at: p.signed_at };
+  return { ok: true, kid: v.header.kid, payload: p, tree_size: p.tree_size, root_hash: p.root_hash, signed_at: p.signed_at, notes: v.notes };
 }
 
 /** Verify an inclusion proof { leaf_hash | leaf, index, tree_size, path | inclusion_path, root_hash } against a log root. */
@@ -885,11 +1028,13 @@ export async function verifyConsistency(proof) {
 /**
  * Verify a checkpoint (signed note, golang.org/x/mod/sumdb/note):
  * "origin\nsize\nbase64root\n\n— name base64(keyhash4||sig)\n" where
- * keyhash4 = first 4 bytes of SHA-256(name || "\n" || 0x01 || pubkey). The
- * signer name is the log operator's (Trooth's is "trooth.co"); the origin is
- * the log's (Trooth's is "trooth.co/semanto/log/v1").
+ * keyhash4 = first 4 bytes of SHA-256(name || "\n" || 0x01 || pubkey). Only
+ * Trooth's keys are tried, only a signature line named "trooth.co" counts,
+ * and the origin must be "trooth.co/semanto/log/v1" unless the caller names
+ * another log's origin.
  */
-export async function verifyCheckpoint(text, keys = {}, expectedOrigin) {
+export async function verifyCheckpoint(text, keys = {}, expectedOrigin = TROOTH_LOG_ORIGIN, expectedName = TROOTH_LOG_SIGNER_NAME) {
+  if (typeof text !== "string") return { ok: false, reason: "malformed" };
   const split = text.indexOf("\n\n");
   if (split < 0) return { ok: false, reason: "malformed" };
   const body = text.slice(0, split + 1);
@@ -898,30 +1043,29 @@ export async function verifyCheckpoint(text, keys = {}, expectedOrigin) {
   const origin = lines[0];
   const size = Number(lines[1]);
   if (expectedOrigin && origin !== expectedOrigin) return { ok: false, reason: "wrong_origin" };
-  if (!Number.isInteger(size) || !lines[2]) return { ok: false, reason: "malformed" };
+  if (!/^\d+$/.test(lines[1] ?? "") || !Number.isInteger(size) || !lines[2]) return { ok: false, reason: "malformed" };
   let root;
   try {
     root = fromBase64(lines[2]);
   } catch {
     return { ok: false, reason: "malformed" };
   }
-  const candidates = [];
-  const add = (k) => {
-    if (!k) return;
-    if (Array.isArray(k)) return k.forEach(add);
-    if (Array.isArray(k.keys)) return k.keys.forEach((j) => candidates.push(j));
-    if (k.jwks) return add(k.jwks);
-    if (k.kty === "OKP") return candidates.push(k);
-    if (typeof k === "object") Object.values(k).forEach(add);
-  };
-  add(keys);
+  const candidates = roleKeys(keys, "trooth");
   let sawLine = false;
+  let sawName = false;
   for (const line of sigBlock.split("\n")) {
     const m = /^— (\S+) (\S+)$/.exec(line);
     if (!m) continue;
     sawLine = true;
     const name = m[1];
-    const blob = fromBase64(m[2]);
+    if (expectedName && name !== expectedName) continue;
+    sawName = true;
+    let blob;
+    try {
+      blob = fromBase64(m[2]);
+    } catch {
+      continue;
+    }
     const keyHash = blob.slice(0, 4);
     const sig = blob.slice(4);
     for (const jwk of candidates) {
@@ -932,19 +1076,22 @@ export async function verifyCheckpoint(text, keys = {}, expectedOrigin) {
       return { ok: false, reason: "bad_signature" };
     }
   }
-  return { ok: false, reason: sawLine ? "unknown_key" : "malformed" };
+  return { ok: false, reason: !sawLine ? "malformed" : !sawName ? "wrong_signer" : "unknown_key" };
 }
 
-/** Verify a signed offer (typ signed-offer) at `now`. */
+/** Verify a signed offer (typ signed-offer) at `now` against the company's keys. */
 export async function verifyOffer(jws, keys = {}, opts = {}) {
-  const v = await verifyJws(jws, keyResolver(keys), { expectTyp: JWS_TYPES.offer, at: atOf(opts) });
+  const v = await verifyJws(jws, roleResolver(keys, "company"), { expectTyp: JWS_TYPES.offer, at: atOf(opts) });
   if (!v.ok) return v;
   return { ...v, offer_id: semantoId("smo", await digest(canonicalize(v.payload))) };
 }
 
-/** Verify a signed revocation list (typ revocation-list) and return its payload. */
+/** Verify a signed revocation list (typ revocation-list) against Trooth's keys and return its payload. */
 export async function verifyRevocationList(jws, keys = {}, opts = {}) {
-  return verifyJws(jws, keyResolver(keys), { expectTyp: JWS_TYPES.revocation, at: atOf(opts) });
+  const v = await verifyJws(jws, roleResolver(keys, "trooth"), { expectTyp: JWS_TYPES.revocation, at: atOf(opts) });
+  if (!v.ok) return v;
+  if (typeof v.payload !== "object" || v.payload === null || !Array.isArray(v.payload.revocations)) return { ok: false, reason: "malformed" };
+  return v;
 }
 
 /** Parse a Link header into [{ url, params }]. */

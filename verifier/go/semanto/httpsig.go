@@ -18,7 +18,14 @@ import (
 )
 
 // SemantoResponseComponents are the components Semanto covers on every response.
+// Trooth-Page-Hash is always the digest of the exact body bytes.
 var SemantoResponseComponents = []string{"@status", "content-type", "content-digest", "trooth-semanto-version", "trooth-page-hash"}
+
+// SemantoResponseOptionalComponents are covered whenever the response carries them.
+var SemantoResponseOptionalComponents = []string{"trooth-signed-page-hash", "trooth-signed-by", "trooth-semanto-state", "location", "content-signal", "link"}
+
+// SemantoResponseMustCoverWhenPresent must be covered when present; content-signal and link are only reported.
+var SemantoResponseMustCoverWhenPresent = []string{"trooth-signed-page-hash", "trooth-signed-by", "trooth-semanto-state", "location"}
 
 // Tags.
 const (
@@ -47,6 +54,8 @@ type SignatureParams struct {
 	Alg     string
 	Nonce   string
 	Tag     string
+	// Bad is set when created or expires is present but not an Integer (RFC 9421 2.3); the signature is then malformed.
+	Bad bool
 }
 
 type sigInput struct {
@@ -72,6 +81,7 @@ var (
 	sigRe   = regexp.MustCompile(`([A-Za-z0-9_*.-]+)=:([A-Za-z0-9+/=]+):`)
 	unescRe = regexp.MustCompile(`\\(.)`)
 	foldRe  = regexp.MustCompile("[\r\n]+[ \t]+")
+	intRe   = regexp.MustCompile(`^-?[0-9]{1,15}$`)
 )
 
 // ParseSignatureInput parses a Signature-Input field.
@@ -92,14 +102,18 @@ func ParseSignatureInput(value string) map[string]sigInput {
 			}
 			switch k {
 			case "created":
-				if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				hasCreated = true
+				if n, err := strconv.ParseInt(v, 10, 64); err == nil && intRe.MatchString(v) {
 					p.Created = n
-					hasCreated = true
+				} else {
+					p.Bad = true
 				}
 			case "expires":
-				if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				p.HasExp = true
+				if n, err := strconv.ParseInt(v, 10, 64); err == nil && intRe.MatchString(v) {
 					p.Expires = n
-					p.HasExp = true
+				} else {
+					p.Bad = true
 				}
 			case "keyid":
 				p.KeyID = v
@@ -248,6 +262,8 @@ type MessageResult struct {
 	Params     SignatureParams
 	Components []string
 	Agent      string
+	// Notes are sentences a reader can weigh, such as a key revoked after signing.
+	Notes []string
 }
 
 // VerifyOptions tune VerifyMessage.
@@ -257,6 +273,8 @@ type VerifyOptions struct {
 	Now           int64 // unix seconds; zero means the clock
 	MaxAgeSeconds int64 // zero means no limit
 	SkewSeconds   int64 // zero means 60
+	// Label, when set, verifies that label only (a request's nonce is then claimed for that label).
+	Label string
 }
 
 // VerifyMessage checks the signatures on a message and returns the first that passes.
@@ -280,11 +298,15 @@ func VerifyMessage(m Message, keys KeySet, opts VerifyOptions) MessageResult {
 	found := false
 	for label, in := range inputs {
 		sig, ok := sigs[label]
-		if !ok {
+		if !ok || (opts.Label != "" && label != opts.Label) {
 			continue
 		}
 		found = true
 		p := in.Params
+		if p.Bad {
+			last = MessageResult{Reason: "malformed"}
+			continue
+		}
 		if p.Alg != "" && p.Alg != "ed25519" {
 			last = MessageResult{Reason: "unsupported_alg"}
 			continue
@@ -326,8 +348,9 @@ func VerifyMessage(m Message, keys KeySet, opts VerifyOptions) MessageResult {
 			last = MessageResult{Reason: "unknown_key"}
 			continue
 		}
-		if r := KeyValidAt(*jwk, time.Unix(now, 0).UTC()); r != "" {
-			last = MessageResult{Reason: r}
+		kv := KeyValidAtSigning(*jwk, time.Unix(p.Created, 0).UTC())
+		if !kv.OK {
+			last = MessageResult{Reason: kv.Reason}
 			continue
 		}
 		base, err := SignatureBase(m, in.Components, in.Raw)
@@ -339,7 +362,7 @@ func VerifyMessage(m Message, keys KeySet, opts VerifyOptions) MessageResult {
 			last = MessageResult{Reason: "bad_signature"}
 			continue
 		}
-		return MessageResult{OK: true, Label: label, KeyID: p.KeyID, Params: p, Components: in.Components}
+		return MessageResult{OK: true, Label: label, KeyID: p.KeyID, Params: p, Components: in.Components, Notes: kv.Notes}
 	}
 	if !found {
 		return MessageResult{Reason: "malformed"}

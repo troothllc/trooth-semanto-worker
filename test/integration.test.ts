@@ -45,7 +45,13 @@ import type { ProviderAdapter } from "@/gap/providers";
 import { WEEKLY_RUN } from "@/gap/report";
 import { memoryDomainProof } from "@/basic/ports";
 import { verifyFirstPublication } from "@/basic/first-publication";
-import { dnsClaimName, dnsClaimRecord } from "@/basic/tier";
+import { dnsClaimName, dnsClaimRecord, WITNESSED_NOT_SIGNED } from "@/basic/tier";
+
+/** An inclusion proof from the public log, checked with the ledger's own RFC 6962 code. */
+async function V_core_inclusion(p: { index: number; tree_size: number; leaf_hash: string; root_hash: string; path: string[] }): Promise<boolean> {
+  const { digestBytes: db } = await import("@/core/hash");
+  return verifyInclusionDigests(db(p.leaf_hash), p.index, p.tree_size, p.path, p.root_hash);
+}
 import { MemoryPipelineStore } from "@/pipeline-store";
 import { Pipeline, ReaderReceipts, troothOsAuthorize, webBotAuthReaders, withCompanies, type PipelineDeps, type ServiceFetcher } from "@/pipeline";
 import type { CompileJob } from "@/env";
@@ -193,13 +199,15 @@ async function world(opts: { custody?: "hosted" | "customer"; trooth_id?: string
     gapAdapters: gapAnswers,
     ...(opts.queue ? { enqueue: async (job: CompileJob) => void queued.push(job) } : {}),
     ...(opts.random ? { random: opts.random } : {}),
+    // Review finding 19: catalog nonces are claimed once (the NonceDO in the Worker).
+    nonces: new MemoryNonceStore(),
   };
   const pipeline = new Pipeline(deps);
 
   // A fixture agent whose key directory the readers module fetches (Web Bot Auth).
   const agentKey = await generateKeyPair();
   const readersHttp = new ReadersHttp({
-    [`https://agent.fixture.test${DIRECTORY_PATH}`]: { status: 200, headers: { "content-type": "application/http-message-signatures-directory+json" }, body: JSON.stringify({ keys: [agentKey.publicJwk] }) },
+    [`https://agent.fixtureagent.com${DIRECTORY_PATH}`]: { status: 200, headers: { "content-type": "application/http-message-signatures-directory+json" }, body: JSON.stringify({ keys: [agentKey.publicJwk] }) },
   });
   const receiptRows = new MemoryReceiptStore();
   const routeDeps: RouteDeps = {
@@ -208,6 +216,7 @@ async function world(opts: { custody?: "hosted" | "customer"; trooth_id?: string
     authorize: async (req) => WORKSPACES[req.headers.get("authorization") ?? ""] ?? null,
     workspace: pipeline,
     commerce,
+    firstPublications: { get: (id) => store.getFirstPublication(id) },
   };
   const app = createApp(routeDeps);
   return { clock, witness: w.privateJwk, witnessPublic: w.publicJwk, versions, ports, store, site, pipeline, app, deps, queued, receiptRows, agent: { priv: agentKey.privateJwk, pub: agentKey.publicJwk } };
@@ -235,9 +244,9 @@ describe("1. one log leaf format: the ledger's", () => {
   it("serve's verifyProof accepts the verifier kit's page-proof vector, which carries the ledger leaf record", async () => {
     const vector = JSON.parse(readFileSync(fileURLToPath(new URL("../verifier/test-vectors/v1/page-proof.json", import.meta.url)), "utf8"));
     const keys = JSON.parse(readFileSync(fileURLToPath(new URL("../verifier/test-vectors/v1/keys.json", import.meta.url)), "utf8"));
-    const all: PublicJwk[] = [...keys.company.jwks.keys, ...keys.trooth.jwks.keys];
-    const resolveKey = (kid: string) => all.find((k) => k.kid === kid) ?? null;
-    const v = await verifyProof(vector.proof as PageProof, utf8(vector.page_markdown), { header: vector.header, resolveKey, at: new Date(vector.now) });
+    const companyKeys: PublicJwk[] = keys.company.jwks.keys;
+    const troothKeys: PublicJwk[] = keys.trooth.jwks.keys;
+    const v = await verifyProof(vector.proof as PageProof, utf8(vector.page_markdown), { header: vector.header, resolveCompanyKey: (kid) => companyKeys.find((k) => k.kid === kid) ?? null, resolveTroothKey: (kid) => troothKeys.find((k) => k.kid === kid) ?? null, at: new Date(vector.now) });
     expect(v.failures).toEqual([]);
     expect(v.checks.ledger_leaf).toBe("ok");
     expect(v.ok).toBe(true);
@@ -325,9 +334,8 @@ describe("5. end to end: build, sign, witness, log, serve, verify", () => {
     const proof = (await json(await get(w, `/acme/pages/${entry.id}/proof`))) as PageProof;
     const header = ((await json(await get(w, `/acme/versions/${file.header.version}`))) as SemantoFile).header;
     expect(proof.ledger?.leaf).toMatchObject({ kind: "semanto_version", hash: proof.root_hash });
-    const keys = [...jwks.keys, w.witnessPublic];
     const at = new Date(NOW.getTime() + 10_000);
-    const v = await verifyProof(proof, bytes, { header, resolveKey: (kid) => keys.find((k) => k.kid === kid) ?? null, at });
+    const v = await verifyProof(proof, bytes, { header, resolveCompanyKey: (kid) => jwks.keys.find((k) => k.kid === kid) ?? null, resolveTroothKey: (kid) => (kid === w.witnessPublic.kid ? w.witnessPublic : null), at });
     expect(v.failures).toEqual([]);
     expect(Object.values(v.checks).every((c) => c === "ok")).toBe(true);
     const js = await JSV.verifyPageProof(proof, bytes, { company: jwks, trooth: { keys: [w.witnessPublic] } }, { header, now: at });
@@ -425,6 +433,26 @@ describe("5. end to end: build, sign, witness, log, serve, verify", () => {
     expect((await json(unknown)).code).toBe("unauthorized");
   });
 
+  it("review finding 19: a catalog request is accepted once (its nonce is claimed), and a body over 5 MB is a 413 problem", async () => {
+    const connector = await generateConnectorKey();
+    await post(w, "/acme/connectors", { public_jwk: connector.publicJwk });
+    const url = `${OS}/acme/commerce/catalog`;
+    const body = readFix("fixture-catalog.json");
+    const headers = await signPost({ url, body, privateJwk: connector.privateJwk, created: Math.floor(NOW.getTime() / 1000) });
+    expect((await w.app.request(url, { method: "POST", headers, body })).status).toBe(202);
+    const replay = await w.app.request(url, { method: "POST", headers, body });
+    expect(replay.status).toBe(401);
+    expect((await json(replay)).detail).toContain("already received");
+    // Without a nonce the connector signature is refused.
+    const noNonce = await signPost({ url, body, privateJwk: connector.privateJwk, created: Math.floor(NOW.getTime() / 1000), nonce: "" });
+    const fixedInput = noNonce["Signature-Input"].replace(';nonce=""', "");
+    expect((await w.app.request(url, { method: "POST", headers: { ...noNonce, "Signature-Input": fixedInput }, body })).status).toBe(401);
+    const big = "x".repeat(5 * 1024 * 1024 + 1);
+    const tooBig = await w.app.request(url, { method: "POST", headers: { "content-type": "application/json" }, body: big });
+    expect(tooBig.status).toBe(413);
+    expect((await json(tooBig)).code).toBe("payload_too_large");
+  });
+
   it("runs the gap compare against a fixture answer and finds the compiler's contact.phone fact under the gap report's local.phone key", async () => {
     const r = await post(w, "/acme/gap-report", { kind: "local" });
     expect(r.status).toBe(200);
@@ -507,8 +535,7 @@ describe("4. the same flow over the D1 and R2 adapters the Worker uses (SQLite a
     expect(sig.ok).toBe(true);
 
     const proof = (await json(await app.request(`${API}/acme/pages/${entry.id}/proof`))) as PageProof;
-    const all = [...jwks.keys, w.publicJwk];
-    const v = await verifyProof(proof, bytes, { header: file.header, resolveKey: (k) => all.find((x) => x.kid === k) ?? null, at: NOW });
+    const v = await verifyProof(proof, bytes, { header: file.header, resolveCompanyKey: (k) => jwks.keys.find((x) => x.kid === k) ?? null, resolveTroothKey: (k) => (k === w.publicJwk.kid ? w.publicJwk : null), at: NOW });
     expect(v.failures).toEqual([]);
     const head = await json(await app.request(`${API}/log/tree-head`));
     expect(head.tree_size).toBe(3);
@@ -601,7 +628,8 @@ describe("4. signing paths, keys and the workspace actions", () => {
     expect((await post(w, "/acme/build", {})).status).toBe(200);
     const first = await post(w, "/acme/sign", {});
     expect(first.status).toBe(202);
-    expect(await json(first)).toMatchObject({ object: "semanto.sign_waiting", approvals_missing: 1 });
+    // Review finding 8: the answer says two officers need two distinct accounts, which a one-account workspace cannot give.
+    expect(await json(first)).toMatchObject({ object: "semanto.sign_waiting", approvals_missing: 1, two_officer_note: expect.stringContaining("two different people with their own accounts") });
     const again = await post(w, "/acme/sign", {});
     expect((await json(again)).approvals_missing).toBe(1);
     const second = await post(w, "/acme/sign", {}, "Bearer admin-token");
@@ -611,8 +639,9 @@ describe("4. signing paths, keys and the workspace actions", () => {
       { role: "owner", name: "Ada Owner" },
       { role: "admin", name: "Bo Admin" },
     ]);
+    // A member may build and run reports but never sign.
     const member = await post(w, "/acme/sign", {}, "Bearer member-token");
-    expect(member.status).toBe(409);
+    expect(member.status).toBe(403);
   });
 
   it("customer custody: hands out the exact signing input, accepts the signature, assembles and checks the JWS", async () => {
@@ -684,6 +713,37 @@ describe("4. signing paths, keys and the workspace actions", () => {
     expect(body.body.record.page_count).toBeGreaterThan(3);
     expect(body.body.setup.steps.map((s: any) => s.id)).toEqual(["enter_domain", "publish_token", "prove_domain", "build_record", "add_head_tag", "first_report"]);
     expect(body.body.setup.within_ten_minutes).toBeNull();
+
+    // Review finding 15: the Basic build is witnessed (Trooth's witness statement and a "witness" log leaf), never signed by the company.
+    expect(body.body.record_state).toBe("read");
+    expect(body.body.witnessed).toBe(true);
+    expect(body.body.record.witnessed).toBe(true);
+    const leaf = await json(await get(w, `/log/leaves/${body.body.witness.log_index}`));
+    expect(leaf.leaf).toMatchObject({ kind: "witness", trooth_id: "acme" });
+    const served = (await w.versions.getCurrent("acme"))!;
+    expect(served.header.state).toBe("read");
+    expect(served.signature).toBeNull();
+    expect(served.witness?.by).toBe("Trooth");
+
+    // The public routes serve it marked witnessed-not-signed, and every body carries the notice.
+    const obj = await get(w, "/acme");
+    expect(obj.status).toBe(200);
+    expect(obj.headers.get("trooth-semanto-state")).toBe("witnessed-not-signed");
+    const objBody = await json(obj);
+    expect(objBody.notice).toBe(WITNESSED_NOT_SIGNED);
+    expect(objBody.header.state).toBe("read");
+    const page = await get(w, `/acme/pages/${served.header.pages_manifest[0]!.id}`, { accept: "text/markdown" });
+    expect(page.headers.get("trooth-semanto-state")).toBe("witnessed-not-signed");
+    const pageText = await page.text();
+    expect(pageText.startsWith("---\ntrooth_state: witnessed-not-signed\n")).toBe(true);
+    expect(pageText).toContain(WITNESSED_NOT_SIGNED);
+    const llms = await (await get(w, "/acme/llms.txt")).text();
+    expect(llms).toContain("witnessed by Trooth and not signed by the company");
+    expect(llms).not.toContain("signed by the company and witnessed by Trooth");
+    // The JS kit reads it as an unsigned file whose witness statement checks out against Trooth's keys.
+    const kit = await JSV.verifySemanto(served, {}, { company: { keys: [] }, trooth: { keys: [w.witnessPublic] } }, { now: NOW });
+    expect(kit.checks.find((c) => c.name === "witness")?.ok).toBe(true);
+    expect(kit.state).toBe("unsigned");
   });
 
   it("witnesses a first publication, logs it, and the record verifies against the text", async () => {
@@ -696,6 +756,20 @@ describe("4. signing paths, keys and the workspace actions", () => {
     expect(logged.leaf).toEqual(r.leaf);
     expect(logged.leaf_hash).toBe(r.leaf_hash);
     expect((await post(w, "/acme/first-publication", { url: "https://elsewhere.example/post" })).status).toBe(403);
+
+    // Review finding 17: the statement points at routes that can check it; the record and its proof are public.
+    expect(r.check_url).toBe(`${API}/first-publication/check`);
+    expect(r.dispute).toContain(`${API}/first-publication/check`);
+    expect(r.record.declared.stated_by).toBe("requester");
+    const doc = await json(await get(w, `/first-publication/${r.record.id}`));
+    expect(doc.object).toBe("semanto.first_publication_record");
+    expect(doc.record).toEqual(r.record);
+    expect(doc.inclusion).toMatchObject({ index: r.log.index, leaf_hash: r.leaf_hash });
+    expect(await V_core_inclusion(doc.inclusion)).toBe(true);
+    const checkText = (markdown: string) => w.app.request(`${API}/first-publication/check`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ record_id: r.record.id, markdown }) });
+    expect((await json(await checkText(r.markdown))).status).toBe("matches");
+    expect((await json(await checkText(`${r.markdown} changed`))).status).toBe("differs");
+    expect((await get(w, "/first-publication/smb_aaaaaaaaaaaaaaaaaaaaaaaaaa")).status).toBe(404);
   });
 
   it("seals a hosted private key at rest and opens it only with the same secret", async () => {
@@ -800,15 +874,15 @@ describe("4. readers: Web Bot Auth behind the receipt middleware, receipts throu
     const { file } = await buildAndSign(w);
     const entry = file.header.pages_manifest[0]!;
     const url = `${API}/acme/pages/${entry.id}`;
-    const headers: Record<string, string> = { accept: "text/markdown", "signature-agent": '"https://agent.fixture.test"', "cf-connecting-ip": "203.0.113.7" };
+    const headers: Record<string, string> = { accept: "text/markdown", "signature-agent": '"https://agent.fixtureagent.com"', "cf-connecting-ip": "203.0.113.7" };
     const signed = await signMessage({ kind: "request", method: "GET", url, headers }, w.agent.priv, { components: ["@authority", "signature-agent"], created: Math.floor(NOW.getTime() / 1000) - 5, ttlSeconds: 60, nonce: "fixture-nonce-1", tag: "web-bot-auth" });
     const proven = await w.app.request(url, { headers: { ...headers, ...signed } });
-    const unsigned = await w.app.request(url, { headers: { accept: "text/markdown", "signature-agent": '"https://agent.fixture.test"', "cf-connecting-ip": "203.0.113.7" } });
+    const unsigned = await w.app.request(url, { headers: { accept: "text/markdown", "signature-agent": '"https://agent.fixtureagent.com"', "cf-connecting-ip": "203.0.113.7" } });
     expect(Buffer.from(await proven.arrayBuffer()).equals(Buffer.from(await unsigned.arrayBuffer()))).toBe(true);
     await settle();
     const rows = w.receiptRows.rows;
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toMatchObject({ proof: "web_bot_auth", agent_key_url: "https://agent.fixture.test/", keyid: w.agent.pub.kid, representation: "markdown", page_id: entry.id });
+    expect(rows[0]).toMatchObject({ proof: "web_bot_auth", agent_key_url: "https://agent.fixtureagent.com/", keyid: w.agent.pub.kid, representation: "markdown", page_id: entry.id });
     expect(rows[1]).toMatchObject({ proof: "none", agent_key_url: null, keyid: null });
     expect(rows[0]!.ip_hash).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(rows)).not.toContain("203.0.113.7");
@@ -844,9 +918,14 @@ describe("4. /os authorization: worker-f's session check, denied by default", ()
         return new Response(JSON.stringify({ authenticated: true, companyId: "co-ada-acme-com", userId: "u-1", email: "ada@acme.com", role }), { status: 200, headers: { "content-type": "application/json" } });
       },
     };
-    const authorize = troothOsAuthorize(service, async (c) => (c === "co-ada-acme-com" ? "acme" : null));
     const req = (auth?: string) => new Request(`${OS}/acme/build`, { method: "POST", headers: auth ? { authorization: auth } : {} });
+    // Without a registered owner and without an explicit workspaceRole, a vendor session is a member, never the owner.
+    const noOwner = troothOsAuthorize(service, async (c) => (c === "co-ada-acme-com" ? "acme" : null));
+    expect(await noOwner(req("Bearer live-session"), "acme")).toEqual({ trooth_id: "acme", role: "member", user_id: "u-1", name: "ada@acme.com" });
+    // The registered owner (semanto_companies.os_owner_user_id) is the owner; another user of the workspace is a member.
+    const authorize = troothOsAuthorize(service, async (c) => (c === "co-ada-acme-com" ? "acme" : null), async () => "u-1");
     expect(await authorize(req("Bearer live-session"), "acme")).toEqual({ trooth_id: "acme", role: "owner", user_id: "u-1", name: "ada@acme.com" });
+    expect((await troothOsAuthorize(service, async () => "acme", async () => "u-someone-else")(req("Bearer live-session"), "acme"))?.role).toBe("member");
     expect(await authorize(req("Bearer buyer-session"), "acme")).toBeNull();
     expect(await troothOsAuthorize(service, async () => null)(req("Bearer live-session"), "acme")).toBeNull();
     expect(await authorize(req("Bearer stale"), "acme")).toBeNull();
@@ -873,6 +952,36 @@ describe("6. house rules across every source file", () => {
   };
   walk(fileURLToPath(new URL("../src", import.meta.url)));
   walk(fileURLToPath(new URL("../migrations", import.meta.url)));
+
+  // Every folder a person reads (review finding 19): src, migrations, adapters, verifier, web and docs, every text file,
+  // excluding node_modules, vendored lockfiles and caches. The Next.js folder name [[...path]] is framework syntax and is
+  // removed from the text before the ellipsis check.
+  const everyFile: string[] = [];
+  const SKIP_DIRS = new Set(["node_modules", "__pycache__", ".pytest_cache", ".git"]);
+  const SKIP_FILES = new Set(["package-lock.json", "go.sum", "yarn.lock", "pnpm-lock.yaml"]);
+  const TEXT = /\.(ts|tsx|mts|mjs|js|json|sql|md|py|go|php|conf|toml|sh|txt|html|css|yml|yaml)$|^_redirects$/;
+  const walkAll = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const p = `${dir}/${name}`;
+      if (statSync(p).isDirectory()) {
+        if (!SKIP_DIRS.has(name)) walkAll(p);
+      } else if (TEXT.test(name) && !SKIP_FILES.has(name)) everyFile.push(p);
+    }
+  };
+  for (const d of ["src", "migrations", "adapters", "verifier", "web", "docs"]) walkAll(fileURLToPath(new URL(`../${d}`, import.meta.url)));
+
+  it("no banned word, no ellipsis and no X-prefixed Semanto header in src, migrations, adapters, verifier, web or docs", () => {
+    const banned = new RegExp(`\\b(${["sc", "veri", "certi"].map((x, i) => x + ["ore", "fied", "fied"][i]).join("|")})\\b`, "i");
+    const xHeader = new RegExp(["X", "Semanto", ""].join("-"), "i");
+    expect(everyFile.length).toBeGreaterThan(200);
+    for (const f of everyFile) {
+      const s = readFileSync(f, "utf8").split("[[...path]]").join("");
+      expect([f, banned.test(s)]).toEqual([f, false]);
+      expect([f, s.includes("\u2026")]).toEqual([f, false]);
+      expect([f, /\.\.\.(?![A-Za-z_$([{])/.test(s)]).toEqual([f, false]);
+      expect([f, xHeader.test(s)]).toEqual([f, false]);
+    }
+  });
   // Built from parts so this file never holds the words it bans.
   const banned = new RegExp(`\\b(${["sc", "veri", "certi"].map((x, i) => x + ["ore", "fied", "fied"][i]).join("|")})\\b`, "i");
   const seeding = new RegExp(["mention", "seed"].join("[-_ ]?") + "|" + ["seed", "mention"].join("[-_ ]?") + "|" + ["astro", "turf"].join(""), "i");

@@ -5,7 +5,10 @@
 // customer's domain. It answers requests for signed markdown, JSON-LD and the
 // well-known files from the Trooth-hosted copy, byte for byte with the API's
 // headers, and passes everything else to the origin with fetch(request). The
-// manifest is kept in the Cache API with its ETag. Follows the Workers routes
+// manifest is kept in the Cache API with its ETag. With TROOTH_CONNECTOR_KEY
+// set (a Worker secret: the connector private JWK registered in the
+// dashboard), a reader's Web Bot Auth request is forwarded with the host it
+// addressed and its CF-Connecting-IP, signed, so Trooth can prove the reader. Follows the Workers routes
 // model (developers.cloudflare.com/workers/configuration/routing/routes/) and
 // the Cache API (developers.cloudflare.com/workers/runtime-apis/cache/).
 // Nothing here reads User-Agent.
@@ -16,6 +19,8 @@ export interface Env {
   TROOTH_ID: string;
   TROOTH_API_BASE?: string;
   MODE?: string;
+  /** Secret: the connector private JWK as JSON (wrangler secret put TROOTH_CONNECTOR_KEY). */
+  TROOTH_CONNECTOR_KEY?: string;
 }
 
 /** A manifest store on the Cache API: one synthetic URL per Trooth ID, the entry's ETag and time inside the body. */

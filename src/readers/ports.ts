@@ -10,10 +10,19 @@ export interface HttpResponse {
   status: number;
   headers: Record<string, string>;
   body: string;
+  /** True when the body was longer than the cap and was cut; the caller must not use it. */
+  tooLarge?: boolean;
+}
+
+export interface HttpGetOptions {
+  /** Read at most this many bytes of body; more sets tooLarge. */
+  maxBytes?: number;
+  /** Give up after this many milliseconds. */
+  timeoutMs?: number;
 }
 
 export interface HttpPort {
-  get(url: string, headers?: Record<string, string>): Promise<HttpResponse>;
+  get(url: string, headers?: Record<string, string>, opts?: HttpGetOptions): Promise<HttpResponse>;
 }
 
 export class MemoryHttp implements HttpPort {
@@ -27,15 +36,54 @@ export class MemoryHttp implements HttpPort {
   }
 }
 
-export function platformHttp(f: typeof fetch = fetch): HttpPort {
+/**
+ * The Worker's fetch with the guards an outbound request to a URL someone
+ * else named needs: redirects are never followed (a 3xx comes back as is and
+ * the caller refuses it), the body is read up to maxBytes and no further, and
+ * the request is aborted after timeoutMs. The URL itself is checked by the
+ * caller with src/core/ssrf.ts before this is called.
+ */
+export function platformHttp(f: typeof fetch = (input, init) => fetch(input, init)): HttpPort {
   return {
-    async get(url, headers = {}) {
-      const res = await f(url, { method: "GET", headers, redirect: "manual" });
-      const h: Record<string, string> = {};
-      res.headers.forEach((v, k) => {
-        h[k.toLowerCase()] = v;
-      });
-      return { status: res.status, headers: h, body: await res.text() };
+    async get(url, headers = {}, opts = {}) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 3000);
+      try {
+        const res = await f(url, { method: "GET", headers, redirect: "manual", signal: ctrl.signal });
+        const h: Record<string, string> = {};
+        res.headers.forEach((v, k) => {
+          h[k.toLowerCase()] = v;
+        });
+        const cap = opts.maxBytes ?? Number.MAX_SAFE_INTEGER;
+        const declared = Number(h["content-length"] ?? "0");
+        if (declared > cap) {
+          await res.body?.cancel();
+          return { status: res.status, headers: h, body: "", tooLarge: true };
+        }
+        if (!res.body) return { status: res.status, headers: h, body: "" };
+        const reader = res.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.byteLength;
+          if (total > cap) {
+            await reader.cancel();
+            return { status: res.status, headers: h, body: "", tooLarge: true };
+          }
+          chunks.push(value);
+        }
+        const all = new Uint8Array(total);
+        let o = 0;
+        for (const c of chunks) {
+          all.set(c, o);
+          o += c.byteLength;
+        }
+        return { status: res.status, headers: h, body: new TextDecoder().decode(all) };
+      } finally {
+        clearTimeout(timer);
+      }
     },
   };
 }
@@ -55,19 +103,29 @@ export interface CachedDirectory {
 export interface KeyCache {
   get(url: string): Promise<CachedDirectory | null>;
   put(url: string, entry: CachedDirectory): Promise<void>;
+  /** The negative cache: until when (unix ms) a fetch to this origin is not tried again after a failure, or null. */
+  getFailure(origin: string): Promise<number | null>;
+  putFailure(origin: string, untilMs: number): Promise<void>;
 }
 
 export class MemoryKeyCache implements KeyCache {
   readonly map = new Map<string, CachedDirectory>();
+  readonly failures = new Map<string, number>();
   async get(url: string): Promise<CachedDirectory | null> {
     return this.map.get(url) ?? null;
   }
   async put(url: string, entry: CachedDirectory): Promise<void> {
     this.map.set(url, entry);
   }
+  async getFailure(origin: string): Promise<number | null> {
+    return this.failures.get(origin) ?? null;
+  }
+  async putFailure(origin: string, untilMs: number): Promise<void> {
+    this.failures.set(origin, untilMs);
+  }
 }
 
-/** KV skeleton: keys under "wba:dir:<url>", TTL from the entry. Needs the Worker runtime. */
+/** KV: directories under "wba:dir:<url>" and failures under "wba:fail:<origin>", each with its own TTL. Needs the Worker runtime. */
 export class KvKeyCache implements KeyCache {
   constructor(private readonly kv: KVNamespace) {}
   async get(url: string): Promise<CachedDirectory | null> {
@@ -78,26 +136,44 @@ export class KvKeyCache implements KeyCache {
     const ttl = Math.max(60, Math.floor((entry.expires_at - Date.now()) / 1000));
     await this.kv.put(`wba:dir:${url}`, JSON.stringify(entry), { expirationTtl: ttl });
   }
+  async getFailure(origin: string): Promise<number | null> {
+    const v = await this.kv.get(`wba:fail:${origin}`);
+    return v === null ? null : Number(v);
+  }
+  async putFailure(origin: string, untilMs: number): Promise<void> {
+    await this.kv.put(`wba:fail:${origin}`, String(untilMs), { expirationTtl: Math.max(60, Math.ceil((untilMs - Date.now()) / 1000)) });
+  }
 }
 
 // ---------------------------------------------------------------- nonces
 
 export interface NonceStore {
-  /** Record the nonce; false when it was already seen inside the window. */
+  /** Record the nonce; false when it was already seen inside the window. Must be atomic: two claims of one nonce, one true. */
   claim(key: string, expiresAtMs: number, nowMs: number): Promise<boolean>;
+  /** Has this nonce been claimed and not yet expired? A cheap check before any key is fetched; never a substitute for claim. */
+  seen(key: string, nowMs: number): Promise<boolean>;
 }
 
 export class MemoryNonceStore implements NonceStore {
-  readonly seen = new Map<string, number>();
+  readonly entries = new Map<string, number>();
   async claim(key: string, expiresAtMs: number, nowMs: number): Promise<boolean> {
-    for (const [k, exp] of this.seen) if (exp <= nowMs) this.seen.delete(k);
-    if (this.seen.has(key)) return false;
-    this.seen.set(key, expiresAtMs);
+    for (const [k, exp] of this.entries) if (exp <= nowMs) this.entries.delete(k);
+    if (this.entries.has(key)) return false;
+    this.entries.set(key, expiresAtMs);
     return true;
+  }
+  async seen(key: string, nowMs: number): Promise<boolean> {
+    const exp = this.entries.get(key);
+    return exp !== undefined && exp > nowMs;
   }
 }
 
-/** KV skeleton: a nonce key lives until the signature's own expiry. KV is eventually consistent; a Durable Object is the exact version. */
+/**
+ * KV fallback, NOT atomic: KV is eventually consistent and a get then put can
+ * race, so two requests with the same nonce at the same moment can both pass.
+ * Production uses the NonceDO Durable Object (src/readers/nonce-do.ts,
+ * binding NONCES); this store is kept only for a deployment without it.
+ */
 export class KvNonceStore implements NonceStore {
   constructor(private readonly kv: KVNamespace) {}
   async claim(key: string, expiresAtMs: number, nowMs: number): Promise<boolean> {
@@ -105,6 +181,9 @@ export class KvNonceStore implements NonceStore {
     if ((await this.kv.get(k)) !== null) return false;
     await this.kv.put(k, "1", { expirationTtl: Math.max(60, Math.ceil((expiresAtMs - nowMs) / 1000)) });
     return true;
+  }
+  async seen(key: string): Promise<boolean> {
+    return (await this.kv.get(`wba:nonce:${key}`)) !== null;
   }
 }
 

@@ -19,25 +19,30 @@ import * as V from "../verifier/js/verify.mjs";
 const ROOT = join(__dirname, "..");
 const DIR = join(ROOT, "verifier", "test-vectors", "v1");
 const readJson = (name: string) => JSON.parse(readFileSync(join(DIR, name), "utf8"));
-const keys = readJson("keys.json");
+const sharedKeys = readJson("keys.json");
+const keys = sharedKeys;
 const manifest = readJson("manifest.json") as { files: string[] };
 
 interface Vector {
   kind: string;
   now?: string;
   now_epoch?: number;
-  expect: { ok: boolean; reason?: string; state?: string; keyid?: string; agent?: string; version_id?: string };
+  expect: { ok: boolean; reason?: string; state?: string; keyid?: string; agent?: string; version_id?: string; note?: string };
   [k: string]: unknown;
 }
 
 /** One dispatcher per vector kind, shared with the CLI's reading of the files. */
-async function run(v: Vector): Promise<{ ok: boolean; reason?: string | null; state?: string; keyid?: string | null; agent?: string; version_id?: string | null }> {
+async function run(v: Vector): Promise<{ ok: boolean; reason?: string | null; state?: string; keyid?: string | null; agent?: string; version_id?: string | null; notes?: string[] }> {
   const semanto = readJson("semanto.json");
+  // A vector may carry its own keys (a rotated or revoked key) and its own page bytes (a forged page).
+  const keys = (v.keys as typeof sharedKeys | undefined) ?? sharedKeys;
   switch (v.kind) {
     case "semanto-file": {
-      const pages = readJson("pages.json").by_url as Record<string, string>;
+      const pages = (v.pages_by_url as Record<string, string> | undefined) ?? (readJson("pages.json").by_url as Record<string, string>);
       return V.verifySemanto(v.file, pages, keys, { now: v.now });
     }
+    case "tree-head":
+      return V.verifyTreeHead(v.tree_head as never, keys, { now: v.now });
     case "page-proof":
       return V.verifyPageProof(v.proof, v.page_markdown as string, keys, { now: v.now, header: v.header });
     case "response": {
@@ -85,6 +90,7 @@ describe("verifier test vectors (JavaScript)", () => {
       if (v.expect.keyid) expect(r.keyid).toBe(v.expect.keyid);
       if (v.expect.agent) expect(r.agent).toBe(v.expect.agent);
       if (v.expect.version_id) expect(r.version_id).toBe(v.expect.version_id);
+      if (v.expect.note) expect((r.notes ?? []).some((n) => n.includes(v.expect.note!))).toBe(true);
     });
   }
 
@@ -131,9 +137,10 @@ describe("verifier test vectors (JavaScript)", () => {
     wrongLeaf.ledger.leaf.hash = await V.digest("another root");
     const r3 = await V.verifyPageProof(wrongLeaf, v.page_markdown, keys, { now: v.now, header: v.header });
     expect(r3.reason).toBe("log_leaf_mismatch");
+    // Strict: without the version header the proof is not tied to a signed version, and the result says so.
     const noHeader = await V.verifyPageProof(v.proof, v.page_markdown, keys, { now: v.now });
-    expect(noHeader.ok).toBe(true);
-    expect(noHeader.checks.find((c) => c.name === "header")?.detail).toContain("not checked");
+    expect(noHeader.ok).toBe(false);
+    expect(noHeader.reason).toBe("header_absent");
   });
 
   it("a signed response with the body changed fails on Content-Digest, and the wrong tag is refused", async () => {
