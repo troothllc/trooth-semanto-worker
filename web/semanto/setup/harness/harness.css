@@ -1,0 +1,69 @@
+/* SPDX-License-Identifier: LicenseRef-Trooth-Proprietary */
+/* Copyright (c) 2026 Trooth, LLC */
+/* The harness's stand-in for trooth-web's globals.css: the same token names
+   and values (the ladder, light and dark), the three buttons as trooth-web
+   defines them, and Open Sauce One. Ink #202124, Paper #F7F8F8, blue #1A73E8
+   on the one action, the dark canvas #0E1014. Not shipped. */
+
+@font-face { font-family: "Open Sauce One"; src: url("fonts/OpenSauceOne-Regular.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "Open Sauce One"; src: url("fonts/OpenSauceOne-Medium.woff2") format("woff2"); font-weight: 500; font-display: block; }
+@font-face { font-family: "Open Sauce One"; src: url("fonts/OpenSauceOne-SemiBold.woff2") format("woff2"); font-weight: 600; font-display: block; }
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --page: #F7F8F8;
+  --surface-1: #FFFFFF;
+  --surface-2: #F1F2F4;
+  --surface-3: #FFFFFF;
+  --hairline: #E5E5E6;
+  --text-primary: #202124;
+  --text-secondary: #3C4043;
+  --text-muted: #5F6368;
+  --ink-emphasis: #3C4043;
+  --accent-fill: #1A73E8;
+  --accent-fill-hover: #1B69D0;
+  --accent-on-fill: #FFFFFF;
+  --hover-wash: rgba(32, 33, 36, 0.04);
+  --radius-md: 6px;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --page: #0E1014;
+  --surface-1: #0F1011;
+  --surface-2: #141516;
+  --surface-3: #141516;
+  --hairline: #2A2E33;
+  --text-primary: #F7F8F8;
+  --text-secondary: #D0D6E0;
+  --text-muted: #8A8F98;
+  --ink-emphasis: #D0D6E0;
+  --hover-wash: rgba(247, 248, 248, 0.05);
+  color-scheme: dark;
+}
+
+html, body {
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: "Open Sauce One", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer components {
+  .btn-primary, .btn-secondary, .btn-ghost {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    white-space: nowrap; cursor: pointer; user-select: none; text-decoration: none;
+    border-radius: var(--radius-md); line-height: 1.5;
+    transition: transform 0.1s ease-out, background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+  .btn-primary { background-color: var(--accent-fill); color: var(--accent-on-fill); font-size: 14px; font-weight: 500; padding: 8px 16px; border: 1px solid transparent; }
+  .btn-primary:hover:not(:disabled) { background-color: var(--accent-fill-hover); transform: translateY(-1px); }
+  .btn-secondary { background-color: transparent; color: var(--text-secondary); font-size: 14px; font-weight: 500; padding: 6px 12px; border: 1px solid var(--hairline); }
+  .btn-secondary:hover:not(:disabled) { background-color: var(--hover-wash); color: var(--text-primary); }
+  .btn-ghost { background-color: transparent; color: var(--text-muted); font-size: 14px; font-weight: 400; padding: 4px 8px; border: 0; }
+  .btn-ghost:hover:not(:disabled) { background-color: var(--hover-wash); color: var(--text-primary); }
+  .btn-primary:disabled, .btn-secondary:disabled, .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+}

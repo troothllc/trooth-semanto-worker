@@ -43,14 +43,14 @@ Semanto does not make AI believe a company; it makes what the company said impos
 7. **Every statement Trooth or a company signs carries a `typ` from `JWS_TYPES`** and a validity window where one makes sense. A verifier always checks the type.
 8. **Every module is pure where it can be:** handlers turn `{ status, headers, body }` into a Response; logic takes plain values. Tests run in Node with vitest and need no Cloudflare runtime.
 9. **Errors are RFC 9457 problems** (`application/problem+json`) with `code`, `retryable`, `next_action`, `terminal`, and a markdown form for `Accept: text/markdown`.
-10. **Headers:** `Trooth-Contract`, `Trooth-Semanto-Version`, `Trooth-Page-Hash`, `Signature-Input`, `Signature`, `Content-Digest`, `Vary: Accept`, `ETag` kept, `x-markdown-tokens` and `x-original-tokens` under Cloudflare's names, `Content-Signal` passed through from the customer's policy. Those two token headers are the only X- names, kept on purpose for compatibility with Cloudflare's converter; no Trooth header ever has an `X-` prefix (RFC 6648).
+10. **Headers:** `Trooth-Request-Id` on every response (exposed to browsers, not signed), `Trooth-Contract`, `Trooth-Semanto-Version`, `Trooth-Page-Hash`, `Signature-Input`, `Signature`, `Content-Digest`, `Vary: Accept`, `ETag` kept, `x-markdown-tokens` and `x-original-tokens` under Cloudflare's names, `Content-Signal` passed through from the customer's policy. Those two token headers are the only X- names, kept on purpose for compatibility with Cloudflare's converter; no Trooth header ever has an `X-` prefix (RFC 6648).
 11. **Copy and UI:** Open Sauce One; Ink #202124, Paper #F7F8F8, blue #1A73E8 on actions only, the dark site canvas #0E1014. Plain words. No jargon in anything a small business owner reads.
 12. **File header** on every source file: the SPDX line and the copyright line, then a comment saying what the module is for and which leader's practice it follows, where there is one.
 13. **Tests** live in `test/<area>.test.ts`. Every module ships with tests that would fail if its rule were broken.
 
 ## Data model (D1)
 
-See `migrations/0001_semanto.sql` to `migrations/0005_audit_fixes.sql`. Page bodies, parts, feeds and log tiles live in R2 under `semanto/<trooth_id>/v<version>/`. D1 holds metadata only.
+See `migrations/0001_semanto.sql` to `migrations/0006_passkeys.sql`. Page bodies, parts, feeds and log tiles live in R2 under `semanto/<trooth_id>/v<version>/`. D1 holds metadata only.
 
 ## Public routes (served by `src/serve/routes.ts`, wired in `src/index.ts`)
 
@@ -81,7 +81,8 @@ GET  /public/semanto/{trooth_id}/revocations            the company's signed rev
 GET  /public/semanto/revocations                        every company's signed revocation list
 GET  /public/semanto/.well-known/trooth-keys.json | keys/trooth.json    Trooth's witness JWK Set (the verifier CLIs' default)
 POST /public/semanto/catalogs/check                     a nested marketplace catalog, checked layer by layer
-OPTIONS *                                               CORS preflight (the /os routes allow only https://trooth.co)
+OPTIONS *                                               CORS preflight (the /os routes allow https://trooth.co and https://www.trooth.co,
+                                                        plus http://localhost in development, with Vary: Origin)
 
 GET  /os/semanto/setup                                  the setup state (a vendor session with no company yet answers the company step)
 POST /os/semanto/setup/start | claim                    claim the domain (fixed from then on); start also queues a held read
@@ -89,6 +90,9 @@ GET|POST /os/semanto/{trooth_id}/settings               delivery settings (works
 GET  /os/semanto/{trooth_id}/setup | setup/review | keys | writeback | receipts | receipts.csv
 POST /os/semanto/{trooth_id}/build | sign | gap-report | monitor/run | keys/rotate | lei | basic/claim | basic/prove | first-publication | connectors
 POST /os/semanto/{trooth_id}/withdraw | detect | competitor-report | keys/{kid}/revoke
+POST /os/semanto/{trooth_id}/passkeys/options | passkeys | sign/options
+                                                        passkeys (W3C WebAuthn Level 3, 7.1 and 7.2): a hosted key is released for
+                                                        sign only after a fresh assertion for the exact version and root hash
 POST /os/semanto/{trooth_id}/setup/look-again | read-again | choose | confirm | host | install-check | monitoring | save-for-later | resume
                                                         workspace session through worker-f (TROOTH_OS service binding); denied by default with a 401 problem;
                                                         every answer Cache-Control: private, no-store (docs/spec/setup-api.md)

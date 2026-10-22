@@ -25,3 +25,7 @@ Copy `web/semanto/` to `src/components/semanto/` in trooth-web. `format.ts` hold
 - An agent is named only when proven by its signed request; everything else is "unproven reader".
 - None of the three banned words about a company appears.
 - Blue (`btn-primary`) appears once per panel, on the action.
+
+## The setup wizard
+
+`web/semanto/setup/` holds the Semanto setup wizard: the six screens of `docs/audit/workflow-research.md` section 5, a data client for `docs/spec/setup-api.md`, and a browser harness that walks every click. See `web/semanto/setup/README.md` and `docs/reports/setup-wizard.md`. Unlike the panels above, the wizard's container fetches (through the client passed in); its screens take data and callbacks.

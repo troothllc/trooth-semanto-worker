@@ -65,6 +65,7 @@ import { FixtureD1, FixtureR2 } from "./fixtures/integration/fixture-d1-shim";
 import * as JSV from "../verifier/js/verify.mjs";
 import { signPost, generateConnectorKey } from "../adapters/shared/sign-request.mjs";
 import { BANNED_WORDS, ELLIPSIS } from "./helpers/house-rules";
+import { PasskeyWallet, passkeySign } from "./helpers/passkey";
 
 const COMPILER = fileURLToPath(new URL("./fixtures/compiler/", import.meta.url));
 const FIX = fileURLToPath(new URL("./fixtures/integration/", import.meta.url));
@@ -132,6 +133,8 @@ interface World {
   queued: QueueMessage[];
   receiptRows: MemoryReceiptStore;
   agent: { priv: PrivateJwk; pub: PublicJwk };
+  /** One software passkey per workspace token (test/helpers/passkey.ts). */
+  wallet: PasskeyWallet;
 }
 
 async function world(opts: { custody?: "hosted" | "customer"; trooth_id?: string; company?: boolean; queue?: boolean; tsa?: boolean; random?: (n: number) => Uint8Array } = {}): Promise<World> {
@@ -222,12 +225,14 @@ async function world(opts: { custody?: "hosted" | "customer"; trooth_id?: string
     firstPublications: { get: (id) => store.getFirstPublication(id) },
   };
   const app = createApp(routeDeps);
-  return { clock, witness: w.privateJwk, witnessPublic: w.publicJwk, versions, ports, store, site, pipeline, app, deps, queued, receiptRows, agent: { priv: agentKey.privateJwk, pub: agentKey.publicJwk } };
+  return { clock, witness: w.privateJwk, witnessPublic: w.publicJwk, versions, ports, store, site, pipeline, app, deps, queued, receiptRows, agent: { priv: agentKey.privateJwk, pub: agentKey.publicJwk }, wallet: new PasskeyWallet() };
 }
 
 const post = (w: World, path: string, body: unknown, token = "Bearer owner-token") =>
   w.app.request(`${OS}${path}`, { method: "POST", headers: { authorization: token, "content-type": "application/json" }, body: JSON.stringify(body) });
 const json = async (r: Response) => (await r.json()) as Record<string, any>;
+/** Hosted signing, as the wizard does it: sign/options (adding a passkey first), the assertion, then sign. */
+const signHosted = (w: World, trooth_id = "acme", token = "Bearer owner-token", body: Record<string, unknown> = {}) => passkeySign((path, b, t) => post(w, path, b, t), trooth_id, token, w.wallet, body);
 const get = (w: World, path: string, headers: Record<string, string> = {}) => w.app.request(`${API}${path}`, { headers });
 const settle = () => new Promise((r) => setTimeout(r, 10));
 /** Run every queued message, and the messages they queue, as the queue consumer would. */
@@ -238,7 +243,7 @@ async function drain(w: World): Promise<void> {
 async function buildAndSign(w: World, trooth_id = "acme"): Promise<{ file: SemantoFile; signed: Record<string, any> }> {
   const built = await post(w, `/${trooth_id}/build`, {});
   expect(built.status).toBe(200);
-  const signed = await post(w, `/${trooth_id}/sign`, {});
+  const signed = await signHosted(w, trooth_id);
   expect(signed.status).toBe(200);
   const s = await json(signed);
   const file = (await w.versions.getCurrent(trooth_id))!;
@@ -293,7 +298,11 @@ describe("5. end to end: build, sign, witness, log, serve, verify", () => {
     expect(signed.object).toBe("semanto.signed");
     expect(signed.version_id).toMatch(/^smv_[a-z2-7]{26}$/);
     expect(file.signature?.kid).toBe(jwks.keys[0]!.kid);
-    expect(file.header.identity.authorized_by).toEqual([{ role: "owner", name: "Ada Owner" }]);
+    // The signer named in the header, with the passkey assertion that released the hosted key.
+    // Only the random WebAuthn user handle names the person; the worker-f user id never enters the signed header.
+    const handle = (await w.store.passkeyUser("u-ada"))!.handle;
+    expect(file.header.identity.authorized_by).toEqual([{ role: "owner", name: "Ada Owner", passkey: { credential_id: w.wallet.byToken.get("Bearer owner-token")!.id, user_handle: handle, checked_at: NOW.toISOString() } }]);
+    expect(JSON.stringify(file.header)).not.toContain("u-ada");
     const ok = await verifyJws(file.signature!.jws, (kid) => jwks.keys.find((k) => k.kid === kid) ?? null, { expectTyp: JWS_TYPES.semantoVersion, payload: file.header, at: NOW });
     expect(ok.ok).toBe(true);
     const wit = await verifyJws(file.witness!.jws, (kid) => (kid === w.witnessPublic.kid ? w.witnessPublic : null), { expectTyp: JWS_TYPES.witness, payload: { root_hash: file.root_hash, witnessed_at: file.witness!.at }, at: NOW });
@@ -525,7 +534,7 @@ describe("4. the same flow over the D1 and R2 adapters the Worker uses (SQLite a
     expect((await store.getCompany("acme"))?.domain_proven_at).toBe(NOW.toISOString());
     expect((await app.request(`${API}/acme`)).status).toBe(409);
     expect((await osPost("/acme/build", {})).status).toBe(200);
-    const signedRes = await osPost("/acme/sign", {});
+    const signedRes = await passkeySign((path, b, t) => app.request(`${OS}${path}`, { method: "POST", headers: { authorization: t, "content-type": "application/json" }, body: JSON.stringify(b) }), "acme", "Bearer owner-token", new PasskeyWallet());
     expect(signedRes.status).toBe(200);
     const signed = await json(signedRes);
 
@@ -638,18 +647,22 @@ describe("4. signing paths, keys and the workspace actions", () => {
     const w = await world();
     await w.store.putConfig("acme", { ...(await w.store.getConfig("acme")), signing: { officers: "two_officer" } });
     expect((await post(w, "/acme/build", {})).status).toBe(200);
-    const first = await post(w, "/acme/sign", {});
+    const first = await signHosted(w);
     expect(first.status).toBe(202);
     // Review finding 8: the answer says two officers need two distinct accounts, which a one-account workspace cannot give.
     expect(await json(first)).toMatchObject({ object: "semanto.sign_waiting", approvals_missing: 1, two_officer_note: expect.stringContaining("two different people with their own accounts") });
-    const again = await post(w, "/acme/sign", {});
+    const again = await signHosted(w);
     expect((await json(again)).approvals_missing).toBe(1);
-    const second = await post(w, "/acme/sign", {}, "Bearer admin-token");
+    // Without a passkey assertion, a second person's approval does not count.
+    expect((await post(w, "/acme/sign", {}, "Bearer admin-token")).status).toBe(409);
+    const second = await signHosted(w, "acme", "Bearer admin-token");
     expect(second.status).toBe(200);
     const file = (await w.versions.getCurrent("acme"))!;
+    const handles = { "u-ada": (await w.store.passkeyUser("u-ada"))!.handle, "u-bo": (await w.store.passkeyUser("u-bo"))!.handle };
+    const passkeyOf = (token: string, user_id: "u-ada" | "u-bo") => ({ credential_id: w.wallet.byToken.get(token)!.id, user_handle: handles[user_id], checked_at: NOW.toISOString() });
     expect(file.header.identity.authorized_by).toEqual([
-      { role: "owner", name: "Ada Owner" },
-      { role: "admin", name: "Bo Admin" },
+      { role: "owner", name: "Ada Owner", passkey: passkeyOf("Bearer owner-token", "u-ada") },
+      { role: "admin", name: "Bo Admin", passkey: passkeyOf("Bearer admin-token", "u-bo") },
     ]);
     // A member may build and run reports but never sign.
     const member = await post(w, "/acme/sign", {}, "Bearer member-token");
@@ -835,7 +848,7 @@ describe("4. scheduled work", () => {
     const w = await world({ queue: true });
     await post(w, "/acme/build", {});
     await drain(w);
-    await post(w, "/acme/sign", {});
+    expect((await signHosted(w)).status).toBe(200);
     w.site.set("https://acme.com/about", { body: readCompiler("about.html").replace("coyote", "roadrunner"), headers: { "content-type": "text/html" } });
     // The cron fans out one message per 25 companies; the message checks them and queues the rebuild.
     await w.pipeline.hourlyChangeDetection();

@@ -185,7 +185,14 @@ export interface NextAction {
   url: string;
 }
 
-export function nextAction(step: SetupStep, ctx: { osBase: string; trooth_id: string | null; readDone: boolean; confirmed: boolean; installPassed: boolean; provider?: { name: string; domain_connect_url?: string } }): NextAction | null {
+/**
+ * The one action the wizard offers. At the sign step: hosted custody adds a
+ * passkey first when the person has none (POST passkeys/options), then asks
+ * for the passkey request bound to the version (POST sign/options); the key is
+ * released only after that assertion (src/pipeline-passkeys.ts). Customer
+ * custody asks for the signing input (POST sign).
+ */
+export function nextAction(step: SetupStep, ctx: { osBase: string; trooth_id: string | null; readDone: boolean; confirmed: boolean; installPassed: boolean; custody?: "hosted" | "customer"; hasPasskey?: boolean; provider?: { name: string; domain_connect_url?: string } }): NextAction | null {
   const b = ctx.trooth_id ? `${ctx.osBase}/${ctx.trooth_id}` : ctx.osBase;
   switch (step) {
     case "company":
@@ -196,7 +203,9 @@ export function nextAction(step: SetupStep, ctx: { osBase: string; trooth_id: st
     case "read":
       return ctx.readDone ? { label: "Finish setup", method: "POST", url: `${b}/setup/choose` } : { label: "Wait for the read", method: "GET", url: `${b}/setup` };
     case "review":
-      return ctx.confirmed ? { label: "Sign with my passkey", method: "POST", url: `${b}/sign` } : { label: "Confirm these facts", method: "POST", url: `${b}/setup/confirm` };
+      if (!ctx.confirmed) return { label: "Confirm these facts", method: "POST", url: `${b}/setup/confirm` };
+      if (ctx.custody === "customer") return { label: "Sign with our own key", method: "POST", url: `${b}/sign` };
+      return ctx.hasPasskey ? { label: "Sign with my passkey", method: "POST", url: `${b}/sign/options` } : { label: "Add a passkey", method: "POST", url: `${b}/passkeys/options` };
     case "install":
       return ctx.installPassed ? { label: "Start monitoring", method: "POST", url: `${b}/setup/monitoring` } : { label: "Check my site", method: "POST", url: `${b}/setup/install-check` };
     case "done":

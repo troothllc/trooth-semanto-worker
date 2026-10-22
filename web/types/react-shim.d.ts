@@ -19,6 +19,9 @@ declare module "react" {
   export function useState<S>(initial: S | (() => S)): [S, (next: S | ((prev: S) => S)) => void];
   export function useMemo<T>(factory: () => T, deps: readonly unknown[]): T;
   export function useId(): string;
+  export function useEffect(effect: () => void | (() => void), deps?: readonly unknown[]): void;
+  export function useRef<T>(initial: T): { current: T };
+  export function useCallback<T extends (...args: never[]) => unknown>(fn: T, deps: readonly unknown[]): T;
   export namespace JSX {
     interface IntrinsicElements {
       [elemName: string]: Record<string, unknown>;
@@ -26,6 +29,9 @@ declare module "react" {
     interface Element extends ReactElement {}
     interface ElementChildrenAttribute {
       children: {};
+    }
+    interface IntrinsicAttributes {
+      key?: string | number | null;
     }
   }
 }
@@ -42,6 +48,9 @@ declare module "react/jsx-runtime" {
     interface Element extends ReactElement {}
     interface ElementChildrenAttribute {
       children: {};
+    }
+    interface IntrinsicAttributes {
+      key?: string | number | null;
     }
   }
 }
@@ -60,5 +69,13 @@ declare module "lucide-react" {
   export const RefreshCw: FC<IconProps>;
   export const Server: FC<IconProps>;
   export const ShieldCheck: FC<IconProps>;
+  export const ChevronDown: FC<IconProps>;
+  export const ChevronRight: FC<IconProps>;
+  export const Circle: FC<IconProps>;
+  export const Copy: FC<IconProps>;
+  export const Fingerprint: FC<IconProps>;
+  export const HelpCircle: FC<IconProps>;
+  export const Mail: FC<IconProps>;
+  export const Plus: FC<IconProps>;
   export const X: FC<IconProps>;
 }

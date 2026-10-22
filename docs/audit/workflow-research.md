@@ -401,7 +401,7 @@ What happens: on return from the provider, or on "I've added it", the screen goe
 
 States (words from `dns-diagnosis.ts`, which already avoid the past participle of "verify"):
 
-- Empty: "Add the record, then tell Trooth."
+- Empty: "Add the record. Trooth looks for it on its own."
 - Loading: "Looking for your record. Most hosts publish a new record within minutes. You can leave this page: Trooth keeps looking and emails you when it is found."
 - Error: "Almost: your DNS host added your domain to the name twice. Edit the record and change Name to `_trooth`." / "A record is there, but the value does not match. Paste it again with the Copy button." / "Trooth stopped looking after 72 hours. Check the record with your DNS host, then press Look again." / Provider declined: "You cancelled at Cloudflare. Nothing was changed. Try again, or add it yourself."
 - Success: "You proved control of example.com. Keep the record in place: Trooth looks again every day." The row turns to a check mark without a click, and the screen moves on after two seconds.
@@ -457,7 +457,8 @@ Layout, sign (step 6):
 
 - One sentence: "You are signing version 1 of example.com's Semanto record: 198 pages and 64 facts. Signing says these words came from your company. It does not say they are true; anyone can check who signed."
 - Key choice, preselected to the hosted key: "Trooth keeps the key, your passkey releases it" (default) or "Use our own key" (opens the existing key-binding panel).
-- **Sign with my passkey** (primary). The device prompt appears; that is the signature.
+- The first time only, **Add a passkey** (primary): Trooth gives the options, the device creates the passkey, Trooth stores its public key. The words: "Trooth keeps your signing key and uses it only after you confirm with a passkey on this device (fingerprint, face or PIN). You add it once; then you use it each time you sign."
+- **Sign with my passkey** (primary). Trooth issues a one-time passkey request for this exact version; the device prompt appears and answers it; Trooth checks the answer before it releases the key and signs (W3C WebAuthn Level 3, section 7.2). A first-time signer presses three times on this screen (Confirm these facts, Add a passkey, Sign with my passkey): each passkey step needs its own press, because browsers want a fresh tap for each passkey prompt.
 
 What happens: the signature is made; the version is published to the Trooth Network; the `_trooth` pointer record is added (through Domain Connect when available, the same template's second record).
 
@@ -465,7 +466,7 @@ States:
 
 - Empty: not applicable; facts are prefilled.
 - Loading: "Signing version 1"
-- Error: "Your device did not finish the passkey step. Nothing was signed. Try again." / "This version changed while you were reviewing (3 pages were updated). Review the changes, then sign."
+- Error: "Your device did not finish the passkey step. Nothing was signed. Try again." / "Your device did not finish adding the passkey. Nothing was saved. Try again." / "This version changed while you were reviewing (3 pages were updated). Review the changes, then sign."
 - Success: "Signed by Example Inc. on 22 October 2026. Trooth witnessed the signing." Continue to Screen F.
 
 Target: 60 seconds review, 45 seconds sign.

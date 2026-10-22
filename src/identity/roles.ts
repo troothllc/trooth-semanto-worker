@@ -8,7 +8,10 @@
 // admin). The enterprise two-officer rule is the practice of dual control in
 // payments and HSM operations (NIST SP 800-57 Part 2, split knowledge and
 // dual control): a version is signed only when two distinct people have
-// authorized it. The header's identity.authorized_by lists them.
+// authorized it. The header's identity.authorized_by lists them. When the
+// company's key is hosted by Trooth, an approval counts only when the person
+// completed a fresh passkey assertion for that root hash (W3C WebAuthn Level
+// 3, section 7.2; src/identity/webauthn.ts), and the entry names the passkey.
 
 import type { Identity } from "@/core/semanto";
 import type { VleiRecord } from "./lei";
@@ -66,17 +69,35 @@ export function roleFromWorkspace(m: WorkspaceMember): RoleMapping {
 
 // ---------------------------------------------------------------- authorizations
 
+/**
+ * The passkey assertion behind an approval: which credential, whose, and when
+ * Trooth checked it. user_id is the internal workspace user (kept in the
+ * approval record for the two-officer count, never published); user_handle is
+ * the random WebAuthn user handle, the only person reference that goes into
+ * the signed public header.
+ */
+export interface PasskeyApproval {
+  credential_id: string;
+  user_id: string;
+  user_handle: string;
+  checked_at: string;
+}
+
 export interface Authorization {
   record: RoleRecord;
   /** When this person approved this version. */
   at: string;
   /** What they approved: the version's root_hash. */
   root_hash: string;
+  /** Hosted custody: the passkey assertion completed for this root_hash. */
+  passkey?: PasskeyApproval;
 }
 
 export interface SigningPolicy {
   /** "single" for most companies; "two_officer" for enterprise workspaces. */
   officers: "single" | "two_officer";
+  /** Hosted custody: only approvals that carry a passkey assertion count. */
+  require_passkey?: boolean;
 }
 
 export type SigningDecision = { allowed: true; authorized_by: Identity["authorized_by"] } | { allowed: false; reason: string; missing: number };
@@ -84,10 +105,13 @@ export type SigningDecision = { allowed: true; authorized_by: Identity["authoriz
 /**
  * Decide whether a version may be signed. Two-officer: two authorizations by
  * distinct subjects over the same root_hash. One person approving twice, or
- * two people approving different hashes, does not count.
+ * two people approving different hashes, does not count. With
+ * require_passkey, an approval without a passkey assertion for this
+ * root_hash does not count either, and two approvals by the same user
+ * (through two of their passkeys) count once.
  */
 export function mayBeSigned(rootHash: string, authorizations: Authorization[], policy: SigningPolicy): SigningDecision {
-  const forThis = authorizations.filter((a) => a.root_hash === rootHash);
+  const forThis = authorizations.filter((a) => a.root_hash === rootHash && (!policy.require_passkey || (a.passkey !== undefined && `trooth:user:${a.passkey.user_id}` === a.record.subject)));
   const bySubject = new Map<string, Authorization>();
   for (const a of forThis) if (!bySubject.has(a.record.subject)) bySubject.set(a.record.subject, a);
   const distinct = [...bySubject.values()];
@@ -107,7 +131,7 @@ export function mayBeSigned(rootHash: string, authorizations: Authorization[], p
 
 /** The authorized_by entry for the Semanto header identity. */
 export function toHeaderEntry(a: Authorization): NonNullable<Identity["authorized_by"]>[number] {
-  return { role: a.record.role, name: a.record.name, ...(a.record.credential ? { credential: a.record.credential } : {}) };
+  return { role: a.record.role, name: a.record.name, ...(a.record.credential ? { credential: a.record.credential } : {}), ...(a.passkey ? { passkey: { credential_id: a.passkey.credential_id, user_handle: a.passkey.user_handle, checked_at: a.passkey.checked_at } } : {}) };
 }
 
 /** One sentence per authorization, for the dashboard. */

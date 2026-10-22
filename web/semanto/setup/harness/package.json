@@ -1,0 +1,23 @@
+{
+  "name": "semanto-setup-harness",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Browser harness for the Semanto setup wizard: an esbuild bundle, a mock of the setup API (docs/spec/setup-api.md) and a Playwright walk of every click. Not shipped.",
+  "type": "module",
+  "license": "LicenseRef-Trooth-Proprietary",
+  "scripts": {
+    "test": "node run.mjs",
+    "serve": "node run.mjs --serve",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.25.12",
+    "lucide-react": "^1.61.0",
+    "playwright-core": "1.56",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwindcss": "^3.4.17"
+  }
+}

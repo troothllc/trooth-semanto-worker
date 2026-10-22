@@ -4,7 +4,7 @@
 
 # Setup API
 
-This is the contract the dashboard wizard is built against. Every route below is served by this Worker (`src/serve/routes.ts`), every answer is signed like every other Semanto answer (RFC 9421, tag `trooth-semanto`, with `Content-Digest`), and every `/os` answer carries `Cache-Control: private, no-store`. Field names are exact. A field marked optional with `?` is absent, not null, when it does not apply.
+This is the contract the dashboard wizard is built against. Every route below is served by this Worker (`src/serve/routes.ts`), every answer is signed like every other Semanto answer (RFC 9421, tag `trooth-semanto`, with `Content-Digest`), every `/os` answer carries `Cache-Control: private, no-store` and `Vary: Origin` with `Access-Control-Allow-Origin` set to the caller's origin when it is `https://trooth.co` or `https://www.trooth.co` (or `http://localhost` on any port in development), else `https://trooth.co`, and every answer carries `Trooth-Request-Id` (exposed to browsers), the id a person quotes to support. Field names are exact. A field marked optional with `?` is absent, not null, when it does not apply.
 
 Base: `https://api.trooth.co`. `{id}` is the company's Trooth ID (the `trooth_id` a claim answers).
 
@@ -145,10 +145,10 @@ Decided by the server, in this order:
 ### sign
 
 ```json
-{ "custody": "hosted", "passkey_required": true, "two_officer": false, "approvals": [{ "name": "ada@acme.com", "role": "owner", "at": "2026-10-22T12:09:00.000Z" }], "signed_version": null, "signed_at": null }
+{ "custody": "hosted", "passkey_required": true, "has_passkey": true, "two_officer": false, "approvals": [{ "name": "ada@acme.com", "role": "owner", "at": "2026-10-22T12:09:00.000Z", "passkey": true }], "signed_version": null, "signed_at": null }
 ```
 
-`passkey_required` is true for hosted custody: the dashboard runs the passkey step before it calls `POST /os/semanto/{id}/sign`. The Worker does not see the passkey itself. `approvals` are the approvals recorded for the newest built version's root hash (the two-officer rule counts them).
+`passkey_required` is true for hosted custody: Trooth keeps the company key and releases it only after the signer completes a fresh passkey assertion for the exact version and root hash (W3C WebAuthn Level 3, section 7.2; see Passkey routes below and `docs/reports/passkey-signing.md`). `has_passkey` is true when the signed-in person has at least one passkey on file; it is per person, so two people on the same company can see different values. `approvals` are the approvals recorded for the newest built version's root hash; with hosted custody only approvals made with a passkey assertion are listed and counted (the two-officer rule counts distinct people who each completed an assertion for that root hash).
 
 ### install
 
@@ -185,7 +185,7 @@ Decided by the server, in this order:
 
 ### next_action
 
-The one primary action for the current step, `{ label, method, url }`, or null when the step is `done`. Labels: `company` "Continue" (POST `setup/start`); `prove` "Add the record, then wait here" (GET `setup`), or "Add it at <provider>" (GET `domain_connect_url`) when that URL is present; `read` "Finish setup" (POST `setup/choose`) once the read is done, else "Wait for the read" (GET `setup`); `review` "Confirm these facts" (POST `setup/confirm`) until confirmed, then "Sign with my passkey" (POST `sign`); `install` "Check my site" (POST `setup/install-check`) until it passes, then "Start monitoring" (POST `setup/monitoring`).
+The one primary action for the current step, `{ label, method, url }`, or null when the step is `done`. Labels: `company` "Continue" (POST `setup/start`); `prove` "Add the record, then wait here" (GET `setup`), or "Add it at <provider>" (GET `domain_connect_url`) when that URL is present; `read` "Finish setup" (POST `setup/choose`) once the read is done, else "Wait for the read" (GET `setup`); `review` "Confirm these facts" (POST `setup/confirm`) until confirmed; then, with hosted custody, "Add a passkey" (POST `passkeys/options`) while the signed-in person has none and "Sign with my passkey" (POST `sign/options`) once they have one; with customer custody, "Sign with our own key" (POST `sign`); `install` "Check my site" (POST `setup/install-check`) until it passes, then "Start monitoring" (POST `setup/monitoring`).
 
 ## Setup routes
 
@@ -209,6 +209,17 @@ The one primary action for the current step, `{ label, method, url }`, or null w
 The domain is fixed at the claim. Later requests never change it: a start or claim for a different domain by a session whose company already has one is a 409 problem with code `domain_fixed`. A domain already linked to another worker-f company is a 409 problem with code `domain_claimed_elsewhere` and the words "acme.com is already held by another Trooth workspace. Ask to join it, or ask Trooth to review the claim."
 
 The website field accepts a pasted address: the scheme, a leading `www.`, any path, query and port are removed, and the host is lowercased. The Trooth ID is worker-f's `companySlug` when the session carries one and it is free, else the first label of the registrable domain (`acme.com` is `acme`), else the whole host with dots as hyphens (`acme-io`), else that with `-2`, `-3` and so on. The names `setup`, `claim`, `log`, `verify`, `first-publication`, `keys`, `revocations` and `well-known` are never given.
+
+## Passkey routes (hosted signing)
+
+Trooth keeps a hosted company key and releases it only after a passkey assertion. These routes follow W3C Web Authentication Level 3: section 7.1 to add a passkey, section 7.2 for the assertion. Options are answered in the JSON form of `PublicKeyCredentialCreationOptions` and `PublicKeyCredentialRequestOptions`: every buffer is base64url. The relying party id is `trooth.co` (the Worker's `WEBAUTHN_RP_ID` when set); accepted origins are `https://trooth.co` and `https://www.trooth.co`, and `http://localhost` on any port only when `ENVIRONMENT` is `development`. Every challenge is 32 random bytes, kept five minutes, and used once.
+
+| Route | Body | Who | Answer |
+| --- | --- | --- | --- |
+| `POST /os/semanto/{id}/passkeys/options` | `{}` | any workspace user | `{ "object": "semanto.passkey_options", "trooth_id", "expires_at", "has_passkey", "publicKey": { "rp": { "id": "trooth.co", "name": "Trooth" }, "user": { "id": "<base64url of 32 random bytes, kept per user>", "name", "displayName" }, "challenge", "pubKeyCredParams": [ES256 -7, EdDSA -8, RS256 -257], "timeout": 300000, "excludeCredentials", "authenticatorSelection": { "residentKey": "preferred", "requireResidentKey": false, "userVerification": "required" }, "attestation": "none" }, "next" }` |
+| `POST /os/semanto/{id}/passkeys` | `{ "credential": <PublicKeyCredential JSON from navigator.credentials.create> }` | the same user | 201 `{ "object": "semanto.passkey", "trooth_id", "credential_id", "alg", "transports", "backed_up", "created_at" }`. Checked: type `webauthn.create`, the challenge (consumed), an allowed origin, attestation format `none` (or `packed` self attestation; any other format is refused in plain words), the rp id hash, the UP (user present) and UV (user verification) flags, the attested credential data and its algorithm. The public key is stored as a JWK with its sign count and transports. |
+| `POST /os/semanto/{id}/sign/options` | `{ "version"?: n }` | owner or admin, hosted custody | `{ "object": "semanto.sign_options", "trooth_id", "version", "root_hash", "expires_at", "publicKey": { "challenge", "rpId", "allowCredentials", "userVerification": "required", "timeout": 300000 }, "next" }`. The challenge is bound to this person, this version and this root hash. 409 `passkey_missing` when the person has no passkey yet. |
+| `POST /os/semanto/{id}/sign` | hosted: `{ "version": n, "assertion": { "id", "clientDataJSON", "authenticatorData", "signature", "userHandle" } }` | owner or admin | Checked before the key is released: the challenge is the one issued for this version and root hash (consumed), type `webauthn.get`, an allowed origin, the rp id hash, the UP (user present) and UV (user verification) flags, the signature over authenticatorData and the SHA-256 of clientDataJSON with the stored key (ES256, EdDSA or RS256), and a sign count that grows when either count is not zero, written with one conditional update (`WHERE sign_count < new` or both zero): when no row changes, another assertion at that count was used first and the answer is `passkey_counter`. Then the approval is recorded with `{ credential_id, user_id, user_handle, checked_at }` (the internal `user_id` stays in the approval record for the two-officer count), and the version's `identity.authorized_by` entry gets `{ credential_id, user_handle, checked_at }`: the random base64url WebAuthn user handle is the only person reference in the signed public header. Customer custody is unchanged: the company signs the signing input with its own key. |
 
 ### Review document
 
@@ -286,4 +297,10 @@ Facts whose key fits none of the first three sections go under `policies`. A fac
 | `payload_too_large` | 413 | the body is over 5 MB |
 | `rate_limited` | 429 | over the limit; wait `Retry-After` seconds |
 | `internal_error` | 500 | a fault inside Trooth; quote the request id |
+| `passkey_missing` | 409 | "Add a passkey first": hosted signing needs a passkey; the detail names `passkeys/options` |
+| `passkey_challenge_expired` | 409 | the passkey request is older than five minutes or was already used; start the passkey step again |
+| `passkey_origin_mismatch` | 403 | the passkey answer came from a page that is not trooth.co |
+| `passkey_cancelled` | 400 | no assertion was sent (the device step did not finish); nothing was signed |
+| `passkey_invalid` | 422 | the passkey answer does not check out (another site's passkey, no user verification, a bad signature, another version's challenge, someone else's passkey) |
+| `passkey_counter` | 422 | the passkey's sign count did not go up, which can mean it was copied; the key is not released |
 | `witness_key_missing` | 503 | this deployment has no witness key yet; routes that sign or witness answer this, the rest keep working. This answer cannot carry a signature, because the key that signs answers is the missing one. |

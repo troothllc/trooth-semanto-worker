@@ -35,7 +35,7 @@
 
 import type { Env, QueueMessage } from "./env";
 import { WitnessKeyMissingError, type PrivateJwk, type PublicJwk } from "./core/keys";
-import { createApp, runQueue, runScheduled, type RouteDeps } from "./serve/routes";
+import { createApp, runQueue, runScheduled, DASHBOARD_ORIGINS, DEVELOPMENT_DASHBOARD_ORIGIN, type RouteDeps } from "./serve/routes";
 import type { Ports } from "./serve/ports";
 import { LedgerLogPort } from "./serve/ledger-port";
 import { D1BuildStaging, D1CommerceStore, D1Keys, D1MonitorStore, D1PipelineStore, D1Receipts, D1ReceiptStore, D1Settings, D1VersionStore } from "./db/d1";
@@ -44,6 +44,7 @@ import { D1LogStore } from "./ledger/store-d1";
 import { platformFetch } from "./ledger/ports";
 import { WebFetchHttp } from "./compiler/ports";
 import { platformHttp as identityHttp } from "./identity/ports";
+import { webauthnConfig } from "./identity/webauthn";
 import { platformHttp as readersHttp, KvKeyCache, KvNonceStore } from "./readers/ports";
 import { DurableNonceStore, NonceDO, type NonceNamespace } from "./readers/nonce-do";
 import { CountedReceipts, durableDirectoryLimit, durableRateLimit, RateLimitDO, type RateNamespace } from "./readers/rate-limit";
@@ -165,6 +166,8 @@ export function wire(env: Env): Wired {
     inlineBuilds: env.ENVIRONMENT !== "production",
     nonces,
     logError: (request_id, action, error) => console.error(JSON.stringify({ request_id, action, error: error instanceof Error ? error.message : String(error) })),
+    // Passkeys release the hosted key: rp id trooth.co unless set; http://localhost only in development.
+    webauthn: webauthnConfig({ rp_id: env.WEBAUTHN_RP_ID ?? null, development: env.ENVIRONMENT === "development" }),
   });
 
   const ports: Ports = { versions, log, keys, receipts, settings, jobs: pipeline.jobs(), config, now };
@@ -181,6 +184,8 @@ export function wire(env: Env): Wired {
     firstPublications: { get: (id) => store.getFirstPublication(id) },
     revocations: (trooth_id) => store.getRevocationList(trooth_id),
     ...(rate ? { rateLimit: durableRateLimit(rate) } : {}),
+    // The dashboard on trooth.co and www.trooth.co; http://localhost too in development.
+    dashboardOrigins: env.ENVIRONMENT === "development" ? [...DASHBOARD_ORIGINS, DEVELOPMENT_DASHBOARD_ORIGIN] : DASHBOARD_ORIGINS,
   };
   return { env, app: createApp(deps), ports, pipeline };
 }

@@ -116,7 +116,7 @@ export function diagnose(i: LookupInput): Diagnosis {
     return { ...base, state: "propagating", tone: "working", title: "Your record is on its way", detail: `${seenBy.join(" and ")} already sees it. The other resolvers will catch up, usually within minutes.`, keep_looking: true };
   }
   if (!i.lookingSince) {
-    return { ...base, state: "not_started", tone: "idle", title: "Add the record, then tell Trooth", detail: "Trooth looks for it on its own while this page is open, and keeps looking for 72 hours.", keep_looking: false };
+    return { ...base, state: "not_started", tone: "idle", title: "Add the record. Trooth looks for it on its own", detail: "Trooth looks for it on its own while this page is open, and keeps looking for 72 hours.", keep_looking: false };
   }
   if (i.now - Date.parse(i.lookingSince) >= LOOK_WINDOW_MS) {
     return { ...base, state: "timed_out", tone: "stopped", title: "Trooth stopped looking after 72 hours", detail: "No record was found at the name above in that time.", fix: "Check the record with your DNS host, then press Look again.", keep_looking: false };

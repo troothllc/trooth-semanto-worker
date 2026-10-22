@@ -4,7 +4,8 @@
 // The write side of the platform, as the pipeline (src/pipeline.ts) needs it:
 // companies and their settings for signing, monitoring and the gap report,
 // built and signed versions with their page bodies, change-detection state,
-// approvals and pending customer signatures, keys, connector keys,
+// approvals and pending customer signatures, passkeys and their single-use
+// challenges (src/identity/webauthn.ts), keys, connector keys,
 // revocations, Basic state, first publications and stored blobs. The serving
 // layer reads the same data through its own VersionStore and KeyPort. This
 // file holds the interface and the in-memory implementation the tests use; the
@@ -16,6 +17,7 @@ import { versionId } from "./core/semanto";
 import type { PrivateJwk, PublicJwk } from "./core/keys";
 import type { Authorization, SigningPolicy } from "./identity/roles";
 import type { Custody, PreparedSigning } from "./identity/keys";
+import type { PasskeyChallenge, PasskeyUser, StoredPasskey } from "./identity/webauthn";
 import type { AvailableSurfaces } from "./monitor/run";
 import type { MerchantCenterTarget } from "./monitor/writeback";
 import type { QuestionKind } from "./gap/prompts";
@@ -142,6 +144,32 @@ export interface PipelineStore extends BodyPort {
   putPending(p: PendingSigning): Promise<void>;
   clearPending(trooth_id: string, version: number): Promise<void>;
 
+  /** The WebAuthn user handle for a workspace user, or null before their first passkey options. */
+  passkeyUser(user_id: string): Promise<PasskeyUser | null>;
+  /** Store the user handle unless one exists; answers the one stored. */
+  putPasskeyUser(u: PasskeyUser): Promise<PasskeyUser>;
+  /** A person's passkeys, oldest first. */
+  passkeys(user_id: string): Promise<StoredPasskey[]>;
+  /** One passkey by its credential id, whoever owns it. */
+  getPasskey(credential_id: string): Promise<StoredPasskey | null>;
+  /** Insert a new passkey. A credential id already on file is never replaced. */
+  putPasskey(p: StoredPasskey): Promise<void>;
+  /**
+   * After an assertion: the new signature count, the backup state and when it
+   * was used, in one conditional write. The row changes only when the new
+   * count is larger than the stored one, or both are zero (an authenticator
+   * without a counter, W3C WebAuthn Level 3, 6.1.1). False when nothing
+   * changed: another assertion at that count won, a possible copy.
+   */
+  touchPasskey(credential_id: string, sign_count: number, backed_up: boolean, at: string): Promise<boolean>;
+  putPasskeyChallenge(c: PasskeyChallenge): Promise<void>;
+  /**
+   * Remove and answer the challenge when it is this kind, for this company and
+   * this user. Single use: a second take of the same challenge answers null.
+   * Expiry is the caller's check (the row is removed either way).
+   */
+  takePasskeyChallenge(challenge: string, kind: PasskeyChallenge["kind"], trooth_id: string, user_id: string): Promise<PasskeyChallenge | null>;
+
   keys(trooth_id: string): Promise<CompanyKey[]>;
   /** Insert or replace a key by kid. A hosted key's private half is stored sealed; a customer key never has one. The newest key sets the company's custody. */
   putKey(trooth_id: string, key: CompanyKey, privateJwk: PrivateJwk | null): Promise<void>;
@@ -177,6 +205,9 @@ export class MemoryPipelineStore implements PipelineStore {
   readonly change = new Map<string, Record<string, ChangeRow>>();
   readonly auths = new Map<string, Authorization[]>();
   readonly pendings = new Map<string, PendingSigning>();
+  readonly passkeyUsers = new Map<string, PasskeyUser>();
+  readonly passkeyRows = new Map<string, StoredPasskey>();
+  readonly passkeyChallenges = new Map<string, PasskeyChallenge>();
   readonly companyKeys = new Map<string, CompanyKey[]>();
   readonly privateKeys = new Map<string, PrivateJwk>();
   readonly connectors = new Map<string, { jwk: PublicJwk; source: string; created_at: string }[]>();
@@ -354,8 +385,12 @@ export class MemoryPipelineStore implements PipelineStore {
   async authorizations(trooth_id: string, root_hash: string): Promise<Authorization[]> {
     return (this.auths.get(trooth_id) ?? []).filter((a) => a.root_hash === root_hash);
   }
+  /** One approval per person per root hash, as D1 keeps it: a later one with a passkey replaces one without, never the other way. */
   async addAuthorization(trooth_id: string, a: Authorization): Promise<void> {
-    this.auths.set(trooth_id, [...(this.auths.get(trooth_id) ?? []), a]);
+    const list = this.auths.get(trooth_id) ?? [];
+    const i = list.findIndex((x) => x.root_hash === a.root_hash && x.record.subject === a.record.subject);
+    if (i < 0) this.auths.set(trooth_id, [...list, a]);
+    else if (a.passkey) this.auths.set(trooth_id, list.map((x, j) => (j === i ? a : x)));
   }
   async clearAuthorizations(trooth_id: string, root_hash: string): Promise<void> {
     this.auths.set(trooth_id, (this.auths.get(trooth_id) ?? []).filter((a) => a.root_hash !== root_hash));
@@ -368,6 +403,43 @@ export class MemoryPipelineStore implements PipelineStore {
   }
   async clearPending(trooth_id: string, version: number): Promise<void> {
     this.pendings.delete(`${trooth_id}/${version}`);
+  }
+
+  async passkeyUser(user_id: string): Promise<PasskeyUser | null> {
+    return this.passkeyUsers.get(user_id) ?? null;
+  }
+  async putPasskeyUser(u: PasskeyUser): Promise<PasskeyUser> {
+    const have = this.passkeyUsers.get(u.user_id);
+    if (have) return have;
+    this.passkeyUsers.set(u.user_id, u);
+    return u;
+  }
+  async passkeys(user_id: string): Promise<StoredPasskey[]> {
+    return [...this.passkeyRows.values()].filter((p) => p.user_id === user_id).map((p) => ({ ...p }));
+  }
+  async getPasskey(credential_id: string): Promise<StoredPasskey | null> {
+    const p = this.passkeyRows.get(credential_id);
+    return p ? { ...p } : null;
+  }
+  async putPasskey(p: StoredPasskey): Promise<void> {
+    if (this.passkeyRows.has(p.credential_id)) throw new Error("passkey: the credential id is already on file");
+    this.passkeyRows.set(p.credential_id, { ...p });
+  }
+  async touchPasskey(credential_id: string, sign_count: number, backed_up: boolean, at: string): Promise<boolean> {
+    // Check and write with no await between them, the in-memory form of the conditional UPDATE.
+    const p = this.passkeyRows.get(credential_id);
+    if (!p || !(p.sign_count < sign_count || (p.sign_count === 0 && sign_count === 0))) return false;
+    this.passkeyRows.set(credential_id, { ...p, sign_count, backed_up, last_used_at: at });
+    return true;
+  }
+  async putPasskeyChallenge(c: PasskeyChallenge): Promise<void> {
+    this.passkeyChallenges.set(c.challenge, { ...c });
+  }
+  async takePasskeyChallenge(challenge: string, kind: PasskeyChallenge["kind"], trooth_id: string, user_id: string): Promise<PasskeyChallenge | null> {
+    const c = this.passkeyChallenges.get(challenge);
+    if (!c || c.kind !== kind || c.trooth_id !== trooth_id || c.user_id !== user_id) return null;
+    this.passkeyChallenges.delete(challenge);
+    return c;
   }
 
   async keys(trooth_id: string): Promise<CompanyKey[]> {

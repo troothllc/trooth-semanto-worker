@@ -76,7 +76,7 @@ The draft was not deleted or moved.
 
 ### 10. Cacheable authenticated answers
 
-Every `/os` answer carries `Cache-Control: private, no-store`, and `/os` CORS allows only `https://trooth.co`. Test: "finding 10".
+Every `/os` answer carries `Cache-Control: private, no-store`, and `/os` CORS allows `https://trooth.co` and `https://www.trooth.co` (plus `http://localhost` in development), with `Vary: Origin` (updated with docs/reports/passkey-signing.md). Test: "finding 10".
 
 ### 11. Unbounded public body
 

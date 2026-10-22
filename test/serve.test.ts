@@ -322,7 +322,16 @@ describe("the same-content guarantee", () => {
     const a = await get(path, { accept: "text/markdown", "user-agent": "Mozilla/5.0 (fixture browser)" });
     const b = await get(path, { accept: "text/markdown", "user-agent": "ClaudeBot/1.0 (fixture agent)" });
     expect(new Uint8Array(await a.arrayBuffer())).toEqual(new Uint8Array(await b.arrayBuffer()));
-    expect(headerMap(a.headers)).toEqual(headerMap(b.headers));
+    // Every header is the same except Trooth-Request-Id, which names this one request (and is not signed).
+    const sansId = (h: Headers) => {
+      const m = headerMap(h);
+      delete m["trooth-request-id"];
+      return m;
+    };
+    expect(a.headers.get("trooth-request-id")).toMatch(/^[0-9a-f]{16}$/);
+    expect(a.headers.get("trooth-request-id")).not.toBe(b.headers.get("trooth-request-id"));
+    expect(a.headers.get("signature-input") ?? "").not.toContain("trooth-request-id");
+    expect(sansId(a.headers)).toEqual(sansId(b.headers));
     const c = await get(`${path}.jsonld`, { "user-agent": "curl/8" });
     const d = await get(`${path}.jsonld`, { "user-agent": "GPTBot" });
     expect(await c.text()).toBe(await d.text());

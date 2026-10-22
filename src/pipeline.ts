@@ -5,7 +5,9 @@
 //
 //   compile    src/compiler discover, fetch and build (incremental when a
 //              previous version exists); bodies and metadata stored; state read
-//   sign       hosted custody signs with the company key (src/identity/keys.ts);
+//   sign       hosted custody signs with the company key (src/identity/keys.ts)
+//              only after a fresh passkey assertion for the exact version and
+//              root hash (W3C WebAuthn Level 3, 7.2; src/pipeline-passkeys.ts);
 //              customer custody gets the exact signing input and returns the
 //              signature, which is assembled and checked; the two-officer rule
 //              (src/identity/roles.ts) applies when the company asks for it;
@@ -47,7 +49,7 @@ import { registrableDomain } from "./compiler/url";
 import { MemoryBuildStaging, runAssemble, runDiscover, runRender, type AssembledBuild, type BuildJob, type BuildRow, type BuildStagingPort, type StreamDeps } from "./compiler/stream";
 import type { HttpPort as SiteHttpPort, Resolver } from "./compiler/ports";
 import { assembleJws, acceptCustomerPublicKey, bindingStatus, checkAssembledJws, createHostedKey, currentKey, jwksUrl, revokeKey as revokeKeyJwk, rotateHostedKey, versionSigningInput, ROTATION_OVERLAP_MS } from "./identity/keys";
-import { mayBeSigned, roleFromWorkspace } from "./identity/roles";
+import { mayBeSigned, roleFromWorkspace, type PasskeyApproval } from "./identity/roles";
 import { compareLegalName, leiFacts, lookupLei } from "./identity/lei";
 import { dohDns, type HttpPort as IdentityHttpPort } from "./identity/ports";
 import { treeHeadId, type LogStore } from "./ledger/log";
@@ -87,6 +89,8 @@ import type { PipelineStore, StoredVersion } from "./pipeline-store";
 import type { SetupDnsPort } from "./setup/ports";
 import type { DiscoveryDeps } from "./setup/domain-connect";
 import { checkProof, ensureSetup, setupAction, setupAfterBuild, setupReview, setupSession, setupState, stampStep } from "./pipeline-setup";
+import { checkSigningAssertion, passkeyOptions, registerPasskey, signOptions } from "./pipeline-passkeys";
+import { webauthnConfig, type WebAuthnConfig } from "./identity/webauthn";
 export type { WebBotAuthResult };
 
 export const CONNECTOR_TAG = "trooth-connector";
@@ -145,6 +149,8 @@ export interface PipelineDeps {
   nonces?: NonceStore;
   /** Where a failed step's exception goes, with its request id. Never to the client. */
   logError?: (request_id: string, action: string, error: unknown) => void;
+  /** The WebAuthn relying party (src/identity/webauthn.ts webauthnConfig): rp id trooth.co and the trooth.co origins by default. */
+  webauthn?: WebAuthnConfig;
 }
 
 export interface CompileSummary {
@@ -183,6 +189,11 @@ export class Pipeline implements WorkspaceHandlers {
   readonly staging: BuildStagingPort;
   constructor(readonly d: PipelineDeps) {
     this.staging = d.staging ?? new MemoryBuildStaging();
+  }
+
+  /** The relying party passkeys are checked against. */
+  webauthn(): WebAuthnConfig {
+    return this.d.webauthn ?? webauthnConfig();
   }
 
   random(n: number): Uint8Array {
@@ -412,6 +423,12 @@ export class Pipeline implements WorkspaceHandlers {
           return await this.build(trooth_id);
         case "sign":
           return await this.sign(ws, trooth_id, body);
+        case "sign/options":
+          return await signOptions(this, ws, trooth_id, body);
+        case "passkeys/options":
+          return await passkeyOptions(this, ws, trooth_id);
+        case "passkeys":
+          return await registerPasskey(this, ws, trooth_id, body);
         case "gap-report":
           if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
           return await this.gapReport(trooth_id, body);
@@ -452,7 +469,7 @@ export class Pipeline implements WorkspaceHandlers {
     try {
       switch (what) {
         case "setup":
-          return ok(200, await setupState(this, trooth_id, { live: true }));
+          return ok(200, await setupState(this, trooth_id, { live: true, user_id: ws.user_id }));
         case "setup/review":
           return await setupReview(this, trooth_id);
         case "keys":
@@ -526,9 +543,18 @@ export class Pipeline implements WorkspaceHandlers {
     const role = roleFromWorkspace({ user_id: ws.user_id, name: ws.name, role: ws.role, since: iso(now) });
     if (!role.ok) return problem("forbidden", role.reason);
     const builtRoot = v.file.root_hash;
-    await this.d.store.addAuthorization(trooth_id, { record: role.record, at: iso(now), root_hash: builtRoot });
+    // Hosted custody: Trooth holds the key and releases it only after this person's passkey assertion
+    // for exactly this version and root hash (W3C WebAuthn Level 3, 7.2). An approval without one does not count.
+    const hosted = company.custody === "hosted";
+    let passkey: PasskeyApproval | undefined;
+    if (hosted) {
+      const checked = await checkSigningAssertion(this, ws, trooth_id, { version: v.file.header.version, root_hash: builtRoot }, body);
+      if (!checked.ok) return checked.result;
+      passkey = checked.approval;
+    }
+    await this.d.store.addAuthorization(trooth_id, { record: role.record, at: iso(now), root_hash: builtRoot, ...(passkey ? { passkey } : {}) });
     const config = await this.d.store.getConfig(trooth_id);
-    const decision = mayBeSigned(builtRoot, await this.d.store.authorizations(trooth_id, builtRoot), config.signing);
+    const decision = mayBeSigned(builtRoot, await this.d.store.authorizations(trooth_id, builtRoot), { ...config.signing, require_passkey: hosted });
     if (!decision.allowed) {
       // Two officers means two distinct accounts. A worker-f workspace has one account until team seats exist, so until
       // then a company with two_officer set cannot sign; the dashboard shows this sentence.
@@ -538,7 +564,7 @@ export class Pipeline implements WorkspaceHandlers {
 
     const header: SemantoHeader = { ...v.file.header, state: "signed", identity: { ...v.file.header.identity, ...(decision.authorized_by ? { authorized_by: decision.authorized_by } : {}) } };
 
-    if (company.custody === "hosted") {
+    if (hosted) {
       const key = (await this.d.keys.getCompanySigningKey(trooth_id)) ?? (await this.newHostedKey(trooth_id)).privateJwk;
       const prepared = versionSigningInput(header, key.kid, now);
       const sig = await rawSign(await importPrivate(key), utf8(prepared.signing_input));

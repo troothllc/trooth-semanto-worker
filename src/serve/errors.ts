@@ -35,7 +35,13 @@ export type ProblemCode =
   | "domain_not_proven"
   | "representation_not_offered"
   | "internal_error"
-  | "witness_key_missing";
+  | "witness_key_missing"
+  | "passkey_missing"
+  | "passkey_challenge_expired"
+  | "passkey_origin_mismatch"
+  | "passkey_cancelled"
+  | "passkey_invalid"
+  | "passkey_counter";
 
 export interface Problem {
   type: string;
@@ -237,6 +243,54 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
     terminal: false,
     what_happened: "A step failed inside Trooth. Nothing outside Trooth caused it.",
     what_to_do: "Try again in a few minutes. If it keeps failing, quote the request id to Trooth support.",
+  },
+  passkey_missing: {
+    status: 409,
+    title: "Add a passkey first",
+    retryable: false,
+    terminal: false,
+    what_happened: "Trooth keeps your company's signing key and releases it only after you use your passkey. You have no passkey on file yet.",
+    what_to_do: "Add a passkey first: ask for the options at POST /os/semanto/{trooth_id}/passkeys/options, create the passkey on your device, and send it to POST /os/semanto/{trooth_id}/passkeys. Then sign again.",
+  },
+  passkey_challenge_expired: {
+    status: 409,
+    title: "The passkey step took too long",
+    retryable: true,
+    terminal: false,
+    what_happened: "The passkey request has expired or was already used. Each one works once, for five minutes.",
+    what_to_do: "Start the passkey step again. Nothing was signed.",
+  },
+  passkey_origin_mismatch: {
+    status: 403,
+    title: "The passkey step ran on another site",
+    retryable: false,
+    terminal: true,
+    what_happened: "The passkey answer came from a page that is not trooth.co, so Trooth did not use it.",
+    what_to_do: "Open trooth.co directly in your browser and try again. Nothing was signed.",
+  },
+  passkey_cancelled: {
+    status: 400,
+    title: "The passkey step did not finish",
+    retryable: true,
+    terminal: false,
+    what_happened: "No passkey answer was sent, so the signing key was not released. Nothing was signed.",
+    what_to_do: "Press the button again and finish the step on your device (fingerprint, face or PIN).",
+  },
+  passkey_invalid: {
+    status: 422,
+    title: "The passkey answer does not check out",
+    retryable: true,
+    terminal: false,
+    what_happened: "Trooth could not match the passkey answer to your passkey and this request. Nothing was signed.",
+    what_to_do: "Start the passkey step again on this device. If it keeps failing, add the passkey again.",
+  },
+  passkey_counter: {
+    status: 422,
+    title: "This passkey may have been copied",
+    retryable: false,
+    terminal: true,
+    what_happened: "The passkey's counter did not go up, which can mean someone copied it. Trooth did not release the signing key.",
+    what_to_do: "Use another passkey, or remove this one and add a new one. Contact Trooth support if you did not expect this.",
   },
   witness_key_missing: {
     status: 503,

@@ -52,6 +52,7 @@ import { FixtureD1, FixtureR2 } from "./fixtures/integration/fixture-d1-shim";
 import * as JSV from "../verifier/js/verify.mjs";
 import { clientAddress, forwardingHeaders } from "../adapters/shared/semanto-adapter.mjs";
 import { generateConnectorKey } from "../adapters/shared/sign-request.mjs";
+import { PasskeyWallet, addPasskey, passkeySign } from "./helpers/passkey";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const COMPILER = fileURLToPath(new URL("./fixtures/compiler/", import.meta.url));
@@ -182,6 +183,16 @@ async function world(opts: { queue?: boolean; probe?: (url: string, headers: Rec
 const call = (w: World, method: "GET" | "POST", path: string, token: string, body?: unknown) =>
   w.app.request(`${OS}${path}`, { method, headers: { authorization: token, "content-type": "application/json" }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
 const json = async (r: Response) => (await r.json()) as Record<string, any>;
+/** One software passkey per workspace token and world (test/helpers/passkey.ts). */
+const wallets = new WeakMap<World, PasskeyWallet>();
+const walletOf = (w: World) => {
+  let x = wallets.get(w);
+  if (!x) wallets.set(w, (x = new PasskeyWallet()));
+  return x;
+};
+const poster = (w: World) => (path: string, body: unknown, token: string) => call(w, "POST", path, token, body);
+/** Hosted signing as the wizard does it: sign/options (adding a passkey first), the assertion, then sign. */
+const signHosted = (w: World, token = "Bearer ada", trooth_id = "acme") => passkeySign(poster(w), trooth_id, token, walletOf(w));
 const pub = (w: World, path: string, headers: Record<string, string> = {}) => w.app.request(`${API}${path}`, { headers });
 async function drain(w: World, beforeAssemble?: () => void): Promise<number> {
   let n = 0;
@@ -388,9 +399,19 @@ describe("setup: the six-screen backend over docs/spec/setup-api.md", () => {
     expect(wrong.status).toBe(409);
     expect((await json(wrong)).detail).toBe("This version changed while you were reviewing. Review the changes, then confirm.");
     const confirmed = await json(await call(w, "POST", "/acme/setup/confirm", "Bearer ada", { version: doc.version, root_hash: doc.root_hash }));
-    expect(confirmed.next_action).toMatchObject({ label: "Sign with my passkey", url: `${OS}/acme/sign` });
-    expect(confirmed.sign).toMatchObject({ custody: "hosted", passkey_required: true, two_officer: false });
-    expect((await call(w, "POST", "/acme/sign", "Bearer ada", {})).status).toBe(200);
+    // No passkey yet: the one action is to add one. Signing without a passkey assertion is refused.
+    expect(confirmed.next_action).toMatchObject({ label: "Add a passkey", url: `${OS}/acme/passkeys/options` });
+    expect(confirmed.sign).toMatchObject({ custody: "hosted", passkey_required: true, has_passkey: false, two_officer: false });
+    const bare = await call(w, "POST", "/acme/sign", "Bearer ada", {});
+    expect(bare.status).toBe(409);
+    expect(await json(bare)).toMatchObject({ code: "passkey_missing", title: "Add a passkey first", detail: expect.stringContaining(`${OS}/acme/passkeys/options`) });
+    expect((await addPasskey(poster(w), "acme", "Bearer ada", await walletOf(w).for("Bearer ada"))).status).toBe(201);
+    const ready = await json(await call(w, "GET", "/acme/setup", "Bearer ada"));
+    expect(ready.next_action).toMatchObject({ label: "Sign with my passkey", url: `${OS}/acme/sign/options` });
+    expect(ready.sign).toMatchObject({ has_passkey: true });
+    // has_passkey is the signed-in person's own: the member, who has none, is told so.
+    expect((await json(await call(w, "GET", "/acme/setup", "Bearer cy"))).sign).toMatchObject({ has_passkey: false });
+    expect((await signHosted(w)).status).toBe(200);
     const install = await json(await call(w, "GET", "/acme/setup", "Bearer ada"));
     expect(install.step).toBe("install");
     expect(install.install).toMatchObject({ checks: { markdown: "pending", signature: "pending", well_known: "pending" } });
@@ -536,7 +557,7 @@ async function signedWorld(): Promise<World> {
   const w = await world({ companies: [{ trooth_id: "acme", proven: true, os: "co-acme" }] });
   await w.store.registerOwner("acme", "u-ada");
   expect((await call(w, "POST", "/acme/build", "Bearer ada", {})).status).toBe(200);
-  expect((await call(w, "POST", "/acme/sign", "Bearer ada", {})).status).toBe(200);
+  expect((await signHosted(w)).status).toBe(200);
   return w;
 }
 
@@ -577,7 +598,7 @@ describe("finding 6: withdraw and revoke, logged, served, re-signed, and read by
   it("withdraws a version: 410 from then on, a revocation leaf, the served list, and the JS, Python and Go kits all read it as withdrawn", { timeout: 120_000 }, async () => {
     const w = await signedWorld();
     expect((await call(w, "POST", "/acme/build", "Bearer ada", {})).status).toBe(200);
-    expect((await call(w, "POST", "/acme/sign", "Bearer ada", {})).status).toBe(200);
+    expect((await signHosted(w)).status).toBe(200);
     const v2 = (await w.versions.getVersion("acme", 2))!;
     expect((await call(w, "POST", "/acme/withdraw", "Bearer cy", { version: 2, reason: "Wrong prices." })).status).toBe(403);
     expect((await json(await call(w, "POST", "/acme/withdraw", "Bearer ada", { version: 2 }))).code).toBe("invalid_request");

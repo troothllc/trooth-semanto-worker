@@ -50,7 +50,9 @@ export interface Env {
   NONCES?: DurableObjectNamespace;
   /** Durable Object LogDO (src/ledger/log-do.ts): the one writer for the public log, so appends are serialized. */
   LOG?: DurableObjectNamespace;
-  /** "production" or "development"; production refuses to start a build without the compile queue. */
+  /** The WebAuthn relying party id for passkeys (src/identity/webauthn.ts); trooth.co when unset. */
+  WEBAUTHN_RP_ID?: string;
+  /** "production" or "development"; production refuses to start a build without the compile queue. Development also accepts passkeys made on http://localhost. */
   ENVIRONMENT: "development" | "production";
 }
 

@@ -231,6 +231,9 @@ export interface WorkspaceAuth {
 export const WORKSPACE_ACTIONS = [
   "build",
   "sign",
+  "sign/options",
+  "passkeys/options",
+  "passkeys",
   "gap-report",
   "monitor/run",
   "keys/rotate",

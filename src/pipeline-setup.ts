@@ -94,7 +94,7 @@ export interface SetupDoc {
     version: number | null;
   } | null;
   review: { version: number | null; root_hash: string | null; changed_since_read: boolean; changed_urls: string[]; facts_count: number; pages_count: number; saved_for_later: boolean; confirmed_at: string | null } | null;
-  sign: { custody: "hosted" | "customer"; passkey_required: boolean; two_officer: boolean; approvals: { name: string; role: string; at: string }[]; signed_version: number | null; signed_at: string | null } | null;
+  sign: { custody: "hosted" | "customer"; passkey_required: boolean; /** The signed-in person has a passkey on file (hosted signing needs one). */ has_passkey: boolean; two_officer: boolean; approvals: { name: string; role: string; at: string; passkey: boolean }[]; signed_version: number | null; signed_at: string | null } | null;
   install: { host: HostKind; guide_id: string; detected_at: string | null; checks: InstallCheckResult["checks"]; message: string; checked_at: string | null } | null;
   monitoring: { started_at: string | null; questions: string[]; competitors: { name: string; domain: string }[]; suggested_questions: string[] } | null;
   timings: ReturnType<typeof measureSetup>;
@@ -214,7 +214,7 @@ export async function setupSession(p: Pipeline, what: "claim" | "setup/start" | 
     const company = await p.d.store.getCompanyByOsCompany(s.os_company_id);
     if (!company) return ok(200, companyStepDoc(p));
     await ensureSetup(p, company, who);
-    return ok(200, await setupState(p, company.trooth_id, { live: true }));
+    return ok(200, await setupState(p, company.trooth_id, { live: true, user_id: s.user_id }));
   }
   const outcome = await claimCompany(p, s, body, what === "setup/start");
   if (!outcome.ok) return outcome.result;
@@ -227,7 +227,7 @@ export async function setupSession(p: Pipeline, what: "claim" | "setup/start" | 
     const fresh = (await p.d.store.getSetup(company.trooth_id))!;
     await p.d.store.putSetup({ ...fresh, build_id });
   }
-  return ok(created ? 201 : 200, await setupState(p, company.trooth_id, { live: false }));
+  return ok(created ? 201 : 200, await setupState(p, company.trooth_id, { live: false, user_id: s.user_id }));
 }
 
 // ---------------------------------------------------------------- the proof (finding 2)
@@ -338,7 +338,8 @@ async function changedSinceRead(p: Pipeline, trooth_id: string, file: { header: 
   return [...out];
 }
 
-export async function setupState(p: Pipeline, trooth_id: string, opts: { live: boolean }): Promise<SetupDoc> {
+/** opts.user_id: the signed-in person, for has_passkey (their own passkeys). */
+export async function setupState(p: Pipeline, trooth_id: string, opts: { live: boolean; user_id?: string }): Promise<SetupDoc> {
   let company = await p.d.store.getCompany(trooth_id);
   if (!company) return companyStepDoc(p);
   await ensureSetup(p, company, { user_id: "", email: null, signed_in_at: null });
@@ -423,10 +424,14 @@ export async function setupState(p: Pipeline, trooth_id: string, opts: { live: b
     saved_for_later: setup.saved_for_later,
     confirmed_at: setup.confirmed?.at ?? null,
   };
-  const approvals = latest ? (await p.d.store.authorizations(trooth_id, latest.file.root_hash)).map((a) => ({ name: a.record.name, role: a.record.role, at: a.at })) : [];
+  // Hosted custody: only approvals made with a passkey count, so only those are shown.
+  const approvals = latest
+    ? (await p.d.store.authorizations(trooth_id, latest.file.root_hash)).filter((a) => company!.custody !== "hosted" || a.passkey !== undefined).map((a) => ({ name: a.record.name, role: a.record.role, at: a.at, passkey: a.passkey !== undefined }))
+    : [];
+  const has_passkey = opts.user_id ? (await p.d.store.passkeys(opts.user_id)).length > 0 : false;
   const versions = await p.d.versions.listVersions(trooth_id);
   const signedRow = company.current_version !== null ? versions.find((v) => v.version === company!.current_version) : undefined;
-  const sign: SetupDoc["sign"] = { custody: company.custody, passkey_required: company.custody === "hosted", two_officer: config.signing.officers === "two_officer", approvals, signed_version: company.current_version, signed_at: signedRow?.signed_at ?? null };
+  const sign: SetupDoc["sign"] = { custody: company.custody, passkey_required: company.custody === "hosted", has_passkey, two_officer: config.signing.officers === "two_officer", approvals, signed_version: company.current_version, signed_at: signedRow?.signed_at ?? null };
 
   // install: detection on the first poll of the install step, then at most hourly
   const path = setup.path ?? (company.tier === "full" ? "full" : null);
@@ -470,7 +475,7 @@ export async function setupState(p: Pipeline, trooth_id: string, opts: { live: b
     install,
     monitoring,
     timings: measureSetup(setup.started_at, setup.steps),
-    next_action: nextAction(step, { osBase: osBase(p), trooth_id, readDone: readStatus === "done", confirmed: setup.confirmed !== null, installPassed, provider: { name: provider.name, ...(dcUrl ? { domain_connect_url: dcUrl } : {}) } }),
+    next_action: nextAction(step, { osBase: osBase(p), trooth_id, readDone: readStatus === "done", confirmed: setup.confirmed !== null, installPassed, custody: company.custody, hasPasskey: has_passkey, provider: { name: provider.name, ...(dcUrl ? { domain_connect_url: dcUrl } : {}) } }),
     checked_at: iso(now),
   };
 }
@@ -500,12 +505,12 @@ export async function setupAction(p: Pipeline, action: WorkspaceAction, ws: Work
   if (!company) return problem("conflict", "This company has no record yet. Start setup first.");
   const setup = await ensureSetup(p, company, { user_id: ws.user_id, email: ws.name.includes("@") ? ws.name : null, signed_in_at: null });
   const now = iso(p.d.now());
-  const state = async (status = 200) => ok(status, await setupState(p, trooth_id, { live: false }));
+  const state = async (status = 200) => ok(status, await setupState(p, trooth_id, { live: false, user_id: ws.user_id }));
   switch (action) {
     case "setup/look-again": {
       if (!mayOperate(ws)) return problem("forbidden", VIEWER_ONLY);
       await p.d.store.putSetup({ ...setup, looking_since: now, last_check: null });
-      return ok(200, await setupState(p, trooth_id, { live: true }));
+      return ok(200, await setupState(p, trooth_id, { live: true, user_id: ws.user_id }));
     }
     case "setup/read-again": {
       if (!mayOperate(ws)) return problem("forbidden", VIEWER_ONLY);
@@ -519,7 +524,7 @@ export async function setupAction(p: Pipeline, action: WorkspaceAction, ws: Work
       if (!path) return problem("invalid_request", 'Send path as "basic" or "full".');
       if (path === "full" ? !mayAdminister(ws) : !mayOperate(ws)) return problem("forbidden", path === "full" ? "Only an owner or admin can move the company to signing its own record." : VIEWER_ONLY);
       if (!isDomainProven(company)) return problem("domain_not_proven", `Prove you control ${company.domain} first.`);
-      const doc = await setupState(p, trooth_id, { live: false });
+      const doc = await setupState(p, trooth_id, { live: false, user_id: ws.user_id });
       if (doc.read?.status !== "done") return problem("conflict", "Wait for the read to finish, then choose.");
       if (path === "full" && company.tier !== "full") await p.d.store.putCompany({ ...company, tier: "full" });
       const fresh = (await p.d.store.getSetup(trooth_id))!;
@@ -550,7 +555,7 @@ export async function setupAction(p: Pipeline, action: WorkspaceAction, ws: Work
       const fresh = (await p.d.store.getSetup(trooth_id))!;
       const allPass = result.checks.markdown === "pass" && result.checks.signature === "pass" && result.checks.well_known === "pass";
       await p.d.store.putSetup({ ...fresh, install: result, steps: { ...fresh.steps, install: fresh.steps.install ?? now, ...(allPass ? { check: fresh.steps.check ?? now } : {}) } });
-      return ok(200, { object: "semanto.install_check", url: result.url, checks: result.checks, messages: result.messages, message: result.message, checked_at: result.checked_at, setup: await setupState(p, trooth_id, { live: false }) });
+      return ok(200, { object: "semanto.install_check", url: result.url, checks: result.checks, messages: result.messages, message: result.message, checked_at: result.checked_at, setup: await setupState(p, trooth_id, { live: false, user_id: ws.user_id }) });
     }
     case "setup/monitoring": {
       if (!mayAdminister(ws)) return problem("forbidden", "Only an owner or admin can start monitoring.");

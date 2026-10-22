@@ -121,7 +121,7 @@ export interface Identity {
   /** A vLEI Legal Entity credential reference, when the company presents one. */
   vlei?: { said: string; issuer: string; checked_at: string };
   /** Who authorized the signature, from a vLEI role credential or a Trooth role record. */
-  authorized_by?: { role: "OOR" | "ECR" | "owner" | "admin"; name?: string; credential?: string }[];
+  authorized_by?: { role: "OOR" | "ECR" | "owner" | "admin"; name?: string; credential?: string; /** Hosted custody: the passkey assertion that released the key (W3C WebAuthn Level 3, 7.2). */ passkey?: { credential_id: string; /** The random per-person WebAuthn user handle (base64url), never an account id. */ user_handle: string; checked_at: string } }[];
   /** How the signing key is bound to the domain: the published JWKS and the DNS record. */
   key_binding: { jwks_url: string; dns_record: boolean };
 }

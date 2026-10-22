@@ -29,7 +29,7 @@ import { isTroothId, isSemantoId } from "../core/ids";
 import { negotiate } from "../core/negotiate";
 import { estimateTokens } from "../core/tokens";
 import { versionId, type SemantoFile } from "../core/semanto";
-import { buildResponse, toResponse, type LinkTargets, type ResponseSpec, type ServedRepresentation } from "./headers";
+import { buildResponse, toResponse, EXPOSED_HEADERS, type LinkTargets, type ResponseSpec, type ServedRepresentation } from "./headers";
 import { basicNotice, behindNotice, problem, renderProblem, type Problem, type ProblemCode } from "./errors";
 import { WITNESSED_NOT_SIGNED } from "../basic/tier";
 import { withTrustState, type TrustState } from "../compiler/llms";
@@ -47,10 +47,35 @@ import type { CommerceStore } from "../commerce/ports";
 import { feedResponse, offerResponse, offersResponse, problemMarkdown, productResponse, productsResponse, ucpManifestResponse, type PlainResponse as CommerceResponse } from "../commerce/routes";
 import { resolve as resolveDelivery, validateSettings, withDefaults, DEFAULT_SETTINGS, type DeliverySettings } from "../settings/delivery";
 
-type Vars = { Variables: { receipt?: ReceiptInput } };
+type Vars = { Variables: { receipt?: ReceiptInput; requestId?: string } };
+
+/** The header every response carries: a short id a person can quote to support (the same id is in the logs). */
+export const REQUEST_ID_HEADER = "Trooth-Request-Id";
+
+/** 16 lowercase hex characters, the shape src/pipeline.ts requestId gives. */
+export function newRequestId(): string {
+  return [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 /** The only origin a browser may call the /os routes from: the dashboard. Public routes stay open to every origin. */
 export const DASHBOARD_ORIGIN = "https://trooth.co";
+/** The origins a browser may call the /os routes from: the dashboard on trooth.co and www.trooth.co. */
+export const DASHBOARD_ORIGINS = ["https://trooth.co", "https://www.trooth.co"] as const;
+/** Added in development only: http://localhost on any port. */
+export const DEVELOPMENT_DASHBOARD_ORIGIN = "http://localhost";
+
+/**
+ * The Access-Control-Allow-Origin value for an /os answer (Fetch standard, CORS
+ * protocol): the request's Origin when it is one of the allowed origins, else
+ * the dashboard's own origin, which a browser on any other origin will refuse.
+ * Every /os answer carries Vary: Origin so a cache never mixes them.
+ */
+export function dashboardOriginFor(origin: string | null | undefined, allowed: readonly string[] = DASHBOARD_ORIGINS): string {
+  if (!origin) return DASHBOARD_ORIGIN;
+  if (allowed.includes(origin)) return origin;
+  if (allowed.includes(DEVELOPMENT_DASHBOARD_ORIGIN) && /^http:\/\/localhost(:\d{1,5})?$/.test(origin)) return origin;
+  return DASHBOARD_ORIGIN;
+}
 
 /** readJson's answer for a body over the cap. */
 const TOO_LARGE = Symbol("too_large");
@@ -99,6 +124,8 @@ export interface RouteDeps {
   firstPublications?: { get(record_id: string): Promise<FirstPublicationRecord | null> };
   /** The newest signed revocation list for a company, or for everyone with null. */
   revocations?: (trooth_id: string | null) => Promise<{ jws: string; issued_at: string } | null>;
+  /** Origins allowed to call /os from a browser; DASHBOARD_ORIGINS by default (src/index.ts adds http://localhost in development). */
+  dashboardOrigins?: readonly string[];
 }
 
 /** The request pieces the handlers read. Never the user agent. */
@@ -145,6 +172,15 @@ export function createApp(deps: RouteDeps): ServeApp {
     };
   }
 
+  function requestIdOf(c: Context<Vars>): string {
+    let id = c.get("requestId");
+    if (!id) {
+      id = newRequestId();
+      c.set("requestId", id);
+    }
+    return id;
+  }
+
   function recordReceipt(c: Context<Vars>, input: Omit<ReceiptInput, "agent_key_url" | "proof" | "read_at">): void {
     const hints = requestHints(c);
     const work = (async () => {
@@ -172,7 +208,9 @@ export function createApp(deps: RouteDeps): ServeApp {
   async function send(c: Context<Vars>, spec: Omit<ResponseSpec, "now">): Promise<Response> {
     // A workspace answer is for one session: never stored by a shared cache.
     const workspace = new URL(c.req.url).pathname.startsWith(`${osPrefix}/`);
-    const extra = workspace ? { ...(spec.extra ?? {}), "Cache-Control": "private, no-store", "Access-Control-Allow-Origin": DASHBOARD_ORIGIN, Vary: "Accept, Origin" } : spec.extra;
+    // Every response names its request id; a handler that logged an exception under its own id keeps that one.
+    const withId = { [REQUEST_ID_HEADER]: requestIdOf(c), ...(spec.extra ?? {}) };
+    const extra = workspace ? { ...withId, "Cache-Control": "private, no-store", "Access-Control-Allow-Origin": dashboardOriginFor(c.req.header("origin"), deps.dashboardOrigins), Vary: "Accept, Origin" } : withId;
     const p = await buildResponse({ ...spec, ...(extra ? { extra } : {}), now: ports.now() }, { ifNoneMatch: workspace ? null : requestHints(c).ifNoneMatch });
     return toResponse(p);
   }
@@ -250,13 +288,27 @@ export function createApp(deps: RouteDeps): ServeApp {
     // No witness key: nothing can be signed, so this one answer goes out unsigned, and says why.
     if (err instanceof WitnessKeyMissingError) {
       const p = problem("witness_key_missing", { instance: new URL(c.req.url).pathname });
-      return new Response(problemJson(p), { status: p.status, headers: { "Content-Type": "application/problem+json", "Cache-Control": "no-store", "Retry-After": "300", "Access-Control-Allow-Origin": "*" } });
+      return new Response(problemJson(p), { status: p.status, headers: { "Content-Type": "application/problem+json", "Cache-Control": "no-store", "Retry-After": "300", "Access-Control-Allow-Origin": "*", "Access-Control-Expose-Headers": EXPOSED_HEADERS.join(", "), [REQUEST_ID_HEADER]: requestIdOf(c) } });
     }
     try {
       return await sendProblem(c, null, null, "internal_error");
     } catch {
       const p = problem("internal_error", { instance: new URL(c.req.url).pathname });
-      return new Response(problemJson(p), { status: p.status, headers: { "Content-Type": "application/problem+json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" } });
+      return new Response(problemJson(p), { status: p.status, headers: { "Content-Type": "application/problem+json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*", "Access-Control-Expose-Headers": EXPOSED_HEADERS.join(", "), [REQUEST_ID_HEADER]: requestIdOf(c) } });
+    }
+  });
+
+  // Every response carries Trooth-Request-Id, whatever answered it.
+  app.use("*", async (c, next) => {
+    const id = requestIdOf(c);
+    await next();
+    if (c.res.headers.has(REQUEST_ID_HEADER)) return;
+    try {
+      c.res.headers.set(REQUEST_ID_HEADER, id);
+    } catch {
+      const headers = new Headers(c.res.headers);
+      headers.set(REQUEST_ID_HEADER, id);
+      c.res = new Response(c.res.body, { status: c.res.status, statusText: c.res.statusText, headers });
     }
   });
 
@@ -276,10 +328,12 @@ export function createApp(deps: RouteDeps): ServeApp {
       return new Response(null, {
         status: 204,
         headers: {
-          "Access-Control-Allow-Origin": path.startsWith(`${osPrefix}/`) ? DASHBOARD_ORIGIN : "*",
+          "Access-Control-Allow-Origin": path.startsWith(`${osPrefix}/`) ? dashboardOriginFor(c.req.header("origin"), deps.dashboardOrigins) : "*",
+          ...(path.startsWith(`${osPrefix}/`) ? { Vary: "Origin" } : {}),
           "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
           "Access-Control-Allow-Headers": "Accept, Authorization, Content-Type, Content-Digest, If-None-Match, Signature, Signature-Input, Signature-Agent, Trooth-Contract",
           "Access-Control-Max-Age": "86400",
+          [REQUEST_ID_HEADER]: requestIdOf(c),
         },
       });
     }

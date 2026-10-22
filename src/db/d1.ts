@@ -27,6 +27,7 @@ import { fromBase64Url } from "../core/encoding";
 import type { SemantoHeader } from "../core/semanto";
 import { DEFAULT_CONFIG, type ChangeRow, type CompanyConfig, type CompanyKey, type PendingSigning, type PipelineStore, type StoredVersion, type VersionFiles } from "../pipeline-store";
 import type { Authorization } from "../identity/roles";
+import type { PasskeyChallenge, PasskeyJwk, PasskeyUser, StoredPasskey } from "../identity/webauthn";
 import type { PreparedSigning } from "../identity/keys";
 import type { RevocationEntry } from "../ledger/revocation";
 import type { GapReport } from "../gap/report";
@@ -534,6 +535,36 @@ function kidOf(jws: string): string {
   }
 }
 
+interface PasskeyRow {
+  credential_id: string;
+  user_id: string;
+  trooth_id: string;
+  public_jwk: string;
+  alg: number;
+  sign_count: number;
+  transports: string;
+  backup_eligible: number;
+  backed_up: number;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+function passkeyFromRow(r: PasskeyRow): StoredPasskey {
+  return {
+    credential_id: r.credential_id,
+    user_id: r.user_id,
+    trooth_id: r.trooth_id,
+    public_jwk: JSON.parse(r.public_jwk) as PasskeyJwk,
+    alg: r.alg as StoredPasskey["alg"],
+    sign_count: r.sign_count,
+    transports: JSON.parse(r.transports) as string[],
+    backup_eligible: r.backup_eligible === 1,
+    backed_up: r.backed_up === 1,
+    created_at: r.created_at,
+    last_used_at: r.last_used_at,
+  };
+}
+
 export class D1PipelineStore implements PipelineStore {
   constructor(
     private db: D1Database,
@@ -707,19 +738,80 @@ export class D1PipelineStore implements PipelineStore {
   }
 
   async authorizations(trooth_id: string, root_hash: string): Promise<Authorization[]> {
-    const { results } = await this.db.prepare(`SELECT record_json, at, root_hash FROM semanto_authorizations WHERE trooth_id = ?1 AND root_hash = ?2 ORDER BY at`).bind(trooth_id, root_hash).all<{ record_json: string; at: string; root_hash: string }>();
-    return results.map((r) => ({ record: JSON.parse(r.record_json) as Authorization["record"], at: r.at, root_hash: r.root_hash }));
+    const { results } = await this.db.prepare(`SELECT record_json, at, root_hash, passkey_json FROM semanto_authorizations WHERE trooth_id = ?1 AND root_hash = ?2 ORDER BY at`).bind(trooth_id, root_hash).all<{ record_json: string; at: string; root_hash: string; passkey_json: string | null }>();
+    return results.map((r) => ({ record: JSON.parse(r.record_json) as Authorization["record"], at: r.at, root_hash: r.root_hash, ...(r.passkey_json ? { passkey: JSON.parse(r.passkey_json) as NonNullable<Authorization["passkey"]> } : {}) }));
   }
 
   async addAuthorization(trooth_id: string, a: Authorization): Promise<void> {
+    // A later approval with a passkey assertion replaces an earlier one without; one without never replaces one with.
     await this.db
-      .prepare(`INSERT OR IGNORE INTO semanto_authorizations (trooth_id, root_hash, subject, record_json, at) VALUES (?1, ?2, ?3, ?4, ?5)`)
-      .bind(trooth_id, a.root_hash, a.record.subject, JSON.stringify(a.record), a.at)
+      .prepare(
+        `INSERT INTO semanto_authorizations (trooth_id, root_hash, subject, record_json, at, passkey_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(trooth_id, root_hash, subject) DO UPDATE SET record_json = excluded.record_json, at = excluded.at, passkey_json = excluded.passkey_json WHERE excluded.passkey_json IS NOT NULL`,
+      )
+      .bind(trooth_id, a.root_hash, a.record.subject, JSON.stringify(a.record), a.at, a.passkey ? JSON.stringify(a.passkey) : null)
       .run();
   }
 
   async clearAuthorizations(trooth_id: string, root_hash: string): Promise<void> {
     await this.db.prepare(`DELETE FROM semanto_authorizations WHERE trooth_id = ?1 AND root_hash = ?2`).bind(trooth_id, root_hash).run();
+  }
+
+  async passkeyUser(user_id: string): Promise<PasskeyUser | null> {
+    return await this.db.prepare(`SELECT user_id, handle, created_at FROM semanto_passkey_users WHERE user_id = ?1`).bind(user_id).first<PasskeyUser>();
+  }
+
+  async putPasskeyUser(u: PasskeyUser): Promise<PasskeyUser> {
+    await this.db.prepare(`INSERT OR IGNORE INTO semanto_passkey_users (user_id, handle, created_at) VALUES (?1, ?2, ?3)`).bind(u.user_id, u.handle, u.created_at).run();
+    return (await this.passkeyUser(u.user_id)) ?? u;
+  }
+
+  async passkeys(user_id: string): Promise<StoredPasskey[]> {
+    const { results } = await this.db.prepare(`SELECT * FROM semanto_passkeys WHERE user_id = ?1 ORDER BY created_at, credential_id`).bind(user_id).all<PasskeyRow>();
+    return results.map(passkeyFromRow);
+  }
+
+  async getPasskey(credential_id: string): Promise<StoredPasskey | null> {
+    const r = await this.db.prepare(`SELECT * FROM semanto_passkeys WHERE credential_id = ?1`).bind(credential_id).first<PasskeyRow>();
+    return r ? passkeyFromRow(r) : null;
+  }
+
+  async putPasskey(p: StoredPasskey): Promise<void> {
+    // No OR IGNORE and no upsert: a credential id already on file is a constraint error, never a replacement.
+    await this.db
+      .prepare(
+        `INSERT INTO semanto_passkeys (credential_id, user_id, trooth_id, public_jwk, alg, sign_count, transports, backup_eligible, backed_up, created_at, last_used_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
+      )
+      .bind(p.credential_id, p.user_id, p.trooth_id, JSON.stringify(p.public_jwk), p.alg, p.sign_count, JSON.stringify(p.transports), p.backup_eligible ? 1 : 0, p.backed_up ? 1 : 0, p.created_at, p.last_used_at)
+      .run();
+  }
+
+  async touchPasskey(credential_id: string, sign_count: number, backed_up: boolean, at: string): Promise<boolean> {
+    // One conditional statement: the count only moves forward (or stays at zero for a counter-less authenticator).
+    // RETURNING tells whether a row changed; no row means another assertion at this count was used first.
+    const r = await this.db
+      .prepare(`UPDATE semanto_passkeys SET sign_count = ?2, backed_up = ?3, last_used_at = ?4 WHERE credential_id = ?1 AND (sign_count < ?2 OR (sign_count = 0 AND ?2 = 0)) RETURNING credential_id`)
+      .bind(credential_id, sign_count, backed_up ? 1 : 0, at)
+      .first<{ credential_id: string }>();
+    return r !== null;
+  }
+
+  async putPasskeyChallenge(c: PasskeyChallenge): Promise<void> {
+    // Expired challenges are swept on the way in, so the table stays small.
+    await this.db.batch([
+      this.db.prepare(`DELETE FROM semanto_webauthn_challenges WHERE expires_at < ?1`).bind(c.created_at),
+      this.db
+        .prepare(`INSERT INTO semanto_webauthn_challenges (challenge, kind, trooth_id, user_id, version, root_hash, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`)
+        .bind(c.challenge, c.kind, c.trooth_id, c.user_id, c.version, c.root_hash, c.created_at, c.expires_at),
+    ]);
+  }
+
+  async takePasskeyChallenge(challenge: string, kind: PasskeyChallenge["kind"], trooth_id: string, user_id: string): Promise<PasskeyChallenge | null> {
+    // One statement: the row is removed and answered at once, so two requests cannot both use it.
+    return await this.db
+      .prepare(`DELETE FROM semanto_webauthn_challenges WHERE challenge = ?1 AND kind = ?2 AND trooth_id = ?3 AND user_id = ?4 RETURNING challenge, kind, trooth_id, user_id, version, root_hash, created_at, expires_at`)
+      .bind(challenge, kind, trooth_id, user_id)
+      .first<PasskeyChallenge>();
   }
 
   async pending(trooth_id: string, version: number): Promise<PendingSigning | null> {

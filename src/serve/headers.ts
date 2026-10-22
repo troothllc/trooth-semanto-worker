@@ -80,6 +80,7 @@ export const EXPOSED_HEADERS = [
   "Signature-Input",
   "Trooth-Contract",
   "Trooth-Page-Hash",
+  "Trooth-Request-Id",
   "Trooth-Semanto-State",
   "Trooth-Semanto-Version",
   "Trooth-Signed-By",
