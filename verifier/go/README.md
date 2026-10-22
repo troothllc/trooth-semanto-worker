@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright (c) 2026 Trooth, LLC -->
+
 # trooth-semanto-verify (Go)
 
 Check a Semanto by Trooth file, a page proof, a signed response or the public log, offline, with the Go standard library only (`crypto/ed25519`, `crypto/sha256`, `encoding/json`, `encoding/base64`). Go 1.22 or newer.

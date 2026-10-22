@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Trooth, LLC
 #
 # trooth_semanto_verify: check a Semanto file, a page proof, a signed response

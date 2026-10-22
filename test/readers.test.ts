@@ -127,7 +127,9 @@ describe("Web Bot Auth (draft-ietf-webbotauth-httpsig-protocol-00)", () => {
     expect(directoryDisplayName(null, "none")).toBe("unproven reader");
     expect(directoryDisplayName(`${AGENT}/`, "none")).toBe("unproven reader");
     expect(directoryDisplayName(`${AGENT}/`, "web_bot_auth")).toBe("agent.fixtureagent.com");
-    expect(directoryDisplayName("https://chatgpt.com/", "web_bot_auth")).toBe("ChatGPT agent (OpenAI)");
+    // Audit finding 16: no operator name is shown before its documentation is checked; the host name stands.
+    expect(directoryDisplayName("https://chatgpt.com/", "web_bot_auth")).toBe("chatgpt.com");
+    expect(directoryDisplayName("https://agent.fixtureagent.com/", "web_bot_auth", { "https://agent.fixtureagent.com": "Fixture Agent" })).toBe("Fixture Agent");
   });
 
   it("refuses a key that is not in the directory, a bad signature, and a directory with a bad self-signature", async () => {
@@ -224,9 +226,9 @@ describe("read receipts", () => {
     const rows = await sample();
     const csv = receiptsCsv(rows);
     const lines = csv.split("\r\n").filter(Boolean);
-    expect(lines[0]).toBe("id,trooth_id,version,page_id,representation,agent_key_url,keyid,proof,read_at,ip_hash");
+    expect(lines[0]).toBe("id,trooth_id,version,page_id,representation,agent_key_url,keyid,proof,read_at,ip_hash,count");
     expect(lines.length).toBe(1 + rows.length);
-    expect(lines[1]).toMatch(/^smd_[a-z2-7]{26},acme,3,smp_aaaaaaaaaaaaaaaaaaaaaaaaaa,markdown,https:\/\/agent\.example\/,k1,web_bot_auth,2026-10-22T10:00:00\.000Z,[0-9a-f]{64}$/);
+    expect(lines[1]).toMatch(/^smd_[a-z2-7]{26},acme,3,smp_aaaaaaaaaaaaaaaaaaaaaaaaaa,markdown,https:\/\/agent\.example\/,k1,web_bot_auth,2026-10-22T10:00:00\.000Z,[0-9a-f]{64},1$/);
     expect(csv).not.toMatch(/203\.0\.113|198\.51\.100/);
     expect(receiptsCsv([{ ...rows[0]!, keyid: '=cmd|"x"' }])).toContain("\"'=cmd|\"\"x\"\"\"");
   });

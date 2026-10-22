@@ -14,7 +14,7 @@
 // its TransparencyLog from its environment (D1 and R2 through D1LogStore,
 // the witness key from TROOTH_WITNESS_KEY); tests hand it a log directly.
 
-import type { PrivateJwk } from "@/core/keys";
+import { WitnessKeyMissingError, type PrivateJwk } from "@/core/keys";
 import { TransparencyLog, type AppendResult } from "./log";
 import type { LogLeaf, StoredTreeHead } from "./ports";
 import { D1LogStore } from "./store-d1";
@@ -22,7 +22,7 @@ import { D1LogStore } from "./store-d1";
 interface LogDoEnv {
   DB: D1Database;
   STORE: R2Bucket;
-  TROOTH_WITNESS_KEY: string;
+  TROOTH_WITNESS_KEY?: string;
 }
 
 export class LogDO {
@@ -32,8 +32,13 @@ export class LogDO {
   constructor(_state: unknown, env: LogDoEnv | null, log?: TransparencyLog) {
     if (log) this.log = log;
     else {
-      if (!env || !env.TROOTH_WITNESS_KEY) throw new Error("LogDO: TROOTH_WITNESS_KEY is not set");
-      this.log = new TransparencyLog(new D1LogStore(env.DB, env.STORE), JSON.parse(env.TROOTH_WITNESS_KEY) as PrivateJwk);
+      if (!env) throw new Error("LogDO: no environment");
+      // The key is read when a write needs it, so a deployment without it starts and answers a 503 problem instead of failing here.
+      const key = env.TROOTH_WITNESS_KEY;
+      this.log = new TransparencyLog(new D1LogStore(env.DB, env.STORE), () => {
+        if (!key) throw new WitnessKeyMissingError();
+        return JSON.parse(key) as PrivateJwk;
+      });
     }
   }
 

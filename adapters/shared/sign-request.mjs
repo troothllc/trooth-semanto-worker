@@ -29,7 +29,7 @@ const enc = new TextEncoder();
 
 export const CONNECTOR_TAG = "trooth-connector";
 export const CONNECTOR_COMPONENTS = ["@method", "@target-uri", "content-digest", "content-type"];
-export const FORWARDING_COMPONENTS = ["@method", "@target-uri", "trooth-forwarded-authority", "trooth-forwarded-for", "signature", "signature-input", "signature-agent"];
+export const FORWARDING_COMPONENTS = ["@method", "@target-uri", "trooth-forwarded-authority", "trooth-forwarded-for", "trooth-forwarded-path", "signature", "signature-input", "signature-agent"];
 
 /** A fresh nonce: 16 random bytes, base64url. */
 export function randomNonce() {
@@ -105,7 +105,8 @@ const canonField = (v) => String(v).replace(/[\r\n]+[ \t]+/g, " ").trim();
 
 /**
  * Sign a forwarding request from a host adapter to the API. `headers` must
- * already hold Trooth-Forwarded-Authority, Trooth-Forwarded-For and the
+ * already hold Trooth-Forwarded-Authority, Trooth-Forwarded-For,
+ * Trooth-Forwarded-Path (the path and query the reader asked for) and the
  * reader's Signature, Signature-Input and Signature-Agent. Returns the two
  * Trooth-Connector-Signature fields to add.
  */

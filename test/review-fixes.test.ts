@@ -367,7 +367,8 @@ describe("finding 7: a reader is proven through an adapter only when the adapter
     const readers = webBotAuthReaders({ http, cache: new MemoryKeyCache(), nonces: new MemoryNonceStore(), now: () => nowS }, async (id) => (id === "acme-inc" ? { domain: "acme.com", connectorKeys: [connector.publicJwk as unknown as PublicJwk] } : null));
     const app = createApp({ ports: estate.ports, readers });
     const apiFetch = ((input: RequestInfo | URL, init?: RequestInit) => app.request(String(input), init)) as typeof fetch;
-    const config = { troothId: "acme-inc", apiBase: "https://api.trooth.co", mode: "semanto_only", connectorKey: connector.privateJwk, now: () => nowS };
+    // The host entry passes the platform's own client address (adapters/cloudflare-worker reads Cloudflare's CF-Connecting-IP); the shared code never reads a request header for it.
+    const config = { troothId: "acme-inc", apiBase: "https://api.trooth.co", mode: "semanto_only", connectorKey: connector.privateJwk, now: () => nowS, clientAddress: "203.0.113.9" };
 
     const headers: Record<string, string> = { accept: "text/markdown", "signature-agent": `"${AGENT}"`, "cf-connecting-ip": "203.0.113.9" };
     const signed = await signMessage({ kind: "request", method: "GET", url: "https://acme.com/pricing", headers }, agent.privateJwk, { components: ["@authority", "signature-agent"], created: nowS - 5, ttlSeconds: 60, nonce: "through-adapter", tag: "web-bot-auth" });
@@ -638,7 +639,8 @@ describe("finding 19: malformed inputs, the kits' type registry, and errors", ()
     } as unknown as PipelineDeps);
     const owner: WorkspaceAuth = { trooth_id: "acme", role: "owner", user_id: "u", name: "O" };
     const r = await p.handle("build", owner, "acme", {});
-    expect(r.problem?.code).toBe("upstream_unavailable");
+    // Audit finding 26: a fault inside Trooth is internal_error, never "an outside source failed".
+    expect(r.problem?.code).toBe("internal_error");
     expect(r.problem?.detail).not.toContain("D1_ERROR");
     expect(r.problem?.detail).toContain("0707070707070707");
     expect(logged[0]!.id).toBe("0707070707070707");

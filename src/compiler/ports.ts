@@ -119,12 +119,19 @@ export function fakeSleeper(clock: FixedClock): { sleep: Sleeper; waits: number[
 
 // ----------------------------------------------------------- Web fetch adapter
 
-/** The adapter for Workers and browsers: `fetch` with manual redirects and a capped read. */
+/** How long one page fetch may take, headers and body together (pre-deploy audit finding 18). */
+export const PAGE_FETCH_TIMEOUT_MS = 15_000;
+
+/** The adapter for Workers and browsers: `fetch` with manual redirects, a capped read and a 15-second timeout (AbortSignal.timeout). */
 export class WebFetchHttp implements HttpPort {
-  constructor(private readonly fetchFn: typeof fetch = globalThis.fetch.bind(globalThis)) {}
+  constructor(
+    private readonly fetchFn: typeof fetch = globalThis.fetch.bind(globalThis),
+    private readonly timeoutMs: number = PAGE_FETCH_TIMEOUT_MS,
+  ) {}
 
   async request(req: HttpRequest): Promise<HttpResponse> {
-    const res = await this.fetchFn(req.url, { method: req.method, headers: req.headers, redirect: "manual" });
+    // One signal for the whole request: a site that trickles bytes is cut off at the timeout, the body read included.
+    const res = await this.fetchFn(req.url, { method: req.method, headers: req.headers, redirect: "manual", signal: AbortSignal.timeout(this.timeoutMs) });
     const headers: Record<string, string> = {};
     res.headers.forEach((v, k) => {
       headers[k.toLowerCase()] = v;

@@ -1,3 +1,8 @@
+-- SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+-- Copyright (c) 2026 Trooth, LLC
+--
+-- What the wired pipeline keeps beyond 0001 (docs/reports/integration.md).
+
 -- Semanto integration: what the pipeline (src/pipeline.ts) keeps beyond 0001.
 -- Every timestamp is ISO 8601 UTC text.
 

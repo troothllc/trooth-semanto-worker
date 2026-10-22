@@ -16,13 +16,24 @@
 //   server: gcore, x-id-fe                          Gcore
 //   server: nginx / apache                          nginx, Apache
 //   <meta name="generator" content="WordPress">     WordPress (or /wp-json)
+//   powered-by: Shopify, x-shopid, cdn.shopify.com  Shopify
+//   server: Squarespace                             Squarespace
+//   x-wix-request-id                                Wix
+//   <meta name="generator" content="Webflow">       Webflow
+//
+// The last four signals come from docs/audit/workflow-research.md section 6,
+// item 5. They have NOT yet been confirmed against live sites; confirm each
+// with a live request before relying on it. A site whose signals are not seen
+// stays "unknown" and the owner picks the host.
 //
 // Plus whether /.well-known/trooth.semanto and /.well-known/trooth-keys.json
 // are already served and match the Network copy byte for byte, and whether the
-// _trooth TXT pointer exists (DNS over HTTPS, RFC 8484, to 1.1.1.1, behind a
+// _trooth TXT pointer (v=trooth1; id=<trooth_id>; key=<kid>, never the proof
+// record at _trooth-challenge) exists (DNS over HTTPS, RFC 8484, to 1.1.1.1, behind a
 // port). All network calls sit behind the DetectPorts interface.
 
 import { bytesEqual, utf8 } from "../core/encoding";
+import { POINTER_RE } from "../basic/tier";
 import type { HostKind, MarkdownSource } from "../settings/delivery";
 
 export interface FetchResult {
@@ -65,6 +76,11 @@ export function classifyHost(headers: Record<string, string>, body: string): { h
   const h = (k: string) => headers[k.toLowerCase()] ?? "";
   const server = h("server").toLowerCase();
   const ev: string[] = [];
+  // Hosted site builders first: they sit behind CDNs (Shopify and Webflow behind Cloudflare or Fastly), so their own signals win.
+  if (/shopify/i.test(h("powered-by")) || h("x-shopid") || /cdn\.shopify\.com/i.test(body)) return { host: "shopify", evidence: [h("powered-by") ? "powered-by" : h("x-shopid") ? "x-shopid" : "cdn.shopify.com in the page"] };
+  if (/^squarespace/i.test(server)) return { host: "squarespace", evidence: ["server"] };
+  if (h("x-wix-request-id")) return { host: "wix", evidence: ["x-wix-request-id"] };
+  if (/<meta[^>]+name=["']generator["'][^>]+content=["']Webflow/i.test(body)) return { host: "webflow", evidence: ["generator meta"] };
   if (h("cf-ray") || server === "cloudflare") {
     ev.push(h("cf-ray") ? "cf-ray" : "server");
     return { host: "cloudflare", evidence: ev };
@@ -138,7 +154,8 @@ export async function detectHost(domain: string, ports: DetectPorts, now: Date =
     semanto: Boolean(served.semanto && wkSemanto && bytesEqual(wkSemanto.body, ports.networkCopy.semanto)),
     keys: Boolean(served.keys && wkKeys && bytesEqual(wkKeys.body, ports.networkCopy.keys)),
   };
-  const dns_pointer = txt.some((t) => /^v=trooth1;/.test(t.trim()));
+  // Only the pointer counts: v=trooth1; id=<trooth_id>; key=<kid>. A proof value or any other v=trooth1 record does not.
+  const dns_pointer = txt.some((t) => POINTER_RE.test(t.trim().replace(/^"+|"+$/g, "")));
 
   const conflicts: Conflict[] = [];
   if (cloudflare_markdown) conflicts.push({ kind: "double_markdown", message: DOUBLE_MARKDOWN_MESSAGE });

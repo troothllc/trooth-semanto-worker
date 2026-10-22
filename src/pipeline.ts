@@ -31,44 +31,46 @@
 // D1, R2, KV and fetch ports and hands them in. Nothing here judges a company:
 // it builds, signs, witnesses, logs and compares.
 
-import type { CompileJob } from "./env";
-import { utf8, fromBase64Url, toBase64Url } from "./core/encoding";
+import type { CompaniesMessage, CompileJob, QueueMessage, StageMessage } from "./env";
+import { utf8, fromBase64Url } from "./core/encoding";
 import { canonicalize } from "./core/canonical";
 import { digest } from "./core/hash";
 import { estimateTokens } from "./core/tokens";
 import { JWS_TYPES, signObject } from "./core/jws";
-import { importPrivate, sign as rawSign, toPublic, type PrivateJwk, type PublicJwk } from "./core/keys";
+import { importPrivate, sign as rawSign, toPublic, WitnessKeyMissingError, type PrivateJwk, type PublicJwk } from "./core/keys";
 import { verifyContentDigest, verifyMessage } from "./core/httpsig";
 import { factsRoot, rootHash, tierHash, versionId, type Fact, type Identity, type SemantoFile, type SemantoHeader } from "./core/semanto";
 import { Fetcher, ChangeDetector, type FetcherOptions } from "./compiler/fetch";
-import { discover } from "./compiler/discover";
-import { buildVersion, type FetchedPage } from "./compiler/build";
 import { generateJsonLd } from "./compiler/jsonld";
 import { extract } from "./compiler/extract";
 import { registrableDomain } from "./compiler/url";
+import { MemoryBuildStaging, runAssemble, runDiscover, runRender, type AssembledBuild, type BuildJob, type BuildRow, type BuildStagingPort, type StreamDeps } from "./compiler/stream";
 import type { HttpPort as SiteHttpPort, Resolver } from "./compiler/ports";
-import { assembleJws, acceptCustomerPublicKey, checkAssembledJws, createHostedKey, currentKey, jwksUrl, rotateHostedKey, versionSigningInput, ROTATION_OVERLAP_MS } from "./identity/keys";
+import { assembleJws, acceptCustomerPublicKey, bindingStatus, checkAssembledJws, createHostedKey, currentKey, jwksUrl, revokeKey as revokeKeyJwk, rotateHostedKey, versionSigningInput, ROTATION_OVERLAP_MS } from "./identity/keys";
 import { mayBeSigned, roleFromWorkspace } from "./identity/roles";
 import { compareLegalName, leiFacts, lookupLei } from "./identity/lei";
-import type { HttpPort as IdentityHttpPort } from "./identity/ports";
+import { dohDns, type HttpPort as IdentityHttpPort } from "./identity/ports";
 import { treeHeadId, type LogStore } from "./ledger/log";
 import type { LogLeaf } from "./ledger/ports";
 import { timestampTreeHead } from "./ledger/timestamp";
 import type { FetchPort as LedgerFetchPort } from "./ledger/ports";
-import { signRevocationList } from "./ledger/revocation";
+import { keyState, revocationLeaf, signRevocationList, type RevocationEntry } from "./ledger/revocation";
 import { type WebBotAuthDeps, type WebBotAuthResult } from "./readers/webbotauth";
 import { proveReader, type ForwardingContext, type ReaderProof } from "./readers/forwarded";
-import { recordRead } from "./readers/receipts";
+import { dashboardRows, dayBounds, receiptsCsv, recordRead, signDailyDigest, utcDay } from "./readers/receipts";
 import type { NonceStore, ReceiptStore } from "./readers/ports";
 import { runMonitor, type AvailableSurfaces } from "./monitor/run";
 import type { ClockPort, EmailPort, FetchPort as MonitorFetchPort, StorePort as MonitorStorePort, TokenPort } from "./monitor/ports";
 import type { Offer as MonitorOffer, Product as MonitorProduct, SignedRecord } from "./monitor/types";
+import { allPayloads, type WritebackContext } from "./monitor/writeback";
 import { questionsFor, type QuestionKind, type QuestionParams } from "./gap/prompts";
 import type { ProviderAdapter } from "./gap/providers";
 import { renderGapReportMarkdown, runGapReport, WEEKLY_RUN } from "./gap/report";
-import { basicHeaders, basicResponse, buildBasic, claim, dnsClaimName, dnsClaimRecord, measureSetup, proveDomain, SETUP_CHECKLIST, wellKnownClaimUrl } from "./basic/tier";
+import { buildCompetitorView, MAX_COMPETITORS, renderCompetitorMarkdown, runCompetitorQuestions } from "./gap/competitor";
+import { basicHeaders, basicResponse, claim, cleanDomain, dnsClaimName, dnsClaimRecord, SETUP_STEPS, wellKnownClaimUrl, type BasicCompany } from "./basic/tier";
 import type { DomainProofPort } from "./basic/ports";
 import { createFirstPublication, exportDisputeStatement } from "./basic/first-publication";
+import { checkContentSignalsDrift } from "./basic/content-signals";
 import { formatMinor, parseMinor, signOffer, type Availability, type OfferInput } from "./commerce/offers";
 import { isValidGtin, signProductRecord, type ProductRecordInput, type VariantAxes } from "./commerce/product-record";
 import type { CommerceStore } from "./commerce/ports";
@@ -76,13 +78,23 @@ import type { FeedCompany } from "./commerce/feeds";
 import type { SignedOffer } from "./commerce/offers";
 import type { SignedProductRecord } from "./commerce/product-record";
 import { DEFAULT_SETTINGS } from "./settings/delivery";
-import type { CompanyRecord, JobPort, KeyPort, ReceiptInput, ReceiptPort, ServeConfig, SettingsPort, SignedRequest, VersionStore, WorkspaceAction, WorkspaceAuth, WorkspaceHandlers, WorkspaceResult, WorkspaceRole } from "./serve/ports";
+import { detectHost } from "./serve/detect";
+import { wellKnownSemanto } from "./serve/represent";
+import { isDomainProven, type CompanyRecord, type JobPort, type KeyPort, type ReceiptInput, type ReceiptPort, type ServeConfig, type SettingsPort, type SignedRequest, type VersionStore, type WorkspaceAction, type WorkspaceAuth, type WorkspaceHandlers, type WorkspaceRead, type WorkspaceResult, type WorkspaceRole, type WorkspaceSession } from "./serve/ports";
 import type { LedgerLogPort } from "./serve/ledger-port";
-import type { ProblemCode } from "./serve/errors";
+import { PROBLEMS, type ProblemCode } from "./serve/errors";
 import type { PipelineStore, StoredVersion } from "./pipeline-store";
+import type { SetupDnsPort } from "./setup/ports";
+import type { DiscoveryDeps } from "./setup/domain-connect";
+import { checkProof, ensureSetup, setupAction, setupAfterBuild, setupReview, setupSession, setupState, stampStep } from "./pipeline-setup";
 export type { WebBotAuthResult };
 
 export const CONNECTOR_TAG = "trooth-connector";
+/** The crons fan out one queue message per this many companies. */
+export const COMPANIES_PER_MESSAGE = 25;
+
+/** A source outside Trooth (a registry, the company's site, a provider) gave no usable answer. */
+export class UpstreamError extends Error {}
 /** The largest catalog the connector route reads; a larger body is a 413 problem. */
 export const CATALOG_MAX_BYTES = 5 * 1024 * 1024;
 /** What the dashboard and the sign answer say about the two-officer rule while workspaces have one account. */
@@ -113,8 +125,20 @@ export interface PipelineDeps {
   tsa?: { url: string; fetch: LedgerFetchPort };
   /** The gap report's providers (src/gap/providers.ts allAdapters with the Env keys in the Worker). */
   gapAdapters(): ProviderAdapter[];
-  /** The compile queue. Without it, compile jobs run inline. */
-  enqueue?: (job: CompileJob) => Promise<void>;
+  /** The compile queue: compile jobs, build stages and the cron fan-out. Without it, they run inline. */
+  enqueue?: (job: QueueMessage) => Promise<void>;
+  /** False in production: without a queue, a build is refused instead of run inside a request. */
+  inlineBuilds?: boolean;
+  /** Where a build is kept while it runs (D1 and R2 in the Worker). In memory when absent. */
+  staging?: BuildStagingPort;
+  /** DNS over HTTPS lookups for the setup proof: two resolvers and the NS records. Without it, domainProof.dnsTxt is the one resolver. */
+  setupDns?: SetupDnsPort;
+  /** One GET to the company's own site through the SSRF guard: host detection and the install check. */
+  siteProbe?: (url: string, headers: Record<string, string>) => Promise<{ status: number; headers: Record<string, string>; body: Uint8Array } | null>;
+  /** Domain Connect: discovery and, once a provider has onboarded the template, the signing key for the apply link. */
+  domainConnect?: { discovery: DiscoveryDeps; privateKeyPem?: string; redirectUri?: string };
+  /** Read receipts, for the digest and the CSV export. */
+  receiptStore?: ReceiptStore;
   /** Random bytes, injectable for tests. */
   random?: (n: number) => Uint8Array;
   /** Atomic nonce claims for the connector catalog route (the NonceDO Durable Object in the Worker). */
@@ -156,41 +180,41 @@ export async function rehashFile(file: SemantoFile, changes: { facts?: Fact[]; i
 }
 
 export class Pipeline implements WorkspaceHandlers {
-  constructor(private readonly d: PipelineDeps) {}
+  readonly staging: BuildStagingPort;
+  constructor(readonly d: PipelineDeps) {
+    this.staging = d.staging ?? new MemoryBuildStaging();
+  }
 
-  private random(n: number): Uint8Array {
+  random(n: number): Uint8Array {
     if (this.d.random) return this.d.random(n);
     return crypto.getRandomValues(new Uint8Array(n));
   }
 
-  private fetcher(): Fetcher {
+  fetcher(): Fetcher {
     return new Fetcher({ http: this.d.site.http, clock: { now: () => this.d.now() }, ...(this.d.site.resolve ? { resolve: this.d.site.resolve } : {}) }, this.d.site.fetcher ?? {});
   }
 
-  // ---------------------------------------------------------------- compile (the queue consumer)
+  // ---------------------------------------------------------------- compile: a build in queue messages (src/compiler/stream.ts)
 
-  async compile(job: CompileJob): Promise<CompileSummary> {
+  private streamDeps(): StreamDeps {
+    return {
+      staging: this.staging,
+      bodies: this.d.store,
+      fetcher: this.fetcher(),
+      now: () => this.d.now(),
+      previousFile: (trooth_id, version) => this.d.store.getFile(trooth_id, version),
+    };
+  }
+
+  /** Create the build row for a job. The domain is the company's, fixed at the claim; a job never names another. */
+  async startBuild(job: CompileJob): Promise<string> {
     const company = await this.d.store.getCompany(job.trooth_id);
     if (!company) throw new Error(`compile: no company ${job.trooth_id}`);
-    const now = this.d.now();
-    const fetcher = this.fetcher();
-    const latest = await this.d.store.latestVersion(company.trooth_id);
-    const discovery = await discover(company.domain, fetcher);
-    const lastmod = new Map(discovery.urls.map((u) => [u.url, u.lastmod ?? null] as const));
-    const fetched: FetchedPage[] = Object.values(discovery.fetched).map((f) => ({
-      url: f.url,
-      status: f.status,
-      html: f.text,
-      source_hash: f.source_hash,
-      witnessed_at: f.fetchedAt,
-      headers: f.headers,
-      truncated: f.truncated,
-      lastmod: lastmod.get(f.url) ?? null,
-    }));
+    const latest = await this.d.store.latestFile(company.trooth_id);
+    const lastBuild = await this.staging.latestBuild(company.trooth_id);
+    const version = Math.max(latest?.file.header.version ?? 0, lastBuild && lastBuild.status !== "failed" && lastBuild.status !== "done" ? lastBuild.version : 0) + 1;
     const settings = (await this.d.settings.get(company.trooth_id)) ?? DEFAULT_SETTINGS;
-    const config = await this.d.store.getConfig(company.trooth_id);
-    const profile = `${this.d.config.network_base}/${company.trooth_id}`;
-    const version = (latest?.file.header.version ?? 0) + 1;
+    const requested_at = iso(this.d.now());
     const identity: Identity = {
       domain: company.domain,
       trooth_id: company.trooth_id,
@@ -198,57 +222,184 @@ export class Pipeline implements WorkspaceHandlers {
       ...(company.lei ? { lei: company.lei } : {}),
       key_binding: { jwks_url: jwksUrl(company.domain), dns_record: false },
     };
-    const out = await buildVersion({
-      org: company.org,
-      identity,
-      profile,
+    const build_id = `b_${[...this.random(12)].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+    const buildJob: BuildJob = {
+      trooth_id: company.trooth_id,
       version,
       supersedes: company.current_version,
-      built_at: iso(now),
-      discovery,
-      fetched,
-      controls: { content_signals: settings.content_signals },
-      ...(latest ? { previous: { file: latest.file, bodies: latest.bodies } } : {}),
+      previous_version: latest ? latest.file.header.version : null,
+      reason: job.reason,
       ...(job.changed_urls ? { changed_urls: job.changed_urls } : {}),
-    });
-    let file = out.file;
+      org: company.org,
+      identity,
+      profile: `${this.d.config.network_base}/${company.trooth_id}`,
+      controls: { content_signals: settings.content_signals },
+      requested_at,
+    };
+    await this.staging.createBuild({ build_id, trooth_id: company.trooth_id, version, reason: job.reason, held: !isDomainProven(company), status: "queued", job: buildJob, found: 0, fetched: 0, planned: 0, rendered: 0, state: null, error: null, requested_at, started_at: null, finished_at: null });
+    return build_id;
+  }
+
+  /** Run one build stage. Answers the next message, or null after assembly. */
+  async runStage(msg: StageMessage): Promise<StageMessage | null> {
+    this.staging.beginInvocation?.();
+    try {
+      if (msg.stage === "discover") return await runDiscover(msg.build_id, this.streamDeps());
+      if (msg.stage === "render") return await runRender(msg, this.streamDeps());
+      await this.finishBuild(await runAssemble(msg.build_id, this.streamDeps()));
+      return null;
+    } catch (e) {
+      if (this.inlineStage) await this.failBuild(msg.build_id, e);
+      throw e;
+    }
+  }
+  private inlineStage = false;
+
+  /** Mark a build failed with plain words; the setup screen shows them. */
+  async failBuild(build_id: string, e: unknown): Promise<void> {
+    const id = this.requestId();
+    if (this.d.logError) this.d.logError(id, "build", e);
+    await this.staging.updateBuild(build_id, { status: "failed", error: `Semanto could not finish reading the site. Try again, or check that the site opens in a browser. Request id ${id}.`, finished_at: iso(this.d.now()) });
+  }
+
+  /** Store the assembled version, the change state, and run what follows a build (promotion, the setup email). */
+  private async finishBuild(a: AssembledBuild): Promise<void> {
+    const trooth_id = a.build.trooth_id;
+    const config = await this.d.store.getConfig(trooth_id);
+    let file = a.file;
     if (config.public_record_facts.length) {
       const have = new Set(file.facts.map((f) => f.id));
       file = await rehashFile(file, { facts: [...file.facts, ...config.public_record_facts.filter((f) => !have.has(f.id))] });
     }
-    const jsonld = generateJsonLd(file, { troothProfileUrl: profile });
-    const original_tokens: Record<string, number> = {};
-    for (const p of file.header.pages_manifest) original_tokens[p.id] = p.original_tokens ?? 0;
-    await this.d.store.saveBuilt(company.trooth_id, { file, bodies: out.bodies, original_tokens, signed_at: null }, { llms: out.llms, jsonld: utf8(JSON.stringify(jsonld.graph)) });
-    for (const f of Object.values(discovery.fetched)) {
-      await this.d.store.putChangeState(company.trooth_id, f.url, { etag: f.etag, last_modified: f.lastModified, raw_hash: f.source_hash, lastmod: lastmod.get(f.url) ?? null, checked_at: f.fetchedAt });
+    const jsonld = generateJsonLd(file, { troothProfileUrl: a.build.job.profile });
+    await this.d.store.saveAssembled(trooth_id, file, { llms: a.llms, jsonld: utf8(JSON.stringify(jsonld.graph)) });
+    for (const r of a.changeRows) await this.d.store.putChangeState(trooth_id, r.url, { etag: r.etag, last_modified: r.last_modified, raw_hash: r.raw_hash, lastmod: r.lastmod, checked_at: r.checked_at });
+    const state = { ...a.build.state!, result: { root_hash: file.root_hash, pages: file.header.pages_manifest.length, facts: file.facts.length, receipt: a.receipt } };
+    await this.staging.updateBuild(a.build.build_id, { status: "done", finished_at: iso(this.d.now()), state, found: a.receipt.found, rendered: a.build.planned });
+    await this.staging.clear(a.build.build_id);
+    await this.afterBuild(a.build.build_id);
+  }
+
+  /**
+   * After a build: a version read before the proof stays held (stored, never
+   * served or witnessed). Once the domain is proven, a Basic company's newest
+   * read version is witnessed and served marked witnessed-not-signed. The
+   * owner is emailed when a long setup read finishes.
+   */
+  async afterBuild(build_id: string): Promise<void> {
+    const build = await this.staging.getBuild(build_id);
+    if (!build || build.status !== "done") return;
+    const company = await this.d.store.getCompany(build.trooth_id);
+    if (!company) return;
+    if (isDomainProven(company)) await this.promote(company, build);
+    await setupAfterBuild(this, build);
+  }
+
+  /** The proof promotes a read: a Basic company's version is witnessed; a full-tier version is simply ready to review and sign. */
+  async promote(company: CompanyRecord, build: BuildRow): Promise<void> {
+    if (build.held) await this.staging.updateBuild(build.build_id, { held: false });
+    if (company.tier !== "basic") return;
+    const stored = await this.d.store.getVersion(company.trooth_id, build.version);
+    if (!stored || stored.file.header.state !== "read" || stored.file.witness) return;
+    await this.witnessOnly(company.trooth_id, stored);
+  }
+
+  /** Inline: every stage in this invocation, for tests and development without a queue. */
+  async compile(job: CompileJob): Promise<CompileSummary> {
+    const build_id = await this.startBuild(job);
+    let msg: StageMessage | null = { kind: "stage", stage: "discover", build_id };
+    this.inlineStage = true;
+    try {
+      while (msg) msg = await this.runStage(msg);
+    } finally {
+      this.inlineStage = false;
     }
+    return this.summaryOf(build_id);
+  }
+
+  async summaryOf(build_id: string): Promise<CompileSummary> {
+    const b = (await this.staging.getBuild(build_id))!;
+    const r = b.state!.result!;
     return {
-      trooth_id: company.trooth_id,
-      version,
-      version_id: versionId(file.root_hash),
-      root_hash: file.root_hash,
+      trooth_id: b.trooth_id,
+      version: b.version,
+      version_id: versionId(r.root_hash),
+      root_hash: r.root_hash,
       state: "read",
-      pages: file.header.pages_manifest.length,
-      facts: file.facts.length,
-      coverage: { found: out.receipt.found, read: out.receipt.read, left_out: out.receipt.left_out, changed: out.receipt.changed, removed: out.receipt.removed },
+      pages: r.pages,
+      facts: r.facts,
+      coverage: { found: r.receipt.found, read: r.receipt.read, left_out: r.receipt.left_out, changed: r.receipt.changed, removed: r.receipt.removed },
     };
+  }
+
+  /** Queue a build (the first stage message) when the queue is bound; otherwise run it inline. Answers the build id. */
+  async queueBuild(job: CompileJob): Promise<string> {
+    if (this.d.enqueue) {
+      const build_id = await this.startBuild(job);
+      await this.d.enqueue({ kind: "stage", stage: "discover", build_id });
+      return build_id;
+    }
+    if (this.d.inlineBuilds === false) throw new Error("No compile queue is bound in this deployment.");
+    const build_id = await this.startBuild(job);
+    let msg: StageMessage | null = { kind: "stage", stage: "discover", build_id };
+    this.inlineStage = true;
+    try {
+      while (msg) msg = await this.runStage(msg);
+    } catch {
+      // failBuild has recorded the failure; the setup state shows it.
+    } finally {
+      this.inlineStage = false;
+    }
+    return build_id;
+  }
+
+  /** One queue message: a compile job, a build stage, or a fan-out of companies. */
+  async consume(message: unknown): Promise<void> {
+    if (!isRecord(message)) throw new Error("queue: the message is not an object");
+    if (message.kind === "stage") {
+      const next = await this.runStage(message as unknown as StageMessage);
+      if (next && this.d.enqueue) await this.d.enqueue(next);
+      else if (next) {
+        let m: StageMessage | null = next;
+        while (m) m = await this.runStage(m);
+      }
+      return;
+    }
+    if (message.kind === "companies") {
+      const m = message as unknown as CompaniesMessage;
+      if (m.job === "changes") await this.checkCompanyChanges(m.trooth_ids);
+      else if (m.job === "gap") await this.gapReportsFor(m.trooth_ids);
+      else await this.checkPendingProofs(m.trooth_ids);
+      return;
+    }
+    if (typeof message.trooth_id !== "string") throw new Error("compile: the message is not a CompileJob");
+    const job = message as unknown as CompileJob;
+    if (this.d.enqueue) {
+      const build_id = await this.startBuild(job);
+      await this.d.enqueue({ kind: "stage", stage: "discover", build_id });
+    } else await this.compile(job);
+  }
+
+  /** A message that failed its last attempt: a build stage marks its build failed. */
+  async consumeFailed(message: unknown, e: unknown): Promise<void> {
+    if (isRecord(message) && message.kind === "stage" && typeof message.build_id === "string") await this.failBuild(message.build_id, e);
   }
 
   // ---------------------------------------------------------------- workspace actions
 
   /** A short id a person can quote to support; the exception it names is logged, never sent. */
-  private requestId(): string {
+  requestId(): string {
     return [...this.random(8)].map((b) => b.toString(16).padStart(2, "0")).join("");
   }
 
-  private failed(action: string, e: unknown): WorkspaceResult {
+  failed(action: string, e: unknown): WorkspaceResult {
     const id = this.requestId();
     if (this.d.logError) this.d.logError(id, action, e);
     else console.error(`semanto ${action} failed, request ${id}:`, e);
+    if (e instanceof WitnessKeyMissingError) return { status: 0, problem: { code: "witness_key_missing", detail: PROBLEMS.witness_key_missing.what_happened }, headers: { "Trooth-Request-Id": id } };
     const message = e instanceof Error ? e.message : "";
     // A missing secret is this deployment's state, not an outside source failing.
-    const code: ProblemCode = /HOSTED_KEY_SEAL_SECRET/.test(message) ? "conflict" : "upstream_unavailable";
+    const code: ProblemCode = /HOSTED_KEY_SEAL_SECRET|No compile queue/.test(message) ? "conflict" : e instanceof UpstreamError ? "upstream_unavailable" : "internal_error";
     return { status: 0, problem: { code, detail: `The step did not finish. Quote request id ${id} to Trooth support.` }, headers: { "Trooth-Request-Id": id } };
   }
 
@@ -281,15 +432,55 @@ export class Pipeline implements WorkspaceHandlers {
           return await this.firstPublication(trooth_id, body);
         case "connectors":
           return await this.addConnector(ws, trooth_id, body);
+        case "withdraw":
+          return await this.withdraw(ws, trooth_id, body);
+        case "detect":
+          if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
+          return await this.detect(trooth_id);
+        case "competitor-report":
+          if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
+          return await this.competitorReport(trooth_id, body);
+        default:
+          return await setupAction(this, action, ws, trooth_id, body);
       }
     } catch (e) {
       return this.failed(action, e);
     }
   }
 
+  async read(what: WorkspaceRead, ws: WorkspaceAuth, trooth_id: string, query: Record<string, string>): Promise<WorkspaceResult> {
+    try {
+      switch (what) {
+        case "setup":
+          return ok(200, await setupState(this, trooth_id, { live: true }));
+        case "setup/review":
+          return await setupReview(this, trooth_id);
+        case "keys":
+          return await this.keysRead(trooth_id);
+        case "writeback":
+          return await this.writebackPreview(trooth_id);
+        case "receipts":
+          return await this.receiptsDigest(trooth_id, query.day);
+        case "receipts.csv":
+          return await this.receiptsCsvRead(trooth_id, query.from, query.to);
+      }
+    } catch (e) {
+      return this.failed(what, e);
+    }
+  }
+
+  async session(what: "claim" | "setup/start" | "setup", s: WorkspaceSession, input: unknown): Promise<WorkspaceResult> {
+    try {
+      return await setupSession(this, what, s, isRecord(input) ? input : {});
+    } catch (e) {
+      return this.failed(what, e);
+    }
+  }
+
   private async build(trooth_id: string): Promise<WorkspaceResult> {
     const company = await this.d.store.getCompany(trooth_id);
     if (!company) return problem("conflict", "This company has no record yet. Claim the domain first.");
+    if (!isDomainProven(company)) return problem("domain_not_proven", `Prove you control ${company.domain} first. A version for publication is built only after the proof.`);
     const job: CompileJob = { trooth_id, domain: company.domain, reason: "manual", requested_at: iso(this.d.now()) };
     if (this.d.enqueue) {
       await this.d.enqueue(job);
@@ -304,6 +495,7 @@ export class Pipeline implements WorkspaceHandlers {
     if (!mayAdminister(ws.role)) return problem("forbidden", `A workspace ${ws.role} cannot sign. Ask an owner or admin.`);
     const company = await this.d.store.getCompany(trooth_id);
     if (!company) return problem("conflict", "This company has no record yet.");
+    if (!isDomainProven(company)) return problem("domain_not_proven", `Prove you control ${company.domain} first. Nothing is signed or witnessed before the proof.`);
     const v = typeof body.version === "number" ? await this.d.store.getVersion(trooth_id, body.version) : await this.d.store.latestVersion(trooth_id);
     if (!v) return problem("conflict", "Nothing has been built yet. Build a version first.");
     const state = v.file.header.state;
@@ -397,6 +589,7 @@ export class Pipeline implements WorkspaceHandlers {
     await this.d.store.markSigned(company.trooth_id, file, witnessed_at);
     await this.d.store.clearPending(company.trooth_id, header.version);
     await this.d.store.clearAuthorizations(company.trooth_id, v.file.root_hash);
+    await stampStep(this, company.trooth_id, "sign", witnessed_at);
     return ok(200, {
       object: "semanto.signed",
       trooth_id: company.trooth_id,
@@ -508,61 +701,50 @@ export class Pipeline implements WorkspaceHandlers {
     // An owner or admin may claim. While the company has no registered owner, a member may claim too, and becomes its owner.
     const owner = await this.d.store.ownerUserId(trooth_id);
     if (!mayAdminister(ws.role) && !(ws.role === "member" && owner === null)) return problem("forbidden", "Only an owner or admin can claim a domain.");
-    const domain = str(body.domain)?.toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-    if (!domain || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)) return problem("invalid_request", "Send the domain as domain, for example acme.com.");
-    const now = this.d.now();
-    const token = `trooth-claim-${toBase64Url(this.random(18))}`;
-    const c = claim(trooth_id, domain, token, now);
-    if (!(await this.d.store.getCompany(trooth_id))) {
-      await this.d.store.putCompany({ trooth_id, domain, org: str(body.org) ?? domain, tier: "basic", current_version: null, custody: "customer" });
-    }
-    await this.d.store.putBasic(c);
+    const company = await this.d.store.getCompany(trooth_id);
+    if (!company) return problem("conflict", "This company has no record yet. Start setup first (POST /os/semanto/setup/start).");
+    // The domain is the one fixed at the claim; a request never changes it.
+    const asked = str(body.domain) ? cleanDomain(str(body.domain)!) : company.domain;
+    if (asked !== company.domain) return problem("domain_fixed", `This company's domain is ${company.domain}, fixed when it was claimed. It cannot change to ${str(body.domain)}.`);
+    const setup = await ensureSetup(this, company, { user_id: ws.user_id, email: ws.name.includes("@") ? ws.name : null, signed_in_at: null });
+    const c = (await this.d.store.getBasic(trooth_id)) ?? claim(trooth_id, company.domain, setup.challenge, new Date(setup.challenge_issued_at));
+    await this.d.store.putBasic(c.claim_token === setup.challenge ? c : { ...c, claim_token: setup.challenge });
     await this.d.store.registerOwner(trooth_id, ws.user_id);
     return ok(200, {
       object: "semanto.basic_claim",
       trooth_id,
-      domain,
-      state: c.state,
-      dns: { name: dnsClaimName(domain), type: "TXT", value: dnsClaimRecord(token) },
-      well_known: { url: wellKnownClaimUrl(domain), body: token },
-      checklist: SETUP_CHECKLIST,
+      domain: company.domain,
+      state: isDomainProven(company) ? "domain_proved" : "claim",
+      dns: { name: dnsClaimName(company.domain), type: "TXT", value: dnsClaimRecord(setup.challenge) },
+      well_known: { url: wellKnownClaimUrl(company.domain), body: setup.challenge },
+      steps: SETUP_STEPS,
     });
   }
 
+  /** Check the proof record for the company's own domain; when found, record the proof and queue the read (or promote a finished held read). Never compiles inside the request. */
   private async basicProve(trooth_id: string): Promise<WorkspaceResult> {
-    const c = await this.d.store.getBasic(trooth_id);
-    if (!c) return problem("conflict", "Claim the domain first.");
-    const now = this.d.now();
-    const proved = await proveDomain(c, this.d.domainProof, now);
-    if (!proved.ok) return ok(200, { object: "semanto.basic_proof", trooth_id, state: c.state, proved: false, reason: proved.reason, checked: proved.checked });
-    await this.d.store.putBasic(proved.company);
-    const built = await buildBasic(proved.company, {
-      build: async (domain, id) => {
-        const s = await this.compile({ trooth_id: id, domain, reason: "first_build", requested_at: iso(now) });
-        return { version: s.version, root_hash: s.root_hash, page_count: s.pages, fact_count: s.facts, built_at: iso(this.d.now()) };
-      },
-    }, this.d.now());
-    let company = built.ok ? built.company : proved.company;
-    // Witness-only finalize: Trooth's witness statement and a "witness" log leaf, no company signature. The record stays
-    // state read; the public routes serve it marked witnessed-not-signed.
-    let witnessed: { witnessed_at: string; log_index: number; tree_size: number } | null = null;
-    if (built.ok && company.record) {
-      const stored = await this.d.store.getVersion(trooth_id, company.record.version);
-      if (stored) witnessed = await this.witnessOnly(trooth_id, stored);
-      if (witnessed) company = { ...company, record: { ...company.record, witnessed: true } };
-    }
-    await this.d.store.putBasic(company);
-    const setup = measureSetup(company.claimed_at, {
-      enter_domain: company.claimed_at,
-      ...(company.domain_proved_at ? { publish_token: company.domain_proved_at, prove_domain: company.domain_proved_at } : {}),
-      ...(company.basic_built_at ? { build_record: company.basic_built_at } : {}),
-    });
-    return ok(200, basicResponse(company, { object: "semanto.basic_proof", trooth_id, proved: true, method: proved.method, state: company.state, record_state: "read", witnessed: witnessed !== null, witness: witnessed, record: company.record ?? null, setup }), basicHeaders());
+    const company = await this.d.store.getCompany(trooth_id);
+    if (!company) return problem("conflict", "Claim the domain first.");
+    const outcome = await checkProof(this, company, { force: true });
+    const state = await setupState(this, trooth_id, { live: false });
+    const basic: BasicCompany = { trooth_id, domain: company.domain, state: outcome.proven ? "domain_proved" : "claim", claim_token: outcome.challenge, claimed_at: outcome.claimed_at };
+    return ok(200, basicResponse(basic, {
+      object: "semanto.basic_proof",
+      trooth_id,
+      proved: outcome.proven,
+      method: outcome.method,
+      checked: { dns_name: dnsClaimName(company.domain), well_known_url: wellKnownClaimUrl(company.domain) },
+      diagnosis: state.proof?.diagnosis ?? null,
+      read: state.read,
+      setup: state.timings,
+    }), basicHeaders());
   }
 
   /** Semanto Basic: witness a built version without a company signature, and log the witness statement. */
-  private async witnessOnly(trooth_id: string, v: StoredVersion): Promise<{ witnessed_at: string; log_index: number; tree_size: number } | null> {
+  async witnessOnly(trooth_id: string, v: StoredVersion): Promise<{ witnessed_at: string; log_index: number; tree_size: number } | null> {
     if (v.file.header.state !== "read") return null;
+    // Nothing is witnessed before the domain is proven.
+    if (!isDomainProven(await this.d.store.getCompany(trooth_id))) return null;
     const now = this.d.now();
     const witnessed_at = iso(now);
     const witness = await this.d.keys.getWitnessKey();
@@ -580,6 +762,7 @@ export class Pipeline implements WorkspaceHandlers {
   private async firstPublication(trooth_id: string, body: Record<string, unknown>): Promise<WorkspaceResult> {
     const company = await this.d.store.getCompany(trooth_id);
     if (!company) return problem("conflict", "This company has no record yet.");
+    if (!isDomainProven(company)) return problem("domain_not_proven", `Prove you control ${company.domain} first. Trooth witnesses pages only on a proven domain.`);
     const url = str(body.url);
     let host: string;
     try {
@@ -625,7 +808,7 @@ export class Pipeline implements WorkspaceHandlers {
       company: company.org,
       kind,
       ran_at: iso(this.d.now()),
-      questions: questionsFor(kind, params),
+      questions: [...questionsFor(kind, params), ...(config.gap.questions ?? []).map((text, i) => ({ id: `custom:${i + 1}`, template_id: "custom", kind, text, keys: [] }))],
       adapters: this.d.gapAdapters(),
       context: { facts: file.facts, domains: file.header.domains, networkBase: this.d.config.network_base },
     });
@@ -672,7 +855,171 @@ export class Pipeline implements WorkspaceHandlers {
       },
       { fetch: this.d.monitor.fetch, clock, store: this.d.monitor.store, ...(this.d.monitor.email ? { email: this.d.monitor.email } : {}), ...(this.d.monitor.tokens ? { tokens: this.d.monitor.tokens } : {}) },
     );
-    return ok(200, { object: "semanto.monitor_result", summary, mismatches: run.mismatches, indexability: run.indexability });
+    // Content Signals drift: the signed policy against the site's robots.txt and home page headers (src/basic/content-signals.ts).
+    const file = await this.d.versions.getCurrent(trooth_id);
+    const getOrNull = async (url: string) => {
+      try {
+        return await this.d.monitor.fetch.get(url);
+      } catch {
+        return null;
+      }
+    };
+    const robots = await getOrNull(`https://${record.domain}/robots.txt`);
+    const home = await getOrNull(`https://${record.domain}/`);
+    const content_signals = file ? checkContentSignalsDrift(file.controls.content_signals, { robotsTxt: robots && robots.status === 200 ? robots.body : null, headers: home?.headers ?? {} }) : null;
+    return ok(200, { object: "semanto.monitor_result", summary, mismatches: run.mismatches, indexability: run.indexability, content_signals });
+  }
+
+  // ---------------------------------------------------------------- withdraw and revoke (finding 6)
+
+  /** POST /os/semanto/{id}/withdraw: the version answers semanto_withdrawn from then on; the revocation is logged and the list re-signed. */
+  private async withdraw(ws: WorkspaceAuth, trooth_id: string, body: Record<string, unknown>): Promise<WorkspaceResult> {
+    if (!mayAdminister(ws.role)) return problem("forbidden", "Only an owner or admin can withdraw a version.");
+    const company = await this.d.store.getCompany(trooth_id);
+    if (!company) return problem("conflict", "This company has no record yet.");
+    const version = typeof body.version === "number" && Number.isInteger(body.version) ? body.version : null;
+    const reason = str(body.reason);
+    if (version === null) return problem("invalid_request", "Send the version number to withdraw as version.");
+    if (!reason) return problem("invalid_request", "Send the reason in plain words as reason. It is published with the withdrawal.");
+    if (reason.length > 500) return problem("invalid_request", "Keep the reason under 500 characters.");
+    const file = await this.d.store.getFile(trooth_id, version);
+    if (!file) return problem("conflict", `Version ${version} does not exist.`);
+    if (file.header.state === "withdrawn") return problem("conflict", `Version ${version} is already withdrawn.`);
+    const at = iso(this.d.now());
+    const entry: RevocationEntry = { kind: "version", ref: versionId(file.root_hash), reason, revoked_at: at };
+    const leaf = await this.d.log.append(await revocationLeaf(entry, trooth_id));
+    await this.d.store.putRevocation(trooth_id, entry, leaf.index);
+    await this.d.store.withdrawVersion(trooth_id, version, at);
+    await this.resignRevocations(trooth_id);
+    await this.resignRevocations(null);
+    return ok(200, { object: "semanto.withdrawn", trooth_id, version, version_id: entry.ref, revoked_at: at, log_index: leaf.index, revocations_url: `${this.d.config.public_api_base}/${trooth_id}/revocations` });
+  }
+
+  /** POST /os/semanto/{id}/keys/{kid}/revoke: revoked_at set (backdated to compromised_at when given), logged, list re-signed. */
+  async revokeKey(ws: WorkspaceAuth, trooth_id: string, kid: string, input: unknown): Promise<WorkspaceResult> {
+    try {
+      const body = isRecord(input) ? input : {};
+      if (!mayAdminister(ws.role)) return problem("forbidden", "Only an owner or admin can revoke a signing key.");
+      const reason = str(body.reason);
+      if (!reason) return problem("invalid_request", "Send the reason in plain words as reason. It is published with the revocation.");
+      if (reason.length > 500) return problem("invalid_request", "Keep the reason under 500 characters.");
+      const now = this.d.now();
+      let at = now;
+      if (body.compromised_at !== undefined) {
+        const t = typeof body.compromised_at === "string" ? Date.parse(body.compromised_at) : NaN;
+        if (Number.isNaN(t)) return problem("invalid_request", "compromised_at must be an ISO 8601 time.");
+        if (t > now.getTime()) return problem("invalid_request", "compromised_at cannot be in the future.");
+        at = new Date(t);
+      }
+      const key = (await this.d.store.keys(trooth_id)).find((k) => k.public_jwk.kid === kid);
+      if (!key) return problem("conflict", `No key ${kid} is on file for this company.`);
+      if (key.public_jwk.revoked_at) return problem("conflict", `Key ${kid} was already revoked on ${key.public_jwk.revoked_at}.`);
+      const revoked = revokeKeyJwk(key.public_jwk, at);
+      await this.d.store.putKey(trooth_id, { ...key, public_jwk: revoked }, null);
+      const entry: RevocationEntry = { kind: "key", ref: kid, reason, revoked_at: revoked.revoked_at! };
+      const leaf = await this.d.log.append(await revocationLeaf(entry, trooth_id));
+      await this.d.store.putRevocation(trooth_id, entry, leaf.index);
+      await this.resignRevocations(trooth_id);
+      await this.resignRevocations(null);
+      return ok(200, { object: "semanto.key_revoked", trooth_id, kid, revoked_at: entry.revoked_at, log_index: leaf.index, revocations_url: `${this.d.config.public_api_base}/${trooth_id}/revocations` });
+    } catch (e) {
+      return this.failed("keys/revoke", e);
+    }
+  }
+
+  /** GET /os/semanto/{id}/keys: each key's state in words, and how the current key is bound to the domain. */
+  private async keysRead(trooth_id: string): Promise<WorkspaceResult> {
+    const company = await this.d.store.getCompany(trooth_id);
+    if (!company) return problem("conflict", "This company has no record yet.");
+    const now = this.d.now();
+    const revocations = await this.d.store.revocations(trooth_id);
+    const keys = (await this.d.store.keys(trooth_id)).map((k) => {
+      const st = keyState(k.public_jwk, revocations, now);
+      return { kid: k.public_jwk.kid, custody: k.custody, state: st.state, sentence: st.sentence, created_at: k.created_at, ...(k.public_jwk.nbf ? { nbf: k.public_jwk.nbf } : {}), ...(k.public_jwk.exp ? { exp: k.public_jwk.exp } : {}), ...(k.public_jwk.revoked_at ? { revoked_at: k.public_jwk.revoked_at } : {}) };
+    });
+    const current = currentKey((await this.d.store.keys(trooth_id)).map((k) => k.public_jwk).filter((k) => !k.exp && !k.revoked_at), now);
+    const binding = current ? await bindingStatus(company.domain, current.kid, this.d.identity.http, dohDns(this.d.identity.http), now) : null;
+    return ok(200, { object: "semanto.keys", trooth_id, keys, binding });
+  }
+
+  /** POST /os/semanto/{id}/detect: host detection on the company's own domain (src/serve/detect.ts), kept for the install step. */
+  async detect(trooth_id: string): Promise<WorkspaceResult> {
+    const company = await this.d.store.getCompany(trooth_id);
+    if (!company) return problem("conflict", "This company has no record yet.");
+    const result = await detectHost(company.domain, { fetch: (url, init) => this.siteProbe(url, init.headers), dnsTxt: async (name) => (this.d.setupDns?.resolvers[0] ? this.d.setupDns.resolvers[0].txt(name) : []), networkCopy: await this.networkCopy(company) }, this.d.now());
+    const setup = await this.d.store.getSetup(trooth_id);
+    if (setup) await this.d.store.putSetup({ ...setup, detection: { host: result.host, at: result.checked_at } });
+    return ok(200, result);
+  }
+
+  /** One GET to the company's site through the SSRF-guarded probe (null when it could not be reached). */
+  async siteProbe(url: string, headers: Record<string, string>): Promise<{ status: number; headers: Record<string, string>; body: Uint8Array } | null> {
+    if (!this.d.siteProbe) return null;
+    try {
+      return await this.d.siteProbe(url, headers);
+    } catch {
+      return null;
+    }
+  }
+
+  /** The two well-known documents exactly as the Trooth-hosted routes answer them. */
+  async networkCopy(company: CompanyRecord): Promise<{ semanto: Uint8Array; keys: Uint8Array }> {
+    const file = await this.d.versions.getCurrent(company.trooth_id);
+    return { semanto: utf8(JSON.stringify(wellKnownSemanto(company, file, this.d.config))), keys: utf8(JSON.stringify(await this.d.keys.getCompanyJwks(company.trooth_id))) };
+  }
+
+  /** GET /os/semanto/{id}/writeback: what write-back would send, built from the signed record. Nothing is sent. */
+  private async writebackPreview(trooth_id: string): Promise<WorkspaceResult> {
+    const record = await this.signedRecord(trooth_id);
+    if (!record) return problem("conflict", "Write-back is built from the signed record. Sign a version first.");
+    const config = await this.d.store.getConfig(trooth_id);
+    const file = (await this.d.versions.getCurrent(trooth_id))!;
+    const generated = generateJsonLd(file, { troothProfileUrl: `${this.d.config.network_base}/${trooth_id}` });
+    const ctx: WritebackContext = {
+      at: iso(this.d.now()),
+      ...(config.writeback?.merchant_center ? { merchantCenter: config.writeback.merchant_center } : {}),
+      ...(config.writeback?.business_profile_location ? { businessProfileLocation: config.writeback.business_profile_location } : {}),
+      pages: [{ url: `https://${record.domain}/`, current: [], generated: generated.graph }],
+    };
+    const { payloads, skipped } = allPayloads(record, ctx);
+    return ok(200, { object: "semanto.writeback_preview", trooth_id, payloads, skipped });
+  }
+
+  /** POST /os/semanto/{id}/competitor-report: the free side-by-side with up to three others (src/gap/competitor.ts). */
+  private async competitorReport(trooth_id: string, body: Record<string, unknown>): Promise<WorkspaceResult> {
+    const company = await this.d.store.getCompany(trooth_id);
+    if (!company) return problem("conflict", "This company has no record yet.");
+    const kind = body.kind === "shopping" ? "shopping" : body.kind === "local" || body.kind === undefined ? "local" : null;
+    if (!kind) return problem("invalid_request", "kind is local or shopping.");
+    const list = Array.isArray(body.competitors) ? body.competitors.filter(isRecord) : [];
+    const competitors = list.map((c) => ({ name: str(c.name) ?? "", domain: str(c.domain) ? (cleanDomain(str(c.domain)!) ?? "") : "" })).filter((c) => c.name && c.domain);
+    if (competitors.length < 1 || competitors.length > MAX_COMPETITORS || competitors.length !== list.length) return problem("invalid_request", `Send 1 to ${MAX_COMPETITORS} competitors as [{ "name", "domain" }].`);
+    const me = { name: company.org, domain: company.domain };
+    const runs = await runCompetitorQuestions(kind, me, competitors, this.d.gapAdapters());
+    const view = buildCompetitorView(kind, me, competitors, runs, iso(this.d.now()));
+    return ok(200, { object: "semanto.competitor_report", view, markdown: renderCompetitorMarkdown(view) });
+  }
+
+  /** GET /os/semanto/{id}/receipts: a day's read receipts as a digest signed by Trooth's witness key, with the dashboard rows. */
+  private async receiptsDigest(trooth_id: string, day?: string): Promise<WorkspaceResult> {
+    if (!this.d.receiptStore) return problem("conflict", "Read receipts are not kept in this deployment.");
+    const d = day ?? utcDay(new Date(this.d.now().getTime() - 24 * 60 * 60 * 1000));
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || Number.isNaN(Date.parse(`${d}T00:00:00Z`))) return problem("invalid_request", "day is YYYY-MM-DD.");
+    const { from, to } = dayBounds(d);
+    const rows = await this.d.receiptStore.list(trooth_id, from, to);
+    const signed = await signDailyDigest(trooth_id, d, rows, await this.d.keys.getWitnessKey(), this.d.now());
+    return ok(200, { object: "semanto.receipts_digest", trooth_id, day: d, digest: signed.digest, jws: signed.jws, rows: dashboardRows(rows) });
+  }
+
+  /** GET /os/semanto/{id}/receipts.csv?from=&to=: the receipts as RFC 4180 CSV (at most 31 days). */
+  private async receiptsCsvRead(trooth_id: string, from?: string, to?: string): Promise<WorkspaceResult> {
+    if (!this.d.receiptStore) return problem("conflict", "Read receipts are not kept in this deployment.");
+    const end = to ? Date.parse(to) : this.d.now().getTime();
+    const start = from ? Date.parse(from) : end - 7 * 24 * 60 * 60 * 1000;
+    if (Number.isNaN(start) || Number.isNaN(end) || start >= end) return problem("invalid_request", "from and to are ISO 8601 times, from before to.");
+    if (end - start > 31 * 24 * 60 * 60 * 1000) return problem("invalid_request", "Ask for at most 31 days at a time.");
+    const rows = await this.d.receiptStore.list(trooth_id, new Date(start).toISOString(), new Date(end).toISOString());
+    return { status: 200, raw: { contentType: "text/csv", text: receiptsCsv(rows) } };
   }
 
   // ---------------------------------------------------------------- the commerce catalog
@@ -749,16 +1096,39 @@ export class Pipeline implements WorkspaceHandlers {
     });
   }
 
-  // ---------------------------------------------------------------- scheduled work
+  // ---------------------------------------------------------------- scheduled work: the crons fan out, one queue message per 25 companies
 
-  /** Hourly: for every signed company, check each signed page cheaply (sitemap lastmod, conditional GET, raw hash) and queue a rebuild of what changed. */
+  /** Enqueue one message per 25 companies, or run them inline without a queue. Answers what ran inline. */
+  private async fanOut<T>(job: CompaniesMessage["job"], ids: string[], inline: (ids: string[]) => Promise<T[]>): Promise<T[]> {
+    const out: T[] = [];
+    for (let i = 0; i < ids.length; i += COMPANIES_PER_MESSAGE) {
+      const chunk = ids.slice(i, i + COMPANIES_PER_MESSAGE);
+      if (this.d.enqueue) await this.d.enqueue({ kind: "companies", job, trooth_ids: chunk });
+      else out.push(...(await inline(chunk)));
+    }
+    return out;
+  }
+
+  /** Hourly: queue change detection for every signed company, and a proof check for every company still proving its domain. */
   async hourlyChangeDetection(): Promise<{ trooth_id: string; changed: string[] }[]> {
+    const signed = (await this.d.store.listCompanies("signed")).map((c) => c.trooth_id);
+    const pending = (await this.d.store.listCompanies("all")).filter((c) => !isDomainProven(c)).map((c) => c.trooth_id);
+    await this.fanOut("proof", pending, async (ids) => {
+      await this.checkPendingProofs(ids);
+      return [];
+    });
+    return this.fanOut("changes", signed, (ids) => this.checkCompanyChanges(ids));
+  }
+
+  /** For these companies, check each signed page cheaply (sitemap lastmod, conditional GET, raw hash) and queue a rebuild of what changed. */
+  async checkCompanyChanges(trooth_ids: string[]): Promise<{ trooth_id: string; changed: string[] }[]> {
     const out: { trooth_id: string; changed: string[] }[] = [];
     const detector = new ChangeDetector(this.fetcher());
-    for (const company of await this.d.store.listCompanies("signed")) {
-      const file = await this.d.versions.getCurrent(company.trooth_id);
-      if (!file) continue;
-      const state = await this.d.store.changeState(company.trooth_id);
+    for (const trooth_id of trooth_ids) {
+      const company = await this.d.store.getCompany(trooth_id);
+      const file = company ? await this.d.versions.getCurrent(trooth_id) : null;
+      if (!company || !file) continue;
+      const state = await this.d.store.changeState(trooth_id);
       const changed: string[] = [];
       const seen = new Set<string>();
       for (const page of file.header.pages_manifest) {
@@ -768,21 +1138,42 @@ export class Pipeline implements WorkspaceHandlers {
         const capture = { etag: prev?.etag ?? null, lastModified: prev?.last_modified ?? null, source_hash: prev?.raw_hash ?? page.source_hash, lastmod: prev?.lastmod ?? null };
         const r = await detector.check(page.url, capture, null);
         if (r.fetch && r.fetch.ok && r.fetch.status === 200) {
-          await this.d.store.putChangeState(company.trooth_id, page.url, { etag: r.fetch.etag, last_modified: r.fetch.lastModified, raw_hash: r.fetch.source_hash, lastmod: prev?.lastmod ?? null, checked_at: r.fetch.fetchedAt });
+          await this.d.store.putChangeState(trooth_id, page.url, { etag: r.fetch.etag, last_modified: r.fetch.lastModified, raw_hash: r.fetch.source_hash, lastmod: prev?.lastmod ?? null, checked_at: r.fetch.fetchedAt });
         }
         if (r.changed) changed.push(page.url);
       }
       if (changed.length) {
-        const job: CompileJob = { trooth_id: company.trooth_id, domain: company.domain, reason: "change_detected", changed_urls: changed, requested_at: iso(this.d.now()) };
+        const job: CompileJob = { trooth_id, domain: company.domain, reason: "change_detected", changed_urls: changed, requested_at: iso(this.d.now()) };
         if (this.d.enqueue) await this.d.enqueue(job);
         else await this.compile(job);
+        await this.promptToSign(company, changed);
       }
-      out.push({ trooth_id: company.trooth_id, changed });
+      out.push({ trooth_id, changed });
     }
     return out;
   }
 
-  /** Nightly: sign a tree head for the current size, anchor it with an RFC 3161 timestamp, and re-sign the revocation list. */
+  /** when_page_changed "prompt_to_sign": the owner is emailed that pages changed and a new version is ready to sign. */
+  private async promptToSign(company: CompanyRecord, changed: string[]): Promise<void> {
+    const settings = (await this.d.settings.get(company.trooth_id)) ?? DEFAULT_SETTINGS;
+    if (settings.when_page_changed !== "prompt_to_sign") return;
+    const to = (await this.d.store.getConfig(company.trooth_id)).alert_emails;
+    if (!to.length || !this.d.monitor.email || !this.d.monitor.from) return;
+    const n = changed.length;
+    const text = `${n} page${n === 1 ? "" : "s"} on ${company.domain} changed after your last signature. Readers get the last signed copy marked behind until you sign the new version.\n\nSign it here: ${this.d.config.network_base}/${company.trooth_id}\n`;
+    await this.d.monitor.email.send({ from: this.d.monitor.from, to, subject: `${n} page${n === 1 ? "" : "s"} on ${company.domain} changed: sign the new version`, text, html: `<p>${text.replace(/\n/g, "<br>")}</p>` });
+  }
+
+  /** For these companies, look for the proof record again (hourly, inside the 72-hour window), so a proof added after the owner left is still found. */
+  async checkPendingProofs(trooth_ids: string[]): Promise<void> {
+    for (const trooth_id of trooth_ids) {
+      const company = await this.d.store.getCompany(trooth_id);
+      if (!company || isDomainProven(company)) continue;
+      await checkProof(this, company, { force: true, background: true });
+    }
+  }
+
+  /** Nightly: sign a tree head, anchor it with an RFC 3161 timestamp, and re-sign every revocation list (each company's and everyone's). */
   async nightlyCheckpoint(): Promise<{ tree_head: { tree_size: number; root_hash: string } | null; timestamp: unknown; revocations: number }> {
     const size = await this.d.log.ledger.size();
     let head = null;
@@ -792,26 +1183,40 @@ export class Pipeline implements WorkspaceHandlers {
       head = { tree_size: signed.tree_size, root_hash: signed.root_hash };
       timestamp = await this.timestamp(signed);
     }
-    const now = this.d.now();
     const entries = await this.d.store.revocations(null);
-    const { jws } = await signRevocationList(entries, null, await this.d.keys.getWitnessKey(), now);
-    await this.d.store.putRevocationList(null, jws, iso(now));
-    await this.d.store.putBlob("semanto/revocations/latest.jws", utf8(jws), "application/jose");
+    await this.resignRevocations(null);
+    for (const trooth_id of new Set((await this.d.store.listCompanies("all")).map((c) => c.trooth_id))) await this.resignRevocations(trooth_id);
     return { tree_head: head, timestamp, revocations: entries.length };
   }
 
-  /** Weekly (WEEKLY_RUN.cron): the gap report for every signed company, for the kinds it asked for. */
+  /** Sign and store the revocation list for one company (or everyone with null), 24 hours valid. */
+  async resignRevocations(trooth_id: string | null): Promise<{ jws: string; issued_at: string }> {
+    const now = this.d.now();
+    const entries = await this.d.store.revocations(trooth_id);
+    const { jws } = await signRevocationList(entries, trooth_id, await this.d.keys.getWitnessKey(), now);
+    await this.d.store.putRevocationList(trooth_id, jws, iso(now));
+    await this.d.store.putBlob(trooth_id ? `semanto/${trooth_id}/revocations/latest.jws` : "semanto/revocations/latest.jws", utf8(jws), "application/jose");
+    return { jws, issued_at: iso(now) };
+  }
+
+  /** Weekly (WEEKLY_RUN.cron): queue the gap reports, one message per 25 signed companies. */
   async weeklyGapReports(): Promise<{ trooth_id: string; kinds: QuestionKind[]; errors: string[] }[]> {
+    const ids = (await this.d.store.listCompanies("signed")).map((c) => c.trooth_id);
+    return this.fanOut("gap", ids, (chunk) => this.gapReportsFor(chunk));
+  }
+
+  /** The gap report for these companies, for the kinds each asked for. */
+  async gapReportsFor(trooth_ids: string[]): Promise<{ trooth_id: string; kinds: QuestionKind[]; errors: string[] }[]> {
     const out: { trooth_id: string; kinds: QuestionKind[]; errors: string[] }[] = [];
-    for (const company of await this.d.store.listCompanies("signed")) {
-      const config = await this.d.store.getConfig(company.trooth_id);
+    for (const trooth_id of trooth_ids) {
+      const config = await this.d.store.getConfig(trooth_id);
       const kinds = (config.gap.kinds.length ? config.gap.kinds : WEEKLY_RUN.kinds.slice(0, 1)).filter((k) => (k === "shopping" ? config.gap.products.length > 0 : k === "competitor" ? Boolean(config.gap.competitor) : true));
       const errors: string[] = [];
       for (const kind of kinds) {
-        const r = await this.gapReport(company.trooth_id, { kind });
+        const r = await this.gapReport(trooth_id, { kind });
         if (r.problem) errors.push(`${kind}: ${r.problem.detail}`);
       }
-      out.push({ trooth_id: company.trooth_id, kinds, errors });
+      out.push({ trooth_id, kinds, errors });
     }
     return out;
   }
@@ -828,9 +1233,11 @@ export class Pipeline implements WorkspaceHandlers {
       weeklyGapReports: async () => {
         await this.weeklyGapReports();
       },
-      compile: async (job: unknown) => {
-        if (!isRecord(job) || typeof job.trooth_id !== "string") throw new Error("compile: the message is not a CompileJob");
-        await this.compile(job as unknown as CompileJob);
+      compile: async (message: unknown) => {
+        await this.consume(message);
+      },
+      failed: async (message: unknown, e: unknown) => {
+        await this.consumeFailed(message, e);
       },
     };
   }
@@ -1010,29 +1417,18 @@ export const TROOTH_OS_SESSION_URL = "https://trooth-os-worker-f/auth/session";
 const ROLES: WorkspaceRole[] = ["owner", "admin", "member", "viewer"];
 
 /**
- * Accept a workspace bearer token by asking worker-f's session check through
- * the TROOTH_OS service binding (GET /auth/session in worker-f app-api.ts,
- * read 22 Oct 2026). That route answers { authenticated, companyId, userId,
- * email, role } where role is the account type, "vendor" or "buyer", and,
- * once worker-f has team seats, workspaceRole (owner, admin, member, viewer).
- *
- *   workspaceRole present   it is the role, as worker-f states it
- *   absent, vendor account  owner only when userId is the company's registered
- *                           owner (semanto_companies.os_owner_user_id, set when
- *                           the company is created or claimed); every other
- *                           vendor session is a member
- *   buyer account           refused: it has no company to act for
- *
- * The worker-f companyId is mapped to the Semanto trooth_id through
- * semanto_companies.os_company_id (migration 0003), never guessed from a
- * name. Deny (null) when there is no binding, no token, a refused session, an
- * unmapped company, or a buyer account.
+ * Read a worker-f session through the TROOTH_OS service binding (GET
+ * /auth/session in worker-f app-api.ts, read 22 Oct 2026). That route answers
+ * { authenticated, companyId, userId, email, role } where role is the account
+ * type, "vendor" or "buyer", and, once worker-f has team seats, workspaceRole
+ * (owner, admin, member, viewer); companySlug (the app_company_profile slug)
+ * and signedInAt when it sends them. Null when there is no binding, no token,
+ * a refused session, or a buyer account (it has no company to act for). This
+ * is the claim variant of authorization: a valid session with no Semanto
+ * company yet (POST /os/semanto/claim, POST /os/semanto/setup/start, GET
+ * /os/semanto/setup).
  */
-export function troothOsAuthorize(
-  service: ServiceFetcher | undefined,
-  troothIdForCompany: (os_company_id: string) => Promise<string | null> = async () => null,
-  ownerUserIdFor: (trooth_id: string) => Promise<string | null> = async () => null,
-): (req: Request, trooth_id: string) => Promise<WorkspaceAuth | null> {
+export function troothOsSession(service: ServiceFetcher | undefined): (req: Request) => Promise<WorkspaceSession | null> {
   return async (req) => {
     if (!service) return null;
     const auth = req.headers.get("authorization");
@@ -1055,17 +1451,51 @@ export function troothOsAuthorize(
     if (!companyId) return null;
     const accountType = str(j.role) ?? "vendor";
     if (accountType !== "vendor") return null;
-    const trooth_id = await troothIdForCompany(companyId);
-    if (!trooth_id) return null;
-    const user_id = str(j.userId) ?? "unknown";
     const stated = str(j.workspaceRole) as WorkspaceRole | undefined;
+    const signedIn = str(j.signedInAt);
+    const email = str(j.email) ?? null;
+    return {
+      os_company_id: companyId,
+      user_id: str(j.userId) ?? "unknown",
+      name: email ?? "Workspace member",
+      role: stated !== undefined && ROLES.includes(stated) ? stated : null,
+      company_slug: str(j.companySlug) ?? null,
+      signed_in_at: signedIn && !Number.isNaN(Date.parse(signedIn)) ? new Date(signedIn).toISOString() : null,
+      email,
+    };
+  };
+}
+
+/**
+ * Accept a workspace bearer token for a company's /os routes: the session
+ * (troothOsSession) mapped to the company through
+ * semanto_companies.os_company_id, which the claim writes, never guessed from
+ * a name.
+ *
+ *   workspaceRole present   it is the role, as worker-f states it
+ *   absent                  owner only when userId is the company's registered
+ *                           owner (semanto_companies.os_owner_user_id, set by
+ *                           the claim); every other vendor session is a member
+ *
+ * Deny (null) when there is no session or the session's company is not mapped.
+ */
+export function troothOsAuthorize(
+  service: ServiceFetcher | undefined,
+  troothIdForCompany: (os_company_id: string) => Promise<string | null> = async () => null,
+  ownerUserIdFor: (trooth_id: string) => Promise<string | null> = async () => null,
+): (req: Request, trooth_id: string) => Promise<WorkspaceAuth | null> {
+  const session = troothOsSession(service);
+  return async (req) => {
+    const s = await session(req);
+    if (!s) return null;
+    const trooth_id = await troothIdForCompany(s.os_company_id);
+    if (!trooth_id) return null;
     let role: WorkspaceRole;
-    if (stated !== undefined && ROLES.includes(stated)) role = stated;
+    if (s.role) role = s.role;
     else {
       const owner = await ownerUserIdFor(trooth_id);
-      role = owner !== null && user_id !== "unknown" && owner === user_id ? "owner" : "member";
+      role = owner !== null && s.user_id !== "unknown" && owner === s.user_id ? "owner" : "member";
     }
-    const name = str(j.email) ?? "Workspace member";
-    return { trooth_id, role, user_id, name };
+    return { trooth_id, role, user_id: s.user_id, name: s.name };
   };
 }

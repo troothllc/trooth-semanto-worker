@@ -120,23 +120,23 @@ export function summarize(troothId: string, day: string, receipts: Receipt[]): D
   const rows = receipts.filter((r) => r.trooth_id === troothId && r.read_at >= from && r.read_at < to).sort((a, b) => (a.read_at < b.read_at ? -1 : a.read_at > b.read_at ? 1 : a.id < b.id ? -1 : 1));
   const count = <K extends string | null>(key: (r: Receipt) => K): Map<K, number> => {
     const m = new Map<K, number>();
-    for (const r of rows) m.set(key(r), (m.get(key(r)) ?? 0) + 1);
+    for (const r of rows) m.set(key(r), (m.get(key(r)) ?? 0) + (r.count ?? 1));
     return m;
   };
   const agents = new Map<string, { agent_key_url: string | null; proof: "web_bot_auth" | "none"; count: number }>();
   for (const r of rows) {
     const k = r.proof === "web_bot_auth" && r.agent_key_url ? `p:${r.agent_key_url}` : "u";
     const e = agents.get(k) ?? { agent_key_url: r.proof === "web_bot_auth" ? r.agent_key_url : null, proof: r.proof === "web_bot_auth" ? "web_bot_auth" : "none", count: 0 };
-    e.count++;
+    e.count += r.count ?? 1;
     agents.set(k, e);
   }
   const sortDesc = <T extends { count: number }>(xs: T[]) => xs.sort((a, b) => b.count - a.count);
   return {
     trooth_id: troothId,
     day,
-    total: rows.length,
-    proven: rows.filter((r) => r.proof === "web_bot_auth").length,
-    unproven: rows.filter((r) => r.proof !== "web_bot_auth").length,
+    total: rows.reduce((n, r) => n + (r.count ?? 1), 0),
+    proven: rows.filter((r) => r.proof === "web_bot_auth").reduce((n, r) => n + (r.count ?? 1), 0),
+    unproven: rows.filter((r) => r.proof !== "web_bot_auth").reduce((n, r) => n + (r.count ?? 1), 0),
     by_agent: sortDesc([...agents.values()]),
     by_page: sortDesc([...count((r) => r.page_id)].map(([page_id, c]) => ({ page_id, count: c }))),
     by_representation: sortDesc([...count((r) => r.representation)].map(([representation, c]) => ({ representation, count: c }))),
@@ -186,7 +186,7 @@ export function dashboardRows(receipts: Receipt[], known?: Record<string, string
       last_read_at: r.read_at,
       pageSet: new Set<string>(),
     };
-    e.reads++;
+    e.reads += r.count ?? 1;
     if (r.page_id) e.pageSet.add(r.page_id);
     if (r.read_at > e.last_read_at) e.last_read_at = r.read_at;
     rows.set(key, e);
@@ -198,7 +198,7 @@ export function dashboardRows(receipts: Receipt[], known?: Record<string, string
 
 // ---------------------------------------------------------------- CSV export
 
-export const CSV_COLUMNS = ["id", "trooth_id", "version", "page_id", "representation", "agent_key_url", "keyid", "proof", "read_at", "ip_hash"] as const;
+export const CSV_COLUMNS = ["id", "trooth_id", "version", "page_id", "representation", "agent_key_url", "keyid", "proof", "read_at", "ip_hash", "count"] as const;
 
 function csvCell(v: unknown): string {
   if (v === null || v === undefined) return "";
@@ -211,6 +211,6 @@ function csvCell(v: unknown): string {
 /** RFC 4180 CSV, one row per receipt, CRLF line ends, a header row. The ip_hash column is the salted hash, never an address. */
 export function receiptsCsv(receipts: Receipt[]): string {
   const lines = [CSV_COLUMNS.join(",")];
-  for (const r of receipts) lines.push(CSV_COLUMNS.map((c) => csvCell(r[c])).join(","));
+  for (const r of receipts) lines.push(CSV_COLUMNS.map((c) => csvCell(c === "count" ? (r.count ?? 1) : r[c])).join(","));
   return lines.join("\r\n") + "\r\n";
 }

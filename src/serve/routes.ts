@@ -12,7 +12,16 @@
 // log routes answer in the shapes docs/spec/log.md states, over the ledger.
 // Workspace routes (/os) are denied by default: without an authorize hook, or
 // without a session it accepts, they answer a 401 problem; the work itself is
-// done by src/pipeline.ts behind RouteDeps.workspace.
+// done by src/pipeline.ts behind RouteDeps.workspace. Every /os answer carries
+// Cache-Control: private, no-store (RFC 9111). Every POST body is capped at
+// 5 MB (a 413 problem). Public routes pass a per-client token bucket first
+// (a 429 problem with Retry-After). A thrown handler answers a signed 500
+// problem, and malformed percent-encoding a signed 400; only a deployment
+// with no witness key answers unsigned (a 503 problem), because the key that
+// signs is the one missing. The company's delivery settings apply: a format
+// turned off is a 404 problem, and a page whose live copy changed follows
+// when_page_changed. Nothing is served for a company whose domain is not
+// proven (docs/spec/setup-api.md).
 
 import { Hono, type Context } from "hono";
 import { utf8 } from "../core/encoding";
@@ -28,12 +37,38 @@ import { checkAgainstRecord, type FirstPublicationDocument, type FirstPublicatio
 import { negotiateRoute } from "./negotiate-route";
 import { buildPageProof, verifyUrl } from "./proof";
 import { factsJsonLd, manifestMarkdown, pageJsonLd, wellKnownSemanto } from "./represent";
-import type { CompanyRecord, Ports, ReceiptInput, StoredPage, WorkspaceAction, WorkspaceAuth, WorkspaceHandlers, WorkspaceResult } from "./ports";
+import { isDomainProven, WitnessKeyMissingError, WORKSPACE_ACTIONS, type CompanyRecord, type Ports, type ReceiptInput, type StoredPage, type WorkspaceAction, type WorkspaceAuth, type WorkspaceHandlers, type WorkspaceRead, type WorkspaceResult, type WorkspaceSession } from "./ports";
+import { problemJson } from "./errors";
+import { isAuthorized } from "../commerce/sellers";
+import { verifyCatalog } from "../commerce/nested";
+import { lookupSubstance, synonymsOf } from "../commerce/synonyms";
+import { fromBase64Url } from "../core/encoding";
 import type { CommerceStore } from "../commerce/ports";
 import { feedResponse, offerResponse, offersResponse, problemMarkdown, productResponse, productsResponse, ucpManifestResponse, type PlainResponse as CommerceResponse } from "../commerce/routes";
 import { resolve as resolveDelivery, validateSettings, withDefaults, DEFAULT_SETTINGS, type DeliverySettings } from "../settings/delivery";
 
 type Vars = { Variables: { receipt?: ReceiptInput } };
+
+/** The only origin a browser may call the /os routes from: the dashboard. Public routes stay open to every origin. */
+export const DASHBOARD_ORIGIN = "https://trooth.co";
+
+/** readJson's answer for a body over the cap. */
+const TOO_LARGE = Symbol("too_large");
+
+/** The route groups the rate limit counts separately. */
+export type RouteGroup = "read" | "log" | "check";
+
+/** The largest body any POST route reads. */
+export const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
+/** Decode one path segment; null when its percent-encoding is malformed. */
+export function safeDecode(v: string): string | null {
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return null;
+  }
+}
 export type ServeApp = Hono<Vars>;
 
 interface Signer {
@@ -56,10 +91,14 @@ export interface RouteDeps {
   workspace?: WorkspaceHandlers;
   /** Product records, offers and feeds for the commerce public routes. */
   commerce?: CommerceStore;
-  /** Per-reader rate limit, when wired. */
-  rateLimit?: (req: Request) => Promise<{ allowed: boolean; retry_after: number }>;
+  /** Per-client token bucket for public routes, by route group (src/readers/rate-limit.ts). */
+  rateLimit?: (req: Request, group: RouteGroup) => Promise<{ allowed: boolean; retry_after: number }>;
+  /** worker-f's session check without a company mapping: the claim routes (POST /os/semanto/claim, setup/start, GET setup). */
+  session?: (req: Request) => Promise<WorkspaceSession | null>;
   /** First-publication records (src/basic/first-publication.ts), for the public record and check routes. */
   firstPublications?: { get(record_id: string): Promise<FirstPublicationRecord | null> };
+  /** The newest signed revocation list for a company, or for everyone with null. */
+  revocations?: (trooth_id: string | null) => Promise<{ jws: string; issued_at: string } | null>;
 }
 
 /** The request pieces the handlers read. Never the user agent. */
@@ -77,6 +116,7 @@ export function createApp(deps: RouteDeps): ServeApp {
   const app = new Hono<Vars>();
   const base = ports.config.public_api_base;
   const apiPrefix = new URL(base).pathname.replace(/\/$/, "");
+  const osPrefix = apiPrefix.replace(/\/public\//, "/os/");
 
   // ------------------------------------------------------------ helpers
 
@@ -130,7 +170,10 @@ export function createApp(deps: RouteDeps): ServeApp {
   }
 
   async function send(c: Context<Vars>, spec: Omit<ResponseSpec, "now">): Promise<Response> {
-    const p = await buildResponse({ ...spec, now: ports.now() }, { ifNoneMatch: requestHints(c).ifNoneMatch });
+    // A workspace answer is for one session: never stored by a shared cache.
+    const workspace = new URL(c.req.url).pathname.startsWith(`${osPrefix}/`);
+    const extra = workspace ? { ...(spec.extra ?? {}), "Cache-Control": "private, no-store", "Access-Control-Allow-Origin": DASHBOARD_ORIGIN, Vary: "Accept, Origin" } : spec.extra;
+    const p = await buildResponse({ ...spec, ...(extra ? { extra } : {}), now: ports.now() }, { ifNoneMatch: workspace ? null : requestHints(c).ifNoneMatch });
     return toResponse(p);
   }
 
@@ -192,6 +235,8 @@ export function createApp(deps: RouteDeps): ServeApp {
     if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");
     const company = await ports.versions.getCompany(trooth_id);
     if (!company) return sendProblem(c, null, null, "semanto_not_found");
+    // Nothing is served before the company proves its domain (finding 2).
+    if (!isDomainProven(company)) return sendProblem(c, company, null, "semanto_not_signed", { detail: "This company has not proven control of its domain yet. Nothing is served before that." });
     const file = await ports.versions.getCurrent(trooth_id);
     if (!file) return sendProblem(c, company, null, "semanto_not_signed");
     return { company, file, settings: await settingsFor(trooth_id), signer: await signerFor(company) };
@@ -201,18 +246,37 @@ export function createApp(deps: RouteDeps): ServeApp {
 
   // ------------------------------------------------------------ middleware
 
+  app.onError(async (err, c) => {
+    // No witness key: nothing can be signed, so this one answer goes out unsigned, and says why.
+    if (err instanceof WitnessKeyMissingError) {
+      const p = problem("witness_key_missing", { instance: new URL(c.req.url).pathname });
+      return new Response(problemJson(p), { status: p.status, headers: { "Content-Type": "application/problem+json", "Cache-Control": "no-store", "Retry-After": "300", "Access-Control-Allow-Origin": "*" } });
+    }
+    try {
+      return await sendProblem(c, null, null, "internal_error");
+    } catch {
+      const p = problem("internal_error", { instance: new URL(c.req.url).pathname });
+      return new Response(problemJson(p), { status: p.status, headers: { "Content-Type": "application/problem+json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" } });
+    }
+  });
+
   app.use("*", async (c, next) => {
     const hints = requestHints(c);
     if (hints.contract && hints.contract !== "1") return sendProblem(c, null, null, "unsupported_contract_version");
-    if (deps.rateLimit) {
-      const r = await deps.rateLimit(c.req.raw);
+    const path = new URL(c.req.url).pathname;
+    // Malformed percent-encoding anywhere in the path: a signed 400, never a thrown 500.
+    if (path.split("/").some((seg) => safeDecode(seg) === null)) return sendProblem(c, null, null, "invalid_request", { detail: "The address has a malformed percent-encoding." });
+    if (c.req.method === "POST" && Number(c.req.header("content-length") ?? "0") > MAX_BODY_BYTES) return sendProblem(c, null, null, "payload_too_large", { detail: "The body is larger than 5 MB. Send it in smaller parts." });
+    if (deps.rateLimit && c.req.method !== "OPTIONS" && !path.startsWith(`${osPrefix}/`)) {
+      const group: RouteGroup = path.startsWith(`${apiPrefix}/log/`) ? "log" : path === `${apiPrefix}/verify` || path.endsWith("/check") ? "check" : "read";
+      const r = await deps.rateLimit(c.req.raw, group);
       if (!r.allowed) return sendProblem(c, null, null, "rate_limited", { retry_after: r.retry_after });
     }
     if (c.req.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
         headers: {
-          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Origin": path.startsWith(`${osPrefix}/`) ? DASHBOARD_ORIGIN : "*",
           "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
           "Access-Control-Allow-Headers": "Accept, Authorization, Content-Type, Content-Digest, If-None-Match, Signature, Signature-Input, Signature-Agent, Trooth-Contract",
           "Access-Control-Max-Age": "86400",
@@ -293,6 +357,70 @@ export function createApp(deps: RouteDeps): ServeApp {
     });
   });
 
+  // ------------------------------------------------------------ Trooth's witness keys and revocation lists (before /:trooth_id)
+
+  /** Trooth's witness JWK Set, revocations honored: a revoked key keeps its revoked_at, so a verifier judges it at the signature's iat. */
+  const serveTroothKeys = async (c: Context<Vars>) => send(c, { status: 200, rep: "json", body: json(await ports.keys.getWitnessPublicKeys()), version_id: null, links: {}, signer: await witnessSigner() });
+  app.get(`${apiPrefix}/.well-known/trooth-keys.json`, serveTroothKeys);
+  app.get(`${apiPrefix}/keys/trooth.json`, serveTroothKeys);
+
+  async function serveRevocations(c: Context<Vars>, trooth_id: string | null): Promise<Response> {
+    if (!deps.revocations) return sendProblem(c, null, null, "semanto_not_found", { detail: "No revocation list is served here." });
+    const list = await deps.revocations(trooth_id);
+    if (!list) return sendProblem(c, null, null, "semanto_not_found", { detail: "No revocation list has been signed yet." });
+    let payload: unknown = null;
+    try {
+      payload = JSON.parse(new TextDecoder().decode(fromBase64Url(list.jws.split(".")[1] ?? "")));
+    } catch {
+      payload = null;
+    }
+    return send(c, { status: 200, rep: "json", body: json({ object: "semanto.revocation_list", trooth_id, jws: list.jws, list: payload }), version_id: null, links: {}, signer: await witnessSigner() });
+  }
+  app.get(`${apiPrefix}/revocations`, (c) => serveRevocations(c, null));
+  app.get(`${apiPrefix}/:trooth_id/revocations`, async (c) => {
+    const trooth_id = c.req.param("trooth_id");
+    if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");
+    if (!(await ports.versions.getCompany(trooth_id))) return sendProblem(c, null, null, "semanto_not_found");
+    return serveRevocations(c, trooth_id);
+  });
+
+  // ------------------------------------------------------------ commerce checks: nested marketplace catalogs, sellers, synonyms
+
+  app.post(`${apiPrefix}/catalogs/check`, async (c) => {
+    const input = await readJson(c);
+    if (input === TOO_LARGE) return sendProblem(c, null, null, "payload_too_large", { detail: "The body is larger than 5 MB." });
+    const jws = input && typeof input === "object" ? (input as { jws?: unknown }).jws : undefined;
+    if (typeof jws !== "string" || jws.split(".").length !== 3) return sendProblem(c, null, null, "invalid_request", { detail: 'Send { "jws": "<compact JWS of a marketplace catalog>" } as JSON.' });
+    // The catalog names its marketplace; its key is looked up among that company's keys only.
+    let marketplace = "";
+    try {
+      marketplace = String((JSON.parse(new TextDecoder().decode(fromBase64Url(jws.split(".")[1]!))) as { marketplace_trooth_id?: unknown }).marketplace_trooth_id ?? "");
+    } catch {
+      marketplace = "";
+    }
+    const result = await verifyCatalog(jws, { marketplace: (kid) => (isTroothId(marketplace) ? ports.keys.resolveCompany(marketplace, kid) : null), seller: (sid, kid) => ports.keys.resolveCompany(sid, kid) }, { at: ports.now() });
+    return witnessSend(c, { object: "semanto.catalog_check", ...result });
+  });
+
+  app.get(`${apiPrefix}/:trooth_id/sellers`, async (c) => {
+    const trooth_id = c.req.param("trooth_id");
+    if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");
+    const company = await ports.versions.getCompany(trooth_id);
+    if (!company || !deps.commerce) return sendProblem(c, null, null, "semanto_not_found");
+    const domain = (c.req.query("domain") ?? "").toLowerCase();
+    const sku = c.req.query("sku") ?? "";
+    if (!domain || !sku) return sendProblem(c, company, null, "invalid_request", { detail: "Send the seller's domain and the sku as domain= and sku=." });
+    const answer = isAuthorized({ trooth_id, attestations: await deps.commerce.attestations(trooth_id) }, domain, sku, ports.now());
+    return send(c, { status: 200, rep: "json", body: json({ object: "semanto.seller_authorization", ...answer }), version_id: null, links: links(company, null), signer: await signerFor(company) });
+  });
+
+  app.get(`${apiPrefix}/:trooth_id/synonyms`, async (c) => {
+    const name = c.req.query("name") ?? "";
+    if (!name.trim() || name.length > 200) return sendProblem(c, null, null, "invalid_request", { detail: "Send the substance or attribute name as name=." });
+    const group = lookupSubstance(name);
+    return witnessSend(c, { object: "semanto.synonyms", name, group: group ? group.canonical : null, synonyms: synonymsOf(name) });
+  });
+
   // ------------------------------------------------------------ first publication (before /:trooth_id)
 
   /** The record, its JWS and its inclusion proof in the log against the latest tree head. */
@@ -308,10 +436,13 @@ export function createApp(deps: RouteDeps): ServeApp {
     return { object: "semanto.first_publication_record", record: r.record, jws: r.jws, leaf: r.leaf, leaf_hash: r.leaf_hash, inclusion, check_url: `${base}/first-publication/check` };
   }
 
-  const witnessSend = async (c: Context<Vars>, value: unknown): Promise<Response> => send(c, { status: 200, rep: "json", body: json(value), version_id: null, links: {}, signer: { key: await ports.keys.getWitnessKey(), by: "witness" } });
+  async function witnessSend(c: Context<Vars>, value: unknown): Promise<Response> {
+    return send(c, { status: 200, rep: "json", body: json(value), version_id: null, links: {}, signer: { key: await ports.keys.getWitnessKey(), by: "witness" } });
+  }
 
   app.post(`${apiPrefix}/first-publication/check`, async (c) => {
     const input = await readJson(c);
+    if (input === TOO_LARGE) return sendProblem(c, null, null, "payload_too_large", { detail: "The body is larger than 5 MB." });
     if (!input || typeof input !== "object") return sendProblem(c, null, null, "invalid_request", { detail: 'Send { "record_id": "<the smb_ record id>", "markdown": "<the text>" } as JSON.' });
     const { record_id, markdown } = input as { record_id?: unknown; markdown?: unknown };
     if (typeof record_id !== "string" || typeof markdown !== "string") return sendProblem(c, null, null, "invalid_request", { detail: 'Send { "record_id": "<the smb_ record id>", "markdown": "<the text>" } as JSON.' });
@@ -379,10 +510,19 @@ export function createApp(deps: RouteDeps): ServeApp {
 
   type Loaded = { company: CompanyRecord; file: SemantoFile; settings: DeliverySettings; signer: Signer };
 
+  /** A format the company turned off in its delivery settings (formats): a 404 problem for that representation. */
+  const formatOff = (c: Context<Vars>, r: Loaded, what: string) => sendProblem(c, r.company, r.file, "representation_not_offered", { detail: `${r.company.org} turned ${what} off in its delivery settings.` });
+
   async function servePage(c: Context<Vars>, r: Loaded, page: StoredPage, rep: "markdown" | "jsonld"): Promise<Response> {
     const { company, file, settings, signer } = r;
+    if (rep === "markdown" && !settings.formats.markdown) return formatOff(c, r, "markdown pages");
+    if (rep === "jsonld" && !settings.formats.jsonld) return formatOff(c, r, "JSON-LD");
     const vid = versionId(file.root_hash);
     const behind = page.live === "behind" && !isBasic(file);
+    // serve_live_marked_unsigned: the reader is sent to the current page on the company's site, which carries no signature.
+    if (behind && rep === "markdown" && settings.when_page_changed === "serve_live_marked_unsigned") {
+      return send(c, { status: 303, rep: "markdown", body: new Uint8Array(0), version_id: vid, location: page.entry.url, links: links(company, file, page), signer, state: "unsigned" });
+    }
     const markdownText = new TextDecoder().decode(page.bytes);
     let body: Uint8Array;
     let served: ServedRepresentation;
@@ -454,6 +594,7 @@ export function createApp(deps: RouteDeps): ServeApp {
   // ------------------------------------------------------------ facts, llms, sitemap
 
   async function serveFacts(c: Context<Vars>, r: Loaded): Promise<Response> {
+    if (!r.settings.formats.jsonld) return formatOff(c, r, "JSON-LD");
     const stored = await ports.versions.getJsonLd(r.company.trooth_id);
     const body = stored ?? json(factsJsonLd(r.file, ports.config));
     recordReceipt(c, { trooth_id: r.company.trooth_id, version: r.file.header.version, page_id: null, representation: "jsonld" });
@@ -461,6 +602,7 @@ export function createApp(deps: RouteDeps): ServeApp {
   }
 
   async function serveLlms(c: Context<Vars>, r: Loaded, kind: "llms" | "llms-full" | "sitemap"): Promise<Response> {
+    if (kind === "sitemap" ? !r.settings.formats.sitemap_md : !r.settings.formats.llms) return formatOff(c, r, kind === "sitemap" ? "sitemap.md" : "llms.txt and llms-full.txt");
     let body = await ports.versions.getLlms(r.company.trooth_id, kind);
     if (!body) {
       const pages = new Map<string, string>();
@@ -568,8 +710,6 @@ export function createApp(deps: RouteDeps): ServeApp {
 
   // ------------------------------------------------------------ workspace: settings (section D)
 
-  const osPrefix = apiPrefix.replace(/\/public\//, "/os/");
-
   /** Deny by default: no hook, no session or a refused session is a 401 problem; a session for another company is a 403 problem. */
   async function workspaceFor(c: Context<Vars>, trooth_id: string): Promise<WorkspaceAuth | Response> {
     if (!deps.authorize) return sendProblem(c, null, null, "unauthorized");
@@ -579,6 +719,29 @@ export function createApp(deps: RouteDeps): ServeApp {
     if (answer.trooth_id !== trooth_id) return sendProblem(c, null, null, "forbidden", { detail: `This session belongs to ${answer.trooth_id}, not ${trooth_id}.` });
     return answer;
   }
+
+  // The claim routes: a worker-f session with no Semanto company yet (docs/spec/setup-api.md).
+  async function sessionFor(c: Context<Vars>): Promise<WorkspaceSession | Response> {
+    if (!deps.session) return sendProblem(c, null, null, "unauthorized");
+    const s = await deps.session(c.req.raw);
+    if (!s) return sendProblem(c, null, null, "unauthorized");
+    return s;
+  }
+  const sessionRoute = (method: "get" | "post", path: string, what: "claim" | "setup/start" | "setup") =>
+    app[method](`${osPrefix}/${path}`, async (c) => {
+      const s = await sessionFor(c);
+      if (s instanceof Response) return s;
+      if (!deps.workspace?.session) return sendProblem(c, null, null, "conflict", { detail: "The pipeline is not wired in this deployment." });
+      const input = method === "post" ? await readJson(c) : {};
+      if (input === TOO_LARGE) return sendProblem(c, null, null, "payload_too_large", { detail: "The body is larger than 5 MB." });
+      if (input === undefined) return sendProblem(c, null, null, "invalid_request", { detail: "The body is not JSON." });
+      const result = await deps.workspace.session(what, s, input);
+      const tid = result.body && typeof result.body === "object" ? (result.body as { trooth_id?: unknown }).trooth_id : null;
+      return sendWorkspace(c, typeof tid === "string" ? tid : "", result);
+    });
+  sessionRoute("get", "setup", "setup");
+  sessionRoute("post", "setup/start", "setup/start");
+  sessionRoute("post", "claim", "claim");
 
   app.get(`${osPrefix}/:trooth_id/settings`, async (c) => {
     const trooth_id = c.req.param("trooth_id");
@@ -600,12 +763,9 @@ export function createApp(deps: RouteDeps): ServeApp {
     if (ws.role !== "owner" && ws.role !== "admin") return sendProblem(c, null, null, "forbidden", { detail: "Only an owner or admin can change delivery settings." });
     const company = await ports.versions.getCompany(trooth_id);
     if (!company) return sendProblem(c, null, null, "semanto_not_found");
-    let input: unknown;
-    try {
-      input = await c.req.json();
-    } catch {
-      input = null;
-    }
+    const input = await readJson(c);
+    if (input === TOO_LARGE) return sendProblem(c, null, null, "payload_too_large", { detail: "The body is larger than 5 MB." });
+    if (input === undefined) return sendProblem(c, null, null, "invalid_request", { detail: "The body is not JSON." });
     const merged = withDefaults((input ?? {}) as Partial<DeliverySettings>);
     const issues = validateSettings(merged);
     const file = await ports.versions.getCurrent(trooth_id);
@@ -621,11 +781,15 @@ export function createApp(deps: RouteDeps): ServeApp {
     const company = await ports.versions.getCompany(trooth_id);
     const file = company ? await ports.versions.getCurrent(trooth_id) : null;
     if (result.problem) return sendProblem(c, company, file, result.problem.code, { detail: result.problem.detail });
-    return send(c, { status: result.status, rep: "json", body: json(result.body ?? null), version_id: file ? versionId(file.root_hash) : null, links: company ? links(company, file) : {}, signer: await signerFor(company), extra: result.headers });
+    if (result.raw) return send(c, { status: result.status, rep: "csv", body: utf8(result.raw.text), version_id: file ? versionId(file.root_hash) : null, signer: await signerFor(company), ...(result.headers ? { extra: result.headers } : {}) });
+    return send(c, { status: result.status, rep: "json", body: json(result.body ?? null), version_id: file ? versionId(file.root_hash) : null, links: company ? links(company, file) : {}, signer: await signerFor(company), ...(result.headers ? { extra: result.headers } : {}) });
   }
 
+  /** The body as JSON, read up to 5 MB. undefined when it is not JSON; "too_large" when it is over the cap. */
   async function readJson(c: Context<Vars>): Promise<unknown> {
-    const text = await c.req.text();
+    const bytes = await readCapped(c.req.raw, MAX_BODY_BYTES);
+    if (bytes === null) return TOO_LARGE;
+    const text = new TextDecoder().decode(bytes);
     if (!text.trim()) return {};
     try {
       return JSON.parse(text) as unknown;
@@ -642,10 +806,44 @@ export function createApp(deps: RouteDeps): ServeApp {
       if (ws instanceof Response) return ws;
       if (!deps.workspace) return sendProblem(c, null, null, "conflict", { detail: "The pipeline is not wired in this deployment." });
       const input = await readJson(c);
+      if (input === TOO_LARGE) return sendProblem(c, null, null, "payload_too_large", { detail: "The body is larger than 5 MB." });
       if (input === undefined) return sendProblem(c, null, null, "invalid_request", { detail: "The body is not JSON." });
       return sendWorkspace(c, trooth_id, await deps.workspace.handle(action, ws, trooth_id, input));
     });
-  for (const action of ["build", "sign", "gap-report", "monitor/run", "keys/rotate", "lei", "basic/claim", "basic/prove", "first-publication", "connectors"] as WorkspaceAction[]) actionRoute(action);
+  for (const action of WORKSPACE_ACTIONS) actionRoute(action);
+
+  // GET workspace routes: the setup state, the review, keys, write-back previews, receipts.
+  const readRoute = (path: string, what: WorkspaceRead) =>
+    app.get(`${osPrefix}/:trooth_id/${path}`, async (c) => {
+      const trooth_id = c.req.param("trooth_id");
+      if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");
+      const ws = await workspaceFor(c, trooth_id);
+      if (ws instanceof Response) return ws;
+      if (!deps.workspace?.read) return sendProblem(c, null, null, "conflict", { detail: "The pipeline is not wired in this deployment." });
+      const q: Record<string, string> = {};
+      new URL(c.req.url).searchParams.forEach((v, k) => {
+        q[k] = v;
+      });
+      return sendWorkspace(c, trooth_id, await deps.workspace.read(what, ws, trooth_id, q));
+    });
+  readRoute("setup", "setup");
+  readRoute("setup/review", "setup/review");
+  readRoute("keys", "keys");
+  readRoute("writeback", "writeback");
+  readRoute("receipts", "receipts");
+  readRoute("receipts.csv", "receipts.csv");
+
+  app.post(`${osPrefix}/:trooth_id/keys/:kid/revoke`, async (c) => {
+    const trooth_id = c.req.param("trooth_id");
+    if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");
+    const ws = await workspaceFor(c, trooth_id);
+    if (ws instanceof Response) return ws;
+    if (!deps.workspace?.revokeKey) return sendProblem(c, null, null, "conflict", { detail: "The pipeline is not wired in this deployment." });
+    const input = await readJson(c);
+    if (input === TOO_LARGE) return sendProblem(c, null, null, "payload_too_large", { detail: "The body is larger than 5 MB." });
+    if (input === undefined) return sendProblem(c, null, null, "invalid_request", { detail: "The body is not JSON." });
+    return sendWorkspace(c, trooth_id, await deps.workspace.revokeKey(ws, trooth_id, c.req.param("kid") ?? "", input));
+  });
 
   // The commerce connectors (WordPress plugin, Shopify, BigCommerce, Salesforce Commerce scripts) post here, signed with RFC 9421 (tag trooth-connector).
   app.post(`${osPrefix}/:trooth_id/commerce/catalog`, async (c) => {
@@ -686,7 +884,7 @@ export function createApp(deps: RouteDeps): ServeApp {
   commerceRoute("/products", (store, id) => productsResponse(store, id, ports.now()));
   commerceRoute("/products/:record_id", (store, id, c) => productResponse(store, id, c.req.param("record_id") ?? ""));
   commerceRoute("/offers", (store, id) => offersResponse(store, id, ports.now()));
-  commerceRoute("/offers/:sku", (store, id, c) => offerResponse(store, id, decodeURIComponent(c.req.param("sku") ?? ""), ports.now()));
+  commerceRoute("/offers/:sku", (store, id, c) => offerResponse(store, id, safeDecode(c.req.param("sku") ?? "") ?? "", ports.now()));
   commerceRoute("/feeds/:kind", (store, id, c) => {
     const raw = c.req.param("kind") ?? "";
     const tsv = raw.endsWith(".tsv");
@@ -754,12 +952,17 @@ export async function runScheduled(ports: Ports, cron: string): Promise<void> {
   if (cron === "0 6 * * 1") return ports.jobs.weeklyGapReports();
 }
 
-export async function runQueue(ports: Ports, messages: { body: unknown; ack(): void; retry(): void }[]): Promise<void> {
+/** Attempts a message gets (wrangler.toml max_retries 3, so four in all) before it goes to the dead letter queue. */
+export const QUEUE_ATTEMPTS = 4;
+
+export async function runQueue(ports: Ports, messages: { body: unknown; attempts?: number; ack(): void; retry(): void }[]): Promise<void> {
   for (const m of messages) {
     try {
       await ports.jobs.compile(m.body);
       m.ack();
-    } catch {
+    } catch (e) {
+      // On the last attempt the build is marked failed in plain words before the message moves to the dead letter queue.
+      if ((m.attempts ?? 1) >= QUEUE_ATTEMPTS && ports.jobs.failed) await ports.jobs.failed(m.body, e).catch(() => undefined);
       m.retry();
     }
   }

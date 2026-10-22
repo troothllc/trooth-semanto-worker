@@ -18,15 +18,15 @@ Source: `semanto_read_receipts` (`src/readers/receipts.ts`), one row per answere
 
 | Number | How it is counted |
 | --- | --- |
-| Reads (a day) | Rows with `read_at` in `[day 00:00:00Z, next day 00:00:00Z)` for the company. A HEAD request is not a read. A 304 is a read, because the reader confirmed it holds the bytes. |
+| Reads (a day) | The sum of `count` over rows with `read_at` in `[day 00:00:00Z, next day 00:00:00Z)` for the company (reads are counted per minute and written once a minute, one row per minute and key, `src/readers/rate-limit.ts`). A HEAD request is not a read. A 304 is a read, because the reader confirmed it holds the bytes. |
 | Reads (a period) | The sum of the days in the period. |
 | Proved who they were | Rows with `proof = web_bot_auth`. The request carried a Web Bot Auth signature that checked out against the key directory it named (`src/readers/webbotauth.ts`). Nothing else counts as proven; a User-Agent string never does. |
 | Unproven reader | Rows with `proof = none`. Shown as one row named "unproven reader", never split by User-Agent. |
 | Named agent | A proven row is named by its key directory: the published name when the directory is in the known table (checked against the operator's documentation), otherwise the directory's host name. The name is the directory's, not a claim about the company behind it. |
-| Trooth's checks | Rows whose `agent_key_url` is Trooth's own monitor directory. **Agent reads include Trooth's own hourly checks**: the monitor fetches every signed company's served pages each hour (the `15 * * * *` cron) and those fetches are recorded like any other read, counted in "Reads", and shown in their own column so a company can take them out. The monitor signs its requests with Web Bot Auth, so its reads are also in "Proved who they were". |
+| Trooth's checks | None today. Trooth's hourly change detection (the `15 * * * *` cron) fetches the company's own origin pages, not the served Semanto copies, so it records no read receipt and is in no count here. Trooth has no Web Bot Auth key directory yet; if it gets one and reads served copies, its reads will be shown in their own column. |
 | Pages read | Distinct `page_id` among the rows. |
 | By representation | Rows grouped by `representation` (`markdown`, `jsonld`, `json`, `llms`, `sitemap`). |
-| Daily digest | `summarize` over the day's rows: `total`, `proven`, `unproven`, `by_agent`, `by_page`, `by_representation`, and the list of receipt ids. The digest is signed by Trooth and appended to the log, so a count shown later can be checked against the receipts it counted. |
+| Daily digest | `summarize` over the day's rows: `total`, `proven`, `unproven`, `by_agent`, `by_page`, `by_representation`, and the list of receipt ids. The digest is signed by Trooth's witness key (`GET /os/semanto/{trooth_id}/receipts`) and lists the receipt ids it counted, so a count shown later can be checked against them. It is not appended to the public log. |
 | CSV | One row per receipt, RFC 4180, the columns above. The `ip_hash` column is the salted hash. |
 
 Not counted anywhere: requests the adapter passed through to the host (HTML), requests answered from a CDN cache without reaching the adapter or the API (the panel says "reads Trooth answered" for this reason), and requests refused by a rate limit.

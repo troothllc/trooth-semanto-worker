@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Trooth, LLC
 //
 // Command-line helpers shared by cmd/semanto-verify: flags are read anywhere

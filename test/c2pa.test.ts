@@ -1,7 +1,13 @@
+// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// Copyright (c) 2026 Trooth, LLC
+//
+// Tests for src/c2pa/bridge.ts: a Semanto manifest mapped to C2PA assertions.
+
 import { describe, it, expect } from "vitest";
 import { isSemantoId, semantoId } from "@/core/ids";
 import type { SemantoFile, DocumentEntry } from "@/core/semanto";
 import { buildC2paManifest, buildC2paManifests, textAnnexStatus, TEXT_ANNEX_STATUS, TROOTH_ASSERTION_LABEL, HASH_PLACEHOLDER, isC2paMedia, mediaTypeOf, c2patoolCommand } from "@/c2pa/bridge";
+import { BANNED_WORDS, ELLIPSIS, THREE_DOTS } from "./helpers/house-rules";
 
 const H = (n: string) => `sha256:${n.repeat(64).slice(0, 64)}`;
 
@@ -57,7 +63,7 @@ describe("C2PA bridge", () => {
   });
   it("uses no banned words and no ellipses in the manifest JSON", () => {
     const json = JSON.stringify(buildC2paManifests(file, "https://api.trooth.co/public/semanto"));
-    expect(json).not.toMatch(/\b(score|verified|certified)\b/i);
-    expect(json).not.toContain("...");
+    expect(json).not.toMatch(BANNED_WORDS);
+    expect(json).not.toContain(THREE_DOTS);
   });
 });

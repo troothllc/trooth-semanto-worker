@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright (c) 2026 Trooth, LLC -->
+
 # Semanto verifier test vectors, v1
 
 Shared test vectors for every Semanto verifier (JavaScript, Python, Go, and anyone else's). A verifier that reaches the conclusion listed for each file, and no other, implements the published formats correctly.

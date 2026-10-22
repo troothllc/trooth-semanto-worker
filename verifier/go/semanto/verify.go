@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Trooth, LLC
 //
 // The top-level Semanto checks: a whole file offline, a per-page proof, a
@@ -532,6 +532,8 @@ type PageProofOptions struct {
 	AllowUnwitnessed bool
 	// AllowUnlogged accepts a proof with no log entry ("absent" does not fail).
 	AllowUnlogged bool
+	// AllowUnsigned accepts a proof with no company signature: a Semanto Basic page, witnessed by Trooth and not signed by the company.
+	AllowUnsigned bool
 }
 
 // VerifyPageProof checks a semanto.proof document strictly: the version
@@ -587,7 +589,7 @@ func VerifyPageProofWith(proof map[string]any, page []byte, keys KeySet, now tim
 			c.add("header", false, "The header does not list this page at that index with this hash.", "manifest_mismatch")
 		}
 		if getStr(proof, "signature") == "" {
-			c.add("company_signature", false, "The proof carries no company signature.", "signature_absent")
+			c.add("company_signature", opts.AllowUnsigned, ternary(opts.AllowUnsigned, "Absent: the proof carries no company signature (allowed by the caller: a record witnessed by Trooth and not signed by the company).", "The proof carries no company signature."), "signature_absent")
 		} else {
 			sig := VerifyJWS(getStr(proof, "signature"), keys.StrictRole("company"), JWSTypes["semantoVersion"], header, now)
 			c.add("company_signature", sig.OK, ternary(sig.OK, "The header is signed by the company's key "+sig.Kid+" (typ semanto-version).", "The company's signature did not check out: "+sig.Reason+"."), sig.Reason)

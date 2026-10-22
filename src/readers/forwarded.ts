@@ -11,7 +11,11 @@
 //
 //   Signature, Signature-Input, Signature-Agent   the agent's, unchanged
 //   Trooth-Forwarded-Authority                    the customer host the agent addressed
-//   Trooth-Forwarded-For                          the client address the adapter saw
+//   Trooth-Forwarded-For                          the client address the platform gave
+//                                                 the adapter (its own connecting-IP
+//                                                 value, never a header the client sent)
+//   Trooth-Forwarded-Path                         the path and query the agent asked for
+//                                                 on the company's domain
 //   Trooth-Connector-Signature-Input              the adapter's own RFC 9421 signature,
 //   Trooth-Connector-Signature                    tag "trooth-connector", over @method,
 //                                                 @target-uri, trooth-forwarded-authority,
@@ -24,7 +28,12 @@
 // company's connector keys first, and only then checks the agent's Web Bot
 // Auth signature with the forwarded authority as @authority, and only then
 // uses the forwarded address (hashed, never kept, src/readers/receipts.ts).
-// A forwarded header without a valid connector signature is ignored. nginx and
+// A forwarded header without a valid connector signature is ignored. An agent
+// that signs @path or @target-uri signed the path it asked for on the
+// company's domain, not the API path the adapter calls; it is proven through
+// an adapter only when the adapter forwards that path in Trooth-Forwarded-Path
+// and covers it with the connector signature, and then that path is used as
+// @path. Without it, such an agent is not proven through an adapter. nginx and
 // Apache cannot sign, so a read through them is an "unproven reader" unless
 // the agent's request reaches the API directly (adapters/README.md).
 
@@ -35,6 +44,7 @@ import { verifyWebBotAuth, type WebBotAuthDeps, type WebBotAuthResult } from "./
 export const CONNECTOR_TAG = "trooth-connector";
 export const FORWARDED_AUTHORITY_HEADER = "trooth-forwarded-authority";
 export const FORWARDED_FOR_HEADER = "trooth-forwarded-for";
+export const FORWARDED_PATH_HEADER = "trooth-forwarded-path";
 export const CONNECTOR_SIGNATURE_INPUT_HEADER = "trooth-connector-signature-input";
 export const CONNECTOR_SIGNATURE_HEADER = "trooth-connector-signature";
 /** What the connector signature on a forwarded request must cover. */
@@ -49,7 +59,7 @@ export interface ForwardingContext {
 }
 
 export type ForwardedCheck =
-  | { ok: true; authority: string; address: string | null; connector_kid: string }
+  | { ok: true; authority: string; address: string | null; connector_kid: string; path: string | null; nonce: string | null; expires_ms: number }
   | { ok: false; reason: "not_forwarded" | "unsigned_forwarding" | "bad_connector_signature" | "authority_not_company" | "malformed_authority"; sentence: string };
 
 function header(h: HeaderBag, name: string): string | null {
@@ -89,7 +99,11 @@ export async function verifyForwarding(req: { method: string; url: string; heade
   const domain = ctx.domain.toLowerCase();
   if (bare !== domain && !bare.endsWith(`.${domain}`)) return { ok: false, reason: "authority_not_company", sentence: `The forwarded authority ${bare} is not ${domain} or one of its subdomains.` };
   const addr = header(req.headers, FORWARDED_FOR_HEADER)?.trim() ?? null;
-  return { ok: true, authority: host, address: addr && ADDRESS_RE.test(addr) ? addr : null, connector_kid: v.keyid };
+  // The forwarded path counts only when the connector signature covers it.
+  const rawPath = header(req.headers, FORWARDED_PATH_HEADER)?.trim() ?? null;
+  const covered = v.components.map((c) => c.toLowerCase()).includes(FORWARDED_PATH_HEADER);
+  const path = covered && rawPath && /^\/[^\s#]*$/.test(rawPath) && rawPath.length <= 4096 ? rawPath : null;
+  return { ok: true, authority: host, address: addr && ADDRESS_RE.test(addr) ? addr : null, connector_kid: v.keyid, path, nonce: v.params.nonce ?? null, expires_ms: (v.params.expires ?? v.params.created + FORWARDING_MAX_AGE_SECONDS) * 1000 };
 }
 
 export interface ReaderProof {
@@ -116,9 +130,11 @@ export async function proveReader(req: { method: string; url: string; headers: H
   let viaAdapter = false;
   if (ctx && header(req.headers, FORWARDED_AUTHORITY_HEADER)) {
     const f = await verifyForwarding(req, ctx, now);
-    if (f.ok) {
+    // The forwarding signature's nonce is claimed once, so a captured forwarded request cannot be replayed with its vouched address.
+    const fresh = f.ok && f.nonce ? await deps.nonces.claim(`fwd:${f.connector_kid}:${f.nonce}`, f.expires_ms, now * 1000) : false;
+    if (f.ok && fresh) {
       const u = new URL(req.url);
-      url = `https://${f.authority}${u.pathname}${u.search}`;
+      url = `https://${f.authority}${f.path ?? `${u.pathname}${u.search}`}`;
       address = f.address;
       viaAdapter = true;
     }

@@ -50,7 +50,8 @@ export default {
     const manifestCache = createManifestCache({ config, store: cacheApiStore(), ttlSeconds: 300 });
     return handleRequest({
       request,
-      config,
+      // CF-Connecting-IP is set by Cloudflare itself on every proxied request; a client cannot set it.
+      config: { ...config, clientAddress: request.headers.get("CF-Connecting-IP") ?? "" },
       manifestCache,
       next: (req) => fetch(req),
     });

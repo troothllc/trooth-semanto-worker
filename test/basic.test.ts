@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// Copyright (c) 2026 Trooth, LLC
+//
+// Tests for Semanto Basic (src/basic): the state machine, the one proof record
+// format (_trooth-challenge.<domain>, trooth-domain-challenge= and 48 hex), the
+// Basic notice, the nine setup steps and their measured timings, the
+// first-publication record and the signed Content Signals.
+
 import { describe, it, expect } from "vitest";
 import { generateKeyPair, toPublic } from "@/core/keys";
 import { verifyJws, JWS_TYPES } from "@/core/jws";
@@ -5,12 +13,13 @@ import { isSemantoId } from "@/core/ids";
 import { digest } from "@/core/hash";
 import { utf8 } from "@/core/encoding";
 import { memoryDomainProof, memoryLog, type RecordBuilderPort } from "@/basic/ports";
-import { claim, proveDomain, buildBasic, upgrade, basicResponse, basicHeaders, dnsClaimRecord, dnsClaimName, wellKnownClaimUrl, SETUP_CHECKLIST, measureSetup, BASIC_ENTITLEMENTS, WITNESSED_NOT_SIGNED } from "@/basic/tier";
+import { claim, proveDomain, buildBasic, upgrade, basicResponse, basicHeaders, dnsClaimRecord, dnsClaimName, wellKnownClaimUrl, SETUP_STEPS, measureSetup, newChallenge, pointerRecordName, pointerRecordValue, POINTER_RE, CHALLENGE_RE, cleanDomain, BASIC_ENTITLEMENTS, WITNESSED_NOT_SIGNED } from "@/basic/tier";
 import { createFirstPublication, verifyFirstPublication, exportDisputeStatement, leafHashOf } from "@/basic/first-publication";
 import { toHeaderValue, toRobotsLines, parseRobotsSignals, parseHeaderSignals, checkContentSignalsDrift, signContentSignals, verifyContentSignals } from "@/basic/content-signals";
+import { BANNED_WORDS, ELLIPSIS, THREE_DOTS } from "./helpers/house-rules";
 
 const NOW = new Date("2026-10-20T09:00:00Z");
-const TOKEN = "fixture_claim_token_0123456789";
+const TOKEN = `trooth-domain-challenge=${"0a1b2c".repeat(8)}`;
 
 const builder: RecordBuilderPort = {
   async build(domain, trooth_id) {
@@ -30,11 +39,18 @@ describe("Semanto Basic state machine", () => {
       expect(r.words).toContain("Prove acme.com first");
     }
   });
-  it("proves the domain by DNS TXT at _trooth.<domain>", async () => {
+  it("proves the domain by DNS TXT at _trooth-challenge.<domain>, and never by the _trooth pointer", async () => {
     const c = claim("acme-inc", "acme.com", TOKEN, NOW);
-    expect(dnsClaimName("acme.com")).toBe("_trooth.acme.com");
-    expect(dnsClaimRecord(TOKEN)).toBe(`v=trooth1; claim=${TOKEN}`);
-    const port = memoryDomainProof({ txt: { "_trooth.acme.com": [`"${dnsClaimRecord(TOKEN)}"`] } });
+    expect(dnsClaimName("acme.com")).toBe("_trooth-challenge.acme.com");
+    expect(dnsClaimRecord(TOKEN)).toBe(TOKEN);
+    expect(CHALLENGE_RE.test(TOKEN)).toBe(true);
+    expect(CHALLENGE_RE.test(newChallenge(new Uint8Array(24).fill(171)))).toBe(true);
+    expect(pointerRecordName("acme.com")).toBe("_trooth.acme.com");
+    expect(POINTER_RE.test(pointerRecordValue("acme-inc", "A".repeat(43)))).toBe(true);
+    expect(POINTER_RE.test(TOKEN)).toBe(false);
+    // The value at the pointer name proves nothing.
+    expect((await proveDomain(c, memoryDomainProof({ txt: { "_trooth.acme.com": [TOKEN] } }), NOW)).ok).toBe(false);
+    const port = memoryDomainProof({ txt: { "_trooth-challenge.acme.com": [`"${dnsClaimRecord(TOKEN)}"`] } });
     const r = await proveDomain(c, port, NOW);
     expect(r.ok).toBe(true);
     if (r.ok) {
@@ -47,15 +63,15 @@ describe("Semanto Basic state machine", () => {
     expect(wellKnownClaimUrl("acme.com")).toBe("https://acme.com/.well-known/trooth-claim.txt");
     const ok = await proveDomain(c, memoryDomainProof({ files: { "https://acme.com/.well-known/trooth-claim.txt": `${TOKEN}\n` } }), NOW);
     expect(ok.ok && ok.method).toBe("well_known");
-    const bad = await proveDomain(c, memoryDomainProof({ files: { "https://acme.com/.well-known/trooth-claim.txt": "someone_elses_token_0000000" } }), NOW);
+    const bad = await proveDomain(c, memoryDomainProof({ files: { "https://acme.com/.well-known/trooth-claim.txt": `trooth-domain-challenge=${"ff".repeat(24)}` } }), NOW);
     expect(!bad.ok && bad.reason).toBe("token_mismatch");
     const none = await proveDomain(c, memoryDomainProof(), NOW);
     expect(!none.ok && none.reason).toBe("no_record_found");
-    if (!none.ok) expect(none.checked.dns_name).toBe("_trooth.acme.com");
+    if (!none.ok) expect(none.checked.dns_name).toBe("_trooth-challenge.acme.com");
   });
   it("builds in state read after proof, then upgrades only after the Trust Profile", async () => {
     const c = claim("acme-inc", "acme.com", TOKEN, NOW);
-    const proved = await proveDomain(c, memoryDomainProof({ txt: { "_trooth.acme.com": [dnsClaimRecord(TOKEN)] } }), NOW);
+    const proved = await proveDomain(c, memoryDomainProof({ txt: { "_trooth-challenge.acme.com": [dnsClaimRecord(TOKEN)] } }), NOW);
     if (!proved.ok) throw new Error("proof failed");
     const built = await buildBasic(proved.company, builder, NOW);
     expect(built.ok).toBe(true);
@@ -90,20 +106,31 @@ describe("Semanto Basic state machine", () => {
   it("lists what Basic serves and does not, without the company signature", () => {
     expect(BASIC_ENTITLEMENTS.serves.map((s) => s.id)).toEqual(["hosted_copy", "head_tag", "competitor_report", "alerts"]);
     expect(BASIC_ENTITLEMENTS.does_not.map((s) => s.id)).toContain("company_signature");
-    for (const s of [...BASIC_ENTITLEMENTS.serves, ...BASIC_ENTITLEMENTS.does_not]) expect(s.words).not.toMatch(/\b(score|verified|certified)\b/i);
+    for (const s of [...BASIC_ENTITLEMENTS.serves, ...BASIC_ENTITLEMENTS.does_not]) expect(s.words).not.toMatch(BANNED_WORDS);
   });
-  it("has a ten-minute checklist whose targets sum to 600 seconds, and measures time spent from timestamps", () => {
-    expect(SETUP_CHECKLIST.reduce((n, s) => n + s.target_seconds, 0)).toBe(600);
-    const t = (s: number) => new Date(NOW.getTime() + s * 1000).toISOString();
-    const done = measureSetup(NOW.toISOString(), { enter_domain: t(20), publish_token: t(400), prove_domain: t(430), build_record: t(600), add_head_tag: t(640), first_report: t(650) });
-    expect(done.steps.map((s) => s.spent_seconds)).toEqual([20, 380, 30, 170, 40, 10]);
-    expect(done.steps[1]!.within_target).toBe(false);
-    expect(done.total_spent_seconds).toBe(650);
-    expect(done.within_ten_minutes).toBe(false);
-    const partial = measureSetup(NOW.toISOString(), { enter_domain: t(20) });
-    expect(partial.total_spent_seconds).toBeNull();
-    expect(partial.within_ten_minutes).toBeNull();
-    expect(partial.not_started).toHaveLength(5);
+  it("has nine setup steps: Basic steps 1 to 4 within 600 seconds, the full path 1 to 9 within 900, measured from timestamps", () => {
+    expect(SETUP_STEPS.map((x) => x.id)).toEqual(["sign_in", "company", "prove_domain", "read_site", "review", "sign", "install", "check", "monitoring"]);
+    expect(SETUP_STEPS.reduce((n, x) => n + (x.basic_seconds ?? 0), 0)).toBe(570);
+    expect(SETUP_STEPS.reduce((n, x) => n + x.full_seconds, 0)).toBe(855);
+    const t = (sec: number) => new Date(NOW.getTime() + sec * 1000).toISOString();
+    const basic = measureSetup(NOW.toISOString(), { sign_in: t(0), company: t(25), prove_domain: t(300), read_site: t(420) });
+    expect(basic.steps.slice(0, 4).map((x) => x.spent_seconds)).toEqual([0, 25, 275, 120]);
+    expect(basic.steps[2]!.within_target).toBe(false);
+    expect(basic.basic).toEqual({ target_seconds: 600, spent_seconds: 420, within_target: true });
+    expect(basic.full.spent_seconds).toBeNull();
+    // A read that overlaps the proof costs nothing extra: step 4 is measured from the latest earlier completion.
+    const overlapped = measureSetup(NOW.toISOString(), { sign_in: t(0), company: t(20), read_site: t(200), prove_domain: t(250) });
+    expect(overlapped.steps[3]!.spent_seconds).toBe(0);
+    const full = measureSetup(NOW.toISOString(), { sign_in: t(0), company: t(30), prove_domain: t(300), read_site: t(540), review: t(600), sign: t(650), install: t(780), check: t(820), monitoring: t(910) });
+    expect(full.full).toEqual({ target_seconds: 900, spent_seconds: 910, within_target: false });
+    const partial = measureSetup(NOW.toISOString(), { sign_in: t(0), company: t(20) });
+    expect(partial.basic.spent_seconds).toBeNull();
+    expect(partial.not_started).toHaveLength(7);
+  });
+  it("cleans a pasted website to its domain", () => {
+    expect(cleanDomain("https://www.Acme.com/about?x=1")).toBe("acme.com");
+    expect(cleanDomain("acme.com:8443/")).toBe("acme.com");
+    expect(cleanDomain("not a domain")).toBeNull();
   });
 });
 
@@ -146,8 +173,8 @@ describe("first-publication proof", () => {
     expect(text).toContain("Address: https://acme.com/blog/a-post");
     expect(text).toContain("public log at index 0");
     expect(text).toContain(fp.record.content_hash);
-    expect(text).not.toContain("...");
-    expect(text).not.toMatch(/\b(score|verified|certified)\b/i);
+    expect(text).not.toContain(THREE_DOTS);
+    expect(text).not.toMatch(BANNED_WORDS);
   });
   it("refuses a non-https address", async () => {
     const { privateJwk } = await generateKeyPair();

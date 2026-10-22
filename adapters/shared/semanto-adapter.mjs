@@ -407,15 +407,17 @@ export function memoryStore() {
 
 // ---------------------------------------------------------------- serving
 
-/** The client address the host saw, from the headers each platform sets. The host may pass it as config.clientAddress. */
-export function clientAddress(request, config = {}) {
-  if (config.clientAddress) return String(config.clientAddress);
-  for (const name of ["CF-Connecting-IP", "Fastly-Client-IP", "True-Client-IP", "X-Real-IP"]) {
-    const v = request.headers.get(name);
-    if (v) return v.trim();
-  }
-  const xff = request.headers.get("X-Forwarded-For");
-  return xff ? xff.split(",")[0].trim() : "";
+/**
+ * The client address the adapter vouches for: only the platform's own
+ * connecting-IP value, which each host entry passes as config.clientAddress
+ * (Cloudflare's CF-Connecting-IP, which Cloudflare sets itself; Netlify's
+ * context.ip; Fastly's event.client.address; Akamai's True-Client-IP set at
+ * the edge). Never a header from the incoming request, which a client could
+ * set (X-Forwarded-For, X-Real-IP, True-Client-IP on other hosts). Without
+ * one, no address is vouched for.
+ */
+export function clientAddress(_request, config = {}) {
+  return config.clientAddress ? String(config.clientAddress).trim() : "";
 }
 
 /** The connector key from config: a private JWK object, or its JSON (TROOTH_CONNECTOR_KEY). Null when absent or unreadable. */
@@ -443,8 +445,11 @@ export async function forwardingHeaders(decision, request, config = {}, now = co
   const key = connectorKeyOf(config);
   const signedReader = headers.get("Signature-Input") && headers.get("Signature") && headers.get("Signature-Agent");
   if (key && signedReader) {
-    headers.set("Trooth-Forwarded-Authority", new URL(request.url).host.toLowerCase());
+    const asked = new URL(request.url);
+    headers.set("Trooth-Forwarded-Authority", asked.host.toLowerCase());
     headers.set("Trooth-Forwarded-For", clientAddress(request, config));
+    // The path the reader asked for on this domain, so a reader that signs @path is proven against it (src/readers/forwarded.ts).
+    headers.set("Trooth-Forwarded-Path", `${asked.pathname}${asked.search}`);
     const sig = await signForwarding({ method: "GET", url: decision.url, headers, privateJwk: key, created: now() });
     for (const [k, v] of Object.entries(sig)) headers.set(k, v);
   }

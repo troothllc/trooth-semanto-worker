@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+# Copyright (c) 2026 Trooth, LLC
+#
 # Semanto by Trooth: the no-code fallback. If you do not want the edge
 # function, these two lines proxy the well-known files to the signed copy
 # Trooth holds (200! means proxy, and take precedence over a file at that

@@ -1,3 +1,10 @@
+-- SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+-- Copyright (c) 2026 Trooth, LLC
+--
+-- The first schema (D1, SQLite dialect, Cloudflare D1 docs 2026): companies, keys, versions, pages,
+-- facts, settings, host detection, the public log index, revocations, receipts, monitor runs and
+-- alerts, commerce, gap reports, first publications and change state.
+
 -- Semanto metadata. Bodies live in R2. Every timestamp is ISO 8601 UTC text.
 
 CREATE TABLE IF NOT EXISTS semanto_companies (

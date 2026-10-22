@@ -6,7 +6,7 @@
 
 `GET /public/semanto/verify?url=<page url>&hash=<digest>` answers one question in one call: is this hash the one the company signed for this URL? It is for readers that already have page bytes (an agent that fetched the page itself, a person who saved a copy) and want to know, without parsing a Semanto, whether the bytes are the signed ones. It needs no account and no key.
 
-It is not a substitute for offline verification. The answer is Trooth's word; the proof it points at is not. A reader that wants to check without trusting Trooth follows `proof_url` and runs the verifier (`docs/spec/log.md`, `verifier/`).
+It is not a substitute for offline verification. The answer is Trooth's word; the proof it points at is not. A reader that wants to check the bytes itself follows `proof_url` and runs the verifier offline (`docs/spec/log.md`, `verifier/`). That check still rests on Trooth's witness key and log until an independent cosigner signs the log (`docs/spec/log.md`, Time).
 
 ## Request
 

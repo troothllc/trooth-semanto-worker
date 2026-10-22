@@ -79,7 +79,7 @@ const PROOF_ONLY_WARNING = "In this mode a reader cannot check an individual pag
 
 const WHEN_CHANGED_TEXT: Record<WhenPageChanged, { label: string; body: string }> = {
   serve_last_signed_marked_behind: { label: "Keep serving what I signed, marked as behind", body: "Readers keep getting the last signed version. Its headers say the live page has moved on until you sign a new version." },
-  serve_live_marked_unsigned: { label: "Serve the live page, marked as unsigned", body: "Readers get the current page without a signature and headers that say so. The signed version stays available by its version number." },
+  serve_live_marked_unsigned: { label: "Send readers to the live page, marked as unsigned", body: "Readers who ask for a changed page are sent to the current page on your site, which carries no signature; the answer says so (Trooth-Semanto-State: unsigned). The signed version stays available by its version number." },
   prompt_to_sign: { label: "Hold and ask me to sign", body: "Trooth builds the new version and waits for your signature. Readers keep getting the last signed version until you sign." },
 };
 

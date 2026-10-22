@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Trooth, LLC
 //
 // semanto-verify for Go: the same commands as the JavaScript and Python
@@ -6,7 +6,7 @@
 // when every check passed.
 //
 //	semanto-verify file <semanto.json> [-pages <dir>] [-keys <keys.json>] [-now <iso>] [-revocations <file>]
-//	semanto-verify page <url> [-trooth <base>] [-now <iso>] [-allow-unwitnessed] [-allow-unlogged]
+//	semanto-verify page <url> [-trooth <base>] [-now <iso>] [-allow-unwitnessed] [-allow-unlogged] [-allow-unsigned]
 //	semanto-verify response <url> [-keys <keys.json>]
 //	semanto-verify log -from <n> -to <m> [-log <url>] [-keys <keys.json>]
 //
@@ -35,6 +35,9 @@ import (
 )
 
 const troothAPI = "https://api.trooth.co"
+
+// troothKeysBase serves Trooth's witness keys at /.well-known/trooth-keys.json (the Semanto Worker); -trooth overrides it.
+const troothKeysBase = troothAPI + "/public/semanto"
 const defaultLog = troothAPI + "/public/semanto/log"
 
 var proofRe = regexp.MustCompile(`/pages/[^/]+/proof$`)
@@ -43,7 +46,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "semanto-verify: check a Semanto file, a page, a signed response or the public log.")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  semanto-verify file <semanto.json> [-pages <dir>] [-keys <keys.json>] [-now <iso>] [-revocations <file>]")
-	fmt.Fprintln(os.Stderr, "  semanto-verify page <url> [-trooth <base>] [-now <iso>] [-allow-unwitnessed] [-allow-unlogged]")
+	fmt.Fprintln(os.Stderr, "  semanto-verify page <url> [-trooth <base>] [-now <iso>] [-allow-unwitnessed] [-allow-unlogged] [-allow-unsigned]")
 	fmt.Fprintln(os.Stderr, "  semanto-verify response <url> [-keys <keys.json>]")
 	fmt.Fprintln(os.Stderr, "  semanto-verify log -from <n> -to <m> [-log <url>] [-keys <keys.json>]")
 	fmt.Fprintln(os.Stderr, "")
@@ -144,7 +147,7 @@ func loadKeys(domain, keysPath, troothBase string) semanto.KeySet {
 		return semanto.CollectKeys(readJSON(keysPath))
 	}
 	if troothBase == "" {
-		troothBase = troothAPI
+		troothBase = troothKeysBase
 	}
 	sets := map[string]any{"company": map[string]any{"keys": []any{}}, "trooth": map[string]any{"keys": []any{}}}
 	for _, src := range []struct{ role, url string }{{"company", "https://" + domain + "/.well-known/trooth-keys.json"}, {"trooth", troothBase + "/.well-known/trooth-keys.json"}} {
@@ -265,6 +268,7 @@ func cmdResponse(args []string, alsoProof bool) int {
 	trooth := fs.String("trooth", "", "Trooth API base")
 	allowUnwitnessed := fs.Bool("allow-unwitnessed", false, "accept a proof with no witness statement")
 	allowUnlogged := fs.Bool("allow-unlogged", false, "accept a proof with no log entry")
+	allowUnsigned := fs.Bool("allow-unsigned", false, "accept a proof with no company signature (a Semanto Basic page)")
 	pos, _ := semanto.ParseInterspersed(fs, args)
 	if len(pos) < 1 {
 		usage()
@@ -322,7 +326,7 @@ func cmdResponse(args []string, alsoProof bool) int {
 						}
 					}
 				}
-				pr := semanto.VerifyPageProofWith(proof, body, keys, now, header, semanto.PageProofOptions{AllowUnwitnessed: *allowUnwitnessed, AllowUnlogged: *allowUnlogged})
+				pr := semanto.VerifyPageProofWith(proof, body, keys, now, header, semanto.PageProofOptions{AllowUnwitnessed: *allowUnwitnessed, AllowUnlogged: *allowUnlogged, AllowUnsigned: *allowUnsigned})
 				ok = printResult("Proof at "+proofURL, pr) && ok
 				if header != nil {
 					fmt.Printf("State now: %s.\n\n", semanto.StateOf(map[string]any{"header": header, "root_hash": proof["root_hash"], "signature": proof["signature"]}, now, nil, 0))
@@ -343,7 +347,7 @@ func cmdLog(args []string) int {
 	logURL := fs.String("log", defaultLog, "log base url")
 	keysPath := fs.String("keys", "", "keys json")
 	nowS := fs.String("now", "", "instant to judge validity at")
-	trooth := fs.String("trooth", troothAPI, "Trooth API base")
+	trooth := fs.String("trooth", troothKeysBase, "Trooth key base")
 	_, _ = semanto.ParseInterspersed(fs, args)
 	if *from < 0 || *to < *from {
 		usage()

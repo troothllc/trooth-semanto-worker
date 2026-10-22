@@ -22,10 +22,37 @@ export type HostKind =
   | "nginx"
   | "apache"
   | "wordpress"
+  | "shopify"
+  | "webflow"
+  | "squarespace"
+  | "wix"
   | "head_tag"
   | "unknown";
 
-export const HOST_KINDS: HostKind[] = ["cloudflare", "vercel", "netlify", "fastly", "akamai", "gcore", "nginx", "apache", "wordpress", "head_tag", "unknown"];
+export const HOST_KINDS: HostKind[] = ["cloudflare", "vercel", "netlify", "fastly", "akamai", "gcore", "nginx", "apache", "wordpress", "shopify", "webflow", "squarespace", "wix", "head_tag", "unknown"];
+
+/**
+ * The install guide the setup wizard shows for each host (docs/spec/setup-api.md,
+ * install.guide_id). Shopify, Webflow, Squarespace and Wix use the head tag or
+ * the platform's app or code panel, as adapters/README.md describes.
+ */
+export const HOST_GUIDES: Record<HostKind, string> = {
+  cloudflare: "cloudflare-worker",
+  vercel: "vercel-middleware",
+  netlify: "netlify-edge",
+  fastly: "fastly-compute",
+  akamai: "akamai-edgeworkers",
+  gcore: "gcore-fastedge",
+  nginx: "nginx-config",
+  apache: "apache-config",
+  wordpress: "wordpress-plugin",
+  shopify: "shopify-app",
+  webflow: "webflow-head-code",
+  squarespace: "squarespace-code-injection",
+  wix: "wix-custom-code",
+  head_tag: "head-tag",
+  unknown: "pick-host",
+};
 
 export type MarkdownSource = "semanto_only" | "semanto_then_cloudflare_for_unsigned" | "cloudflare_format_semanto_proof_only";
 export const MARKDOWN_SOURCES: MarkdownSource[] = ["semanto_only", "semanto_then_cloudflare_for_unsigned", "cloudflare_format_semanto_proof_only"];

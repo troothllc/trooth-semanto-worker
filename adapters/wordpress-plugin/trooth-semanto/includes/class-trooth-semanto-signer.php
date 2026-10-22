@@ -126,8 +126,8 @@ final class Trooth_Semanto_Signer {
 
 	/**
 	 * The two Trooth-Connector-Signature fields for a forwarded GET. $headers must
-	 * hold Trooth-Forwarded-Authority, Trooth-Forwarded-For, Signature,
-	 * Signature-Input and Signature-Agent. Null when this server cannot sign.
+	 * hold Trooth-Forwarded-Authority, Trooth-Forwarded-For, Trooth-Forwarded-Path,
+	 * Signature, Signature-Input and Signature-Agent. Null when this server cannot sign.
 	 *
 	 * @param array<string,string> $headers
 	 * @return array<string,string>|null
@@ -141,7 +141,7 @@ final class Trooth_Semanto_Signer {
 		foreach ( $headers as $name => $value ) {
 			$lower[ strtolower( $name ) ] = trim( preg_replace( "/[\r\n]+[ \t]+/", ' ', (string) $value ) );
 		}
-		$names = array( 'trooth-forwarded-authority', 'trooth-forwarded-for', 'signature', 'signature-input', 'signature-agent' );
+		$names = array( 'trooth-forwarded-authority', 'trooth-forwarded-for', 'trooth-forwarded-path', 'signature', 'signature-input', 'signature-agent' );
 		foreach ( $names as $n ) {
 			if ( ! isset( $lower[ $n ] ) ) {
 				return null;
@@ -149,7 +149,7 @@ final class Trooth_Semanto_Signer {
 		}
 		$created = $created ?? time();
 		$params  = ';created=' . $created . ';expires=' . ( $created + $ttl ) . ';keyid=' . self::sf_string( $k['kid'] ) . ';alg="ed25519";nonce=' . self::sf_string( self::nonce() ) . ';tag=' . self::sf_string( self::TAG );
-		$inner   = '("@method" "@target-uri" "trooth-forwarded-authority" "trooth-forwarded-for" "signature" "signature-input" "signature-agent")' . $params;
+		$inner   = '("@method" "@target-uri" "trooth-forwarded-authority" "trooth-forwarded-for" "trooth-forwarded-path" "signature" "signature-input" "signature-agent")' . $params;
 		$lines   = array( '"@method": GET', '"@target-uri": ' . $url );
 		foreach ( $names as $n ) {
 			$lines[] = '"' . $n . '": ' . $lower[ $n ];

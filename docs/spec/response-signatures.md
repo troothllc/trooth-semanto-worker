@@ -1,10 +1,10 @@
 <!-- SPDX-License-Identifier: LicenseRef-Trooth-Proprietary -->
 <!-- Copyright (c) 2026 Trooth, LLC -->
-<!-- What Semanto signs on every HTTP response, how a reader verifies it, and every header it sends. Follows RFC 9421 (HTTP Message Signatures), RFC 9530 (Digest Fields), RFC 8288 (Web Linking), RFC 6648 (no X- prefixes), and the names Cloudflare's Markdown for Agents uses for the token headers. -->
+<!-- What Semanto signs on every HTTP response, how a reader verifies it, and every header it sends. Follows RFC 9421 (HTTP Message Signatures), RFC 9530 (Digest Fields), RFC 8288 (Web Linking), RFC 6648 (no X- prefix on any Trooth header; the only X- names are the two token headers, kept under the names Cloudflare's Markdown for Agents uses, for compatibility). -->
 
 # Response signatures
 
-Web Bot Auth lets an agent sign its request. Semanto signs the answer. Every response Semanto serves, on api.trooth.co or through an adapter on the company's own domain, carries an RFC 9421 signature with tag `trooth-semanto` and an RFC 9530 Content-Digest, so a reader can hold the bytes and show later that this is what the company published, unchanged. The reference implementation is `src/core/httpsig.ts` and `src/serve/headers.ts`; the standalone verifiers in `verifier/` re-implement the check, and `verifier/test-vectors/v1/response.json` is a complete signed response.
+Web Bot Auth lets an agent sign its request. Semanto signs the answer. Every response Semanto serves, on api.trooth.co or through an adapter on the company's own domain, carries an RFC 9421 signature with tag `trooth-semanto` and an RFC 9530 Content-Digest (two exceptions, both without a body that says anything: a CORS preflight `OPTIONS` answer, and the `witness_key_missing` 503 of a deployment that has no witness key, which cannot be signed because the signing key is the missing one), so a reader can hold the bytes and show later that this is what the company published, unchanged. The reference implementation is `src/core/httpsig.ts` and `src/serve/headers.ts`; the standalone verifiers in `verifier/` re-implement the check, and `verifier/test-vectors/v1/response.json` is a complete signed response.
 
 ## What is signed
 
@@ -54,7 +54,7 @@ Which key signs: the company's hosted key when Trooth holds it, the company's ow
 | `Signature-Input`, `Signature` | RFC 9421 | As above. |
 | `Link` | `rel="canonical"`, `rel="alternate"; type="text/markdown"`, `rel="alternate"; type="application/ld+json"`, `rel="https://trooth.co/rel/semanto"`, `rel="https://trooth.co/rel/trust-profile"`, `rel="https://trooth.co/rel/proof"`, `rel="https://trooth.co/rel/keys"` | The relations a reader follows: the other representations, the whole file, the Trust Profile, the page's proof, the JWK Set. |
 | `Content-Signal` | `ai-train=no, search=yes, ai-input=yes` form | The company's content signals from the signed controls (contentsignals.org). |
-| `ETag` | `"<page hash hex>"` strong | Kept across hosts; `If-None-Match` answers 304 with the same signature headers. |
+| `ETag` | `"<page hash hex>"` strong | Kept across hosts; `If-None-Match` answers 304 with the same headers and a new signature made over status 304, which a reader checks against the body it already holds. |
 | `Vary` | `Accept` | Every cache keeps the representations apart. |
 | `Cache-Control` | `public, max-age=300, stale-while-revalidate=3600` | The signature lasts the whole 3,900 seconds. |
 | `x-markdown-tokens`, `x-original-tokens` | integers | Estimates, under the names Cloudflare's Markdown for Agents uses, so an agent reading both gets the same header. The method is in `src/core/tokens.ts`; the number is never presented as a measurement from a specific model. |

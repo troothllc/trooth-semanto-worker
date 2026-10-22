@@ -71,7 +71,7 @@ The decision table, the header list, the three settings, the host table from the
 
 ## Requirement numbers
 
-Delivery items 11 (Cloudflare Worker), 12 (Vercel), 13 (Netlify), 14 (Fastly), 15 (Akamai), 16 (Gcore), 17 (nginx and Apache), 26 (WordPress plugin, head tags, commerce platforms), 28 (shared module and its tests). House rules met: no User-Agent switch (rule 3), headers from rule 10 and no `X-` prefixed header, RFC 9457 problem from the plugin when the API is unreachable (rule 9), SPDX headers on every source file (rule 12; `bundle.json`, `vercel.json`, `package.json` and the fixture cannot carry comments), plain words in every string a person reads (rule 11), fixtures named as fixtures (rule 4).
+Delivery items 11 (Cloudflare Worker), 12 (Vercel), 13 (Netlify), 14 (Fastly), 15 (Akamai), 16 (Gcore), 17 (nginx and Apache), 26 (WordPress plugin, head tags, commerce platforms), 28 (shared module and its tests). House rules met: no User-Agent switch (rule 3), headers from rule 10, where the only X- names are `x-markdown-tokens` and `x-original-tokens`, copied from the API under Cloudflare's names for compatibility (no Trooth header has an X- prefix), RFC 9457 problem from the plugin when the API is unreachable (rule 9), SPDX headers on every source file (rule 12; `bundle.json`, `vercel.json`, `package.json` and the fixture cannot carry comments), plain words in every string a person reads (rule 11), fixtures named as fixtures (rule 4).
 
 ## Decisions another team must confirm
 

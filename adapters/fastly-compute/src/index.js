@@ -57,15 +57,16 @@ async function connectorKeyFromSecretStore() {
 
 let manifestCache = null;
 
-addEventListener("fetch", (event) => event.respondWith(handle(event.request)));
+addEventListener("fetch", (event) => event.respondWith(handle(event.request, event.client && event.client.address)));
 
-async function handle(request) {
+// The client address is Fastly's own event.client.address, never a header the client sent.
+async function handle(request, clientAddress) {
   const key = await connectorKeyFromSecretStore();
   const config = configFromEnv({ ...settings(), ...(key ? { TROOTH_CONNECTOR_KEY: key } : {}) });
   if (!manifestCache) manifestCache = createManifestCache({ config, fetchImpl: apiFetch, ttlSeconds: 300 });
   return handleRequest({
     request,
-    config,
+    config: { ...config, clientAddress: clientAddress || "" },
     manifestCache,
     fetchImpl: apiFetch,
     next: (req) => fetch(req, { backend: "origin" }),

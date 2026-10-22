@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Trooth, LLC
 #
 # The top-level Semanto checks: a whole file offline, a per-page proof, a
@@ -294,7 +294,7 @@ def verify_semanto(file: dict, page_bytes_by_url: PageBytes = None, keys: Any = 
     return c.result(issues=issues, state=state, version_id=version_id(file["root_hash"]) if is_digest(file.get("root_hash")) else None)
 
 
-def verify_page_proof(proof: dict, page_bytes: Union[bytes, str], keys: Any = None, now: Now = None, header: Optional[dict] = None, allow_unwitnessed: bool = False, allow_unlogged: bool = False) -> dict:
+def verify_page_proof(proof: dict, page_bytes: Union[bytes, str], keys: Any = None, now: Now = None, header: Optional[dict] = None, allow_unwitnessed: bool = False, allow_unlogged: bool = False, allow_unsigned: bool = False) -> dict:
     """Verify a semanto.proof document (what /pages/{id}/proof returns) against the page's bytes, strictly.
 
     The version header (fetched beside the proof) and the company signature are required. The witness
@@ -334,7 +334,8 @@ def verify_page_proof(proof: dict, page_bytes: Union[bytes, str], keys: Any = No
             detail, reason = "The header does not list this page at that index with this hash.", "manifest_mismatch"
         c.add("header", bound, detail, reason)
         if not proof.get("signature"):
-            c.add("company_signature", False, "The proof carries no company signature.", "signature_absent")
+            # A Semanto Basic page is witnessed by Trooth and not signed by the company: allow_unsigned accepts it knowingly.
+            c.add("company_signature", allow_unsigned, "Absent: the proof carries no company signature (allowed by the caller: a record witnessed by Trooth and not signed by the company)." if allow_unsigned else "The proof carries no company signature.", "signature_absent")
         else:
             sig = verify_jws(proof.get("signature"), company_key, expect_typ=JWS_TYPES["semantoVersion"], payload=h, at=at)
             c.add("company_signature", sig["ok"], f"The header is signed by the company's key {sig['header']['kid']} (typ semanto-version)." if sig["ok"] else f"The company's signature did not check out: {sig['reason']}.", None if sig["ok"] else sig["reason"])

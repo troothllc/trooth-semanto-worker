@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Trooth, LLC
 //
 // RFC 6962 Merkle hashing: leaf SHA-256(0x00 || data), node SHA-256(0x01 ||

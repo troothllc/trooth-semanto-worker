@@ -8,6 +8,7 @@
 // the tests run in Node with no Cloudflare runtime and no network.
 
 import type { Alert, MonitorRun } from "./types";
+import { checkUrlResolved, type Resolver } from "../core/ssrf";
 
 export interface FetchResult {
   status: number;
@@ -125,19 +126,105 @@ export function memoryTokens(tokens: Partial<Record<WritebackConnector, string>>
   return { token: async (c) => tokens[c] ?? null };
 }
 
-/** A fetch port over the global fetch, for the Worker. Readers only GET; write-back sends with the token the port holds. */
-export function globalFetchPort(): FetchPort {
-  const toResult = async (res: Response): Promise<FetchResult> => {
-    const headers: Record<string, string> = {};
+/** The caps every fetch of a URL someone else chose obeys (pre-deploy audit finding 9). */
+export const GUARDED_MAX_BYTES = 2 * 1024 * 1024;
+export const GUARDED_TIMEOUT_MS = 10_000;
+export const GUARDED_MAX_REDIRECTS = 5;
+
+export interface GuardedResult {
+  status: number;
+  headers: Record<string, string>;
+  body: Uint8Array;
+  truncated: boolean;
+}
+
+export class GuardRefused extends Error {}
+
+/**
+ * One GET through the shared SSRF guard (src/core/ssrf.ts): https only, no
+ * private, reserved, metadata or local name or address (the resolved
+ * addresses too when a resolver is given), redirects followed by hand and
+ * each hop checked again (at most five), a timeout, and the body cut at
+ * 2 MB. Every fetch of a member-supplied or company URL goes through here:
+ * the monitor's surfaces, the setup proof's well-known file, host detection
+ * and the install check.
+ */
+export async function guardedGet(url: string, headers: Record<string, string>, opts: { fetchImpl?: typeof fetch; resolve?: Resolver; maxBytes?: number; timeoutMs?: number } = {}): Promise<GuardedResult> {
+  const fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init));
+  const maxBytes = opts.maxBytes ?? GUARDED_MAX_BYTES;
+  let current = url;
+  for (let hop = 0; hop <= GUARDED_MAX_REDIRECTS; hop++) {
+    const check = await checkUrlResolved(current, opts.resolve);
+    if (!check.ok) throw new GuardRefused(`${current} is not fetched: ${check.detail} (${check.reason})`);
+    const res = await fetchImpl(current, { method: "GET", headers, redirect: "manual", signal: AbortSignal.timeout(opts.timeoutMs ?? GUARDED_TIMEOUT_MS) });
+    const h: Record<string, string> = {};
     res.headers.forEach((v, k) => {
-      headers[k.toLowerCase()] = v;
+      h[k.toLowerCase()] = v;
     });
-    return { status: res.status, headers, body: await res.text() };
-  };
+    if (res.status >= 300 && res.status < 400 && res.status !== 304) {
+      const loc = h["location"];
+      if (!loc) throw new GuardRefused(`${current} answered ${res.status} without a location`);
+      current = new URL(loc, current).href;
+      continue;
+    }
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let truncated = false;
+    if (res.body) {
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        if (total + value.length > maxBytes) {
+          chunks.push(value.slice(0, maxBytes - total));
+          total = maxBytes;
+          truncated = true;
+          await reader.cancel();
+          break;
+        }
+        chunks.push(value);
+        total += value.length;
+      }
+    }
+    const body = new Uint8Array(total);
+    let o = 0;
+    for (const c of chunks) {
+      body.set(c, o);
+      o += c.length;
+    }
+    return { status: res.status, headers: h, body, truncated };
+  }
+  throw new GuardRefused(`${url} redirected more than ${GUARDED_MAX_REDIRECTS} times`);
+}
+
+/** The monitor's fetch port for the Worker: every surface read goes through guardedGet. Write-back sends only to the two Google API hosts. */
+export function guardedFetchPort(opts: { fetchImpl?: typeof fetch; resolve?: Resolver } = {}): FetchPort {
+  const fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init));
   return {
-    get: async (url, headers) => toResult(await fetch(url, { method: "GET", headers: headers ?? {}, redirect: "follow" })),
-    send: async (url, init) => toResult(await fetch(url, { method: init.method, headers: init.headers, body: init.body })),
+    get: async (url, headers) => {
+      const r = await guardedGet(url, headers ?? {}, { fetchImpl, ...(opts.resolve ? { resolve: opts.resolve } : {}) });
+      return { status: r.status, headers: r.headers, body: new TextDecoder().decode(r.body) };
+    },
+    send: async (url, init) => {
+      const host = new URL(url).hostname;
+      if (!WRITEBACK_HOSTS.has(host) || !url.startsWith("https://")) throw new GuardRefused(`write-back sends only to ${[...WRITEBACK_HOSTS].join(" and ")}`);
+      const res = await fetchImpl(url, { method: init.method, headers: init.headers, body: init.body, redirect: "manual", signal: AbortSignal.timeout(GUARDED_TIMEOUT_MS) });
+      const h: Record<string, string> = {};
+      res.headers.forEach((v, k) => {
+        h[k.toLowerCase()] = v;
+      });
+      return { status: res.status, headers: h, body: await res.text() };
+    },
   };
+}
+
+/** Where write-back may send: the Merchant Center and Business Profile APIs. */
+export const WRITEBACK_HOSTS = new Set(["shoppingcontent.googleapis.com", "mybusinessbusinessinformation.googleapis.com"]);
+
+/** Kept for callers that name it: the guarded port over the global fetch. */
+export function globalFetchPort(): FetchPort {
+  return guardedFetchPort();
 }
 
 /** The Resend email port for the Worker: POST https://api.resend.com/emails with a bearer key (Resend API, 2026). */

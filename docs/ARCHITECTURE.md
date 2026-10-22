@@ -23,6 +23,7 @@ Semanto does not make AI believe a company; it makes what the company said impos
 | `src/gap` | The gap report: buyer prompts, provider adapters, comparison against the signed record, the competitor view | core |
 | `src/basic` | Semanto Basic (free tier, domain proof only), first-publication proof, signed Content Signals | core, compiler |
 | `src/c2pa` | Mapping a Semanto manifest to C2PA assertions for images and PDFs | core |
+| `src/setup` | The setup wizard's backend: the setup state and step, Domain Connect, the DNS host and its steps, the plain-language proof diagnosis, the install check | core, basic, serve |
 | `src/settings` | The delivery settings model and resolver | core |
 | `src/db` | D1 access, one function per query, no SQL in handlers; hosted keys sealed at rest | |
 | `src/pipeline.ts` | The modules wired into one flow: compile, sign, witness, log, the workspace actions, the commerce catalog, the crons, readers and authorization | every module above |
@@ -42,14 +43,14 @@ Semanto does not make AI believe a company; it makes what the company said impos
 7. **Every statement Trooth or a company signs carries a `typ` from `JWS_TYPES`** and a validity window where one makes sense. A verifier always checks the type.
 8. **Every module is pure where it can be:** handlers turn `{ status, headers, body }` into a Response; logic takes plain values. Tests run in Node with vitest and need no Cloudflare runtime.
 9. **Errors are RFC 9457 problems** (`application/problem+json`) with `code`, `retryable`, `next_action`, `terminal`, and a markdown form for `Accept: text/markdown`.
-10. **Headers:** `Trooth-Contract`, `Trooth-Semanto-Version`, `Trooth-Page-Hash`, `Signature-Input`, `Signature`, `Content-Digest`, `Vary: Accept`, `ETag` kept, `x-markdown-tokens` and `x-original-tokens` under Cloudflare's names, `Content-Signal` passed through from the customer's policy. No header with an `X-` prefix, ever (RFC 6648).
+10. **Headers:** `Trooth-Contract`, `Trooth-Semanto-Version`, `Trooth-Page-Hash`, `Signature-Input`, `Signature`, `Content-Digest`, `Vary: Accept`, `ETag` kept, `x-markdown-tokens` and `x-original-tokens` under Cloudflare's names, `Content-Signal` passed through from the customer's policy. Those two token headers are the only X- names, kept on purpose for compatibility with Cloudflare's converter; no Trooth header ever has an `X-` prefix (RFC 6648).
 11. **Copy and UI:** Open Sauce One; Ink #202124, Paper #F7F8F8, blue #1A73E8 on actions only, the dark site canvas #0E1014. Plain words. No jargon in anything a small business owner reads.
 12. **File header** on every source file: the SPDX line and the copyright line, then a comment saying what the module is for and which leader's practice it follows, where there is one.
 13. **Tests** live in `test/<area>.test.ts`. Every module ships with tests that would fail if its rule were broken.
 
 ## Data model (D1)
 
-See `migrations/0001_semanto.sql` and `migrations/0002_integration.sql`. Page bodies, parts, feeds and log tiles live in R2 under `semanto/<trooth_id>/v<version>/`. D1 holds metadata only.
+See `migrations/0001_semanto.sql` to `migrations/0005_audit_fixes.sql`. Page bodies, parts, feeds and log tiles live in R2 under `semanto/<trooth_id>/v<version>/`. D1 holds metadata only.
 
 ## Public routes (served by `src/serve/routes.ts`, wired in `src/index.ts`)
 
@@ -75,16 +76,29 @@ GET  /public/semanto/{trooth_id}/resolve?path=&accept=  what an adapter should d
 GET  /public/semanto/{trooth_id}/products | products/{smk_id} | offers | offers/{sku}
 GET  /public/semanto/{trooth_id}/feeds/{merchant-center|merchant-center.tsv|acp|ucp}
 GET  /public/semanto/{trooth_id}/.well-known/ucp
-OPTIONS *                                               CORS preflight
+GET  /public/semanto/{trooth_id}/sellers?domain=&sku= | synonyms?name=
+GET  /public/semanto/{trooth_id}/revocations            the company's signed revocation list
+GET  /public/semanto/revocations                        every company's signed revocation list
+GET  /public/semanto/.well-known/trooth-keys.json | keys/trooth.json    Trooth's witness JWK Set (the verifier CLIs' default)
+POST /public/semanto/catalogs/check                     a nested marketplace catalog, checked layer by layer
+OPTIONS *                                               CORS preflight (the /os routes allow only https://trooth.co)
 
+GET  /os/semanto/setup                                  the setup state (a vendor session with no company yet answers the company step)
+POST /os/semanto/setup/start | claim                    claim the domain (fixed from then on); start also queues a held read
 GET|POST /os/semanto/{trooth_id}/settings               delivery settings (workspace session)
+GET  /os/semanto/{trooth_id}/setup | setup/review | keys | writeback | receipts | receipts.csv
 POST /os/semanto/{trooth_id}/build | sign | gap-report | monitor/run | keys/rotate | lei | basic/claim | basic/prove | first-publication | connectors
-                                                        workspace session through worker-f (TROOTH_OS service binding); denied by default with a 401 problem
+POST /os/semanto/{trooth_id}/withdraw | detect | competitor-report | keys/{kid}/revoke
+POST /os/semanto/{trooth_id}/setup/look-again | read-again | choose | confirm | host | install-check | monitoring | save-for-later | resume
+                                                        workspace session through worker-f (TROOTH_OS service binding); denied by default with a 401 problem;
+                                                        every answer Cache-Control: private, no-store (docs/spec/setup-api.md)
 POST /os/semanto/{trooth_id}/commerce/catalog           commerce connectors; RFC 9421 signature with tag trooth-connector against a connector key on file
 ```
 
-The pipeline behind the `/os` routes, the queue consumer and the crons is `src/pipeline.ts`: compile on the queue (`trooth-semanto-compile`), hourly change detection (`15 * * * *`), nightly tree head, RFC 3161 timestamp and revocation list (`30 1 * * *`), weekly gap reports (`0 6 * * 1`, the same value as `WEEKLY_RUN.cron`).
+Public routes pass a token bucket per client address and route group (the RateLimitDO bound as RATE; 429 problems with Retry-After). Every POST body is capped at 5 MB (a 413 problem). Nothing is served, signed or witnessed for a company whose domain is not proven.
 
-Planned, not served by this Worker: `/public/semanto/{trooth_id}/receipts` (read receipts are stored; the dashboard reads them through the workspace API). `/.well-known/trooth-keys.json` and `/.well-known/trooth.semanto` on a company's own domain are served by the adapters from the hosted copies above.
+The pipeline behind the `/os` routes, the queue consumer and the crons is `src/pipeline.ts` (the setup flow in `src/pipeline-setup.ts`): a build is split into queue messages of at most 25 pages with a final assembly (`src/compiler/stream.ts`, queue `trooth-semanto-compile`, dead letter queue `trooth-semanto-compile-dlq`); hourly change detection and pending domain proofs (`15 * * * *`), nightly tree head, RFC 3161 timestamp when `TSA_URL` is set and every revocation list (`30 1 * * *`), weekly gap reports (`0 6 * * 1`, the same value as `WEEKLY_RUN.cron`). The hourly and weekly crons queue one message per 25 companies.
+
+Read receipts are served to the company only, through the workspace API (`GET /os/semanto/{trooth_id}/receipts` and `/receipts.csv`); there is no public receipts route. `/.well-known/trooth-keys.json` and `/.well-known/trooth.semanto` on a company's own domain are served by the adapters from the hosted copies above.
 
 The company's own domain serves the same bytes through an adapter: a Cloudflare Worker, Vercel middleware, a Netlify edge function, a Fastly or Akamai or Gcore template, an nginx or Apache snippet, the WordPress plugin, or, where no code can run, a head tag pointing at the Trooth-hosted copy.

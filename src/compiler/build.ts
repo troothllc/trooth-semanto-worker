@@ -12,7 +12,7 @@
 // urls and reuses every unchanged page entry, body and fact, keeping the old
 // witnessed_at because that is when the page was seen. The coverage receipt
 // says what was found, what was read, what was left out and why, and what
-// changed; it never scores anything.
+// changed; it never ranks anything.
 
 import { estimateTokens } from "../core/tokens";
 import { digest } from "../core/hash";
@@ -25,7 +25,7 @@ import {
 } from "../core/semanto";
 import type { DiscoveryResult, DiscoveredUrl } from "./discover";
 import { robotsAllows } from "./discover";
-import { extract, pageBlocks, detectChrome, parseFrontMatter, type IndexSignals } from "./extract";
+import { extract, pageBlockKeys, detectChrome, parseFrontMatter, type IndexSignals } from "./extract";
 import { extractFacts } from "./facts";
 import { buildLlmsTxt, buildLlmsFull, buildSitemapMd, describePage } from "./llms";
 import { pathOf } from "./url";
@@ -107,42 +107,54 @@ function textBytes(s: string): Uint8Array {
   return utf8(s);
 }
 
-export async function buildVersion(input: BuildInput): Promise<BuildOutput> {
-  const domain = input.identity.domain;
-  const partLimit = input.partLimitBytes ?? 2_000_000;
-  const prev = input.previous ?? null;
-  const prevByUrl = new Map<string, PageEntry[]>();
-  if (prev) {
-    for (const p of prev.file.header.pages_manifest) {
-      const list = prevByUrl.get(p.url) ?? [];
-      list.push(p);
-      prevByUrl.set(p.url, list);
-    }
-  }
-  const fetchedByUrl = new Map(input.fetched.map((f) => [f.url, f] as const));
-  const changed = new Set(input.changed_urls ?? []);
-  for (const f of input.fetched) {
-    const old = prevByUrl.get(f.url)?.[0];
-    if (!old || old.source_hash !== f.source_hash) changed.add(f.url);
-  }
+/** What a build knows about one fetched page before rendering it: no body. */
+export interface FetchedMeta {
+  status: number;
+  source_hash: string;
+  truncated?: boolean;
+}
 
-  // Which discovered urls become pages, and why the others do not.
+export interface PlanItem {
+  url: string;
+  action: "render" | "reuse";
+}
+
+export interface BuildPlan {
+  /** Pages to render or reuse, in discovery order. */
+  items: PlanItem[];
+  left_out: { url: string; reason: string }[];
+}
+
+/**
+ * Which discovered urls become pages, and why the others do not. A page is
+ * reused from the previous version when it is unchanged (not in changed_urls
+ * and its source hash is the same) and its body is on hand.
+ */
+export function planBuild(
+  urls: DiscoveredUrl[],
+  fetched: ReadonlyMap<string, FetchedMeta>,
+  previous: { manifest: PageEntry[]; hasBody(id: string): boolean } | null,
+  changed_urls?: string[],
+): BuildPlan {
+  const prevByUrl = new Map<string, PageEntry[]>();
+  if (previous) for (const p of previous.manifest) prevByUrl.set(p.url, [...(prevByUrl.get(p.url) ?? []), p]);
+  const changed = new Set(changed_urls ?? []);
+  for (const [url, f] of fetched) {
+    const old = prevByUrl.get(url)?.[0];
+    if (!old || old.source_hash !== f.source_hash) changed.add(url);
+  }
   const left_out: { url: string; reason: string }[] = [];
-  const toRender: { d: DiscoveredUrl; f: FetchedPage }[] = [];
-  const toReuse: { d: DiscoveredUrl; entries: PageEntry[] }[] = [];
-  for (const d of input.discovery.urls) {
+  const items: PlanItem[] = [];
+  for (const d of urls) {
     if (d.excluded) {
       left_out.push({ url: d.url, reason: d.excluded.reason });
       continue;
     }
-    const f = fetchedByUrl.get(d.url);
+    const f = fetched.get(d.url);
     const old = prevByUrl.get(d.url);
-    if (prev && old && !changed.has(d.url)) {
-      const reusable = old.every((e) => prev.bodies[e.id]);
-      if (reusable) {
-        toReuse.push({ d, entries: old });
-        continue;
-      }
+    if (previous && old && !changed.has(d.url) && old.every((e) => previous.hasBody(e.id))) {
+      items.push({ url: d.url, action: "reuse" });
+      continue;
     }
     if (!f) {
       left_out.push({ url: d.url, reason: d.status !== undefined && d.status !== 200 ? `answered ${d.status}` : "not fetched" });
@@ -156,78 +168,93 @@ export async function buildVersion(input: BuildInput): Promise<BuildOutput> {
       left_out.push({ url: d.url, reason: "HTML above the 2 MB cap" });
       continue;
     }
-    toRender.push({ d, f });
+    items.push({ url: d.url, action: "render" });
   }
+  return { items, left_out };
+}
 
-  // Chrome by repetition over the pages rendered in this build.
-  const blockLists = toRender.map(({ d, f }) => pageBlocks(f.html, d.url));
-  const chrome = detectChrome(blockLists, input.chromeThreshold ?? 0.6);
+/** One page rendered: its manifest entries with their exact bodies, its facts, its signals and a one-line description per entry. */
+export interface RenderedPage {
+  url: string;
+  entries: { entry: PageEntry; bytes: Uint8Array; description: string }[];
+  facts: Fact[];
+  signals: IndexSignals;
+}
 
-  const manifest: PageEntry[] = [];
-  const bodies: Record<string, Uint8Array> = {};
-  const signals: Record<string, IndexSignals> = {};
+export async function renderPage(f: FetchedPage, ctx: { robots: DiscoveryResult["robots"]; chromeKeys: ReadonlySet<string>; partLimitBytes?: number }): Promise<RenderedPage> {
+  const robotsBlocked = !robotsAllows(ctx.robots, f.url);
+  const ex = extract({ html: f.html, url: f.url, witnessed_at: f.witnessed_at, source_hash: f.source_hash, headers: f.headers, robotsBlocked, chromeKeys: ctx.chromeKeys, partLimitBytes: ctx.partLimitBytes ?? 2_000_000 });
+  const original_tokens = estimateTokens(f.html);
+  const entries: RenderedPage["entries"] = [];
+  for (let i = 0; i < ex.parts.length; i++) {
+    const md = ex.parts[i]!;
+    const bytes = textBytes(md);
+    const entry: PageEntry = {
+      id: await pageId(bytes),
+      url: f.url,
+      title: ex.title,
+      hash: await digest(bytes),
+      source_hash: f.source_hash,
+      bytes: bytes.length,
+      tokens: estimateTokens(md),
+      original_tokens,
+      witnessed_at: f.witnessed_at,
+      ...(ex.lang ? { lang: ex.lang } : {}),
+      ...(ex.parts.length > 1 ? { part: { n: i + 1, of: ex.parts.length } } : {}),
+      status: 200,
+      index: { noindex: ex.signals.noindex, nosnippet: ex.signals.nosnippet, canonical: ex.signals.canonical, robots_blocked: ex.signals.robots_blocked },
+    };
+    entries.push({ entry, bytes, description: describePage(md) });
+  }
+  const facts = await extractFacts({ url: f.url, witnessed_at: f.witnessed_at, html: f.html, body: ex.body });
+  return { url: f.url, entries, facts, signals: ex.signals };
+}
+
+/** Facts in page order, the first of each key and value kept. */
+export function dedupeFacts(lists: Iterable<Fact[]>): Fact[] {
   const facts: Fact[] = [];
-  const factSigs = new Set<string>();
-  const addFacts = (list: Fact[]) => {
+  const seen = new Set<string>();
+  for (const list of lists) {
     for (const f of list) {
       const sig = `${f.key}|${JSON.stringify(f.value ?? null)}`;
-      if (factSigs.has(sig)) continue;
-      factSigs.add(sig);
+      if (seen.has(sig)) continue;
+      seen.add(sig);
       facts.push(f);
     }
-  };
-
-  // Keep discovery order: rendered and reused pages interleave as discovered.
-  const renderMap = new Map(toRender.map((r) => [r.d.url, r] as const));
-  const reuseMap = new Map(toReuse.map((r) => [r.d.url, r] as const));
-  const prevFactsByUrl = new Map<string, Fact[]>();
-  if (prev) for (const f of prev.file.facts) prevFactsByUrl.set(f.evidence.url, [...(prevFactsByUrl.get(f.evidence.url) ?? []), f]);
-
-  for (const d of input.discovery.urls) {
-    const r = renderMap.get(d.url);
-    if (r) {
-      const { f } = r;
-      const robotsBlocked = !robotsAllows(input.discovery.robots, d.url);
-      const ex = extract({ html: f.html, url: d.url, witnessed_at: f.witnessed_at, source_hash: f.source_hash, headers: f.headers, robotsBlocked, chrome, partLimitBytes: partLimit });
-      signals[d.url] = ex.signals;
-      const original_tokens = estimateTokens(f.html);
-      for (let i = 0; i < ex.parts.length; i++) {
-        const md = ex.parts[i]!;
-        const bytes = textBytes(md);
-        const hash = await digest(bytes);
-        const id = await pageId(bytes);
-        const entry: PageEntry = {
-          id,
-          url: d.url,
-          title: ex.title,
-          hash,
-          source_hash: f.source_hash,
-          bytes: bytes.length,
-          tokens: estimateTokens(md),
-          original_tokens,
-          witnessed_at: f.witnessed_at,
-          ...(ex.lang ? { lang: ex.lang } : {}),
-          ...(ex.parts.length > 1 ? { part: { n: i + 1, of: ex.parts.length } } : {}),
-          status: 200,
-          index: { noindex: ex.signals.noindex, nosnippet: ex.signals.nosnippet, canonical: ex.signals.canonical, robots_blocked: ex.signals.robots_blocked },
-        };
-        manifest.push(entry);
-        bodies[id] = bytes;
-      }
-      addFacts(await extractFacts({ url: d.url, witnessed_at: f.witnessed_at, html: f.html, body: ex.body }));
-      continue;
-    }
-    const u = reuseMap.get(d.url);
-    if (u && prev) {
-      for (const e of u.entries) {
-        manifest.push(e);
-        bodies[e.id] = prev.bodies[e.id]!;
-        signals[d.url] = { noindex: e.index.noindex, nosnippet: e.index.nosnippet, canonical: e.index.canonical, hreflang: [], robots_blocked: e.index.robots_blocked };
-      }
-      addFacts(prevFactsByUrl.get(d.url) ?? []);
-    }
   }
+  return facts;
+}
 
+export interface AssembleInput {
+  org: string;
+  identity: Identity;
+  profile: string;
+  version: number;
+  supersedes: number | null;
+  built_at: string;
+  /** How many urls discovery listed. */
+  found: number;
+  /** Manifest entries in order, each with its one-line description. */
+  manifest: { entry: PageEntry; description: string }[];
+  facts: Fact[];
+  left_out: { url: string; reason: string }[];
+  /** The previous version's manifest, for the receipt's changed and removed. */
+  previousManifest?: PageEntry[];
+  controls?: Partial<Controls>;
+  question_map?: QuestionMapEntry[];
+  documents?: DocumentEntry[];
+  products?: unknown[];
+  summary?: string;
+  not_after?: string | null;
+  /** llms-full.txt, built by the caller from the bodies (it alone holds them), or null when too large to hold. */
+  llmsFull: string | null;
+}
+
+/** The version from its manifest and facts: tiers, roots, header, receipt and llms files. Hashing follows src/core/semanto.ts. */
+export async function assembleVersion(input: AssembleInput): Promise<{ file: SemantoFile; receipt: CoverageReceipt; llms: { llmsTxt: string; llmsFull: string | null; sitemapMd: string } }> {
+  const domain = input.identity.domain;
+  const manifest = input.manifest.map((m) => m.entry);
+  const facts = input.facts;
   const controls: Controls = { ...DEFAULT_CONTROLS, ...(input.controls ?? {}) };
   const question_map = input.question_map ?? [];
   const documents = input.documents ?? [];
@@ -264,56 +291,89 @@ export async function buildVersion(input: BuildInput): Promise<BuildOutput> {
     pages_manifest: manifest,
     identity: input.identity,
   };
-  const file: SemantoFile = {
-    header,
-    facts,
-    controls,
-    question_map,
-    documents,
-    products,
-    root_hash: await rootHash(header),
-    signature: null,
-    witness: null,
-    ledger: null,
-  };
+  const file: SemantoFile = { header, facts, controls, question_map, documents, products, root_hash: await rootHash(header), signature: null, witness: null, ledger: null };
 
   // Receipt
   const prevHashByKey = new Map<string, string>();
-  if (prev) for (const p of prev.file.header.pages_manifest) prevHashByKey.set(`${p.url}#${p.part?.n ?? 1}`, p.hash);
+  for (const p of input.previousManifest ?? []) prevHashByKey.set(`${p.url}#${p.part?.n ?? 1}`, p.hash);
   const changedUrls = new Set<string>();
   for (const p of manifest) if (prevHashByKey.get(`${p.url}#${p.part?.n ?? 1}`) !== p.hash) changedUrls.add(p.url);
   const nowUrls = new Set(manifest.map((p) => p.url));
-  const removed = prev ? [...new Set(prev.file.header.pages_manifest.map((p) => p.url))].filter((u) => !nowUrls.has(u)) : [];
-  const receiptBody = {
-    trooth_id: input.identity.trooth_id,
-    version: input.version,
-    built_at: input.built_at,
-    found: input.discovery.urls.length,
-    read: nowUrls.size,
-    left_out,
-    changed: [...changedUrls],
-    removed,
-  };
+  const removed = input.previousManifest ? [...new Set(input.previousManifest.map((p) => p.url))].filter((u) => !nowUrls.has(u)) : [];
+  const receiptBody = { trooth_id: input.identity.trooth_id, version: input.version, built_at: input.built_at, found: input.found, read: nowUrls.size, left_out: input.left_out, changed: [...changedUrls], removed };
   const receipt: CoverageReceipt = { id: semantoId("smr", await digest(canonicalize(receiptBody))), ...receiptBody };
 
   // llms files
-  const dec = new TextDecoder();
-  const markdownOf = (p: PageEntry) => dec.decode(bodies[p.id]!);
-  const homeEntry = manifest.find((p) => pathOf(p.url) === "/" && (!p.part || p.part.n === 1));
-  const summary = input.summary ?? (homeEntry ? describePage(markdownOf(homeEntry)) : "");
-  const siteName = input.org;
-  const llmsTxt = buildLlmsTxt({
-    siteName,
-    domain,
-    summary,
-    pages: manifest.map((entry) => ({ entry, description: describePage(markdownOf(entry)) })),
-    troothId: input.identity.trooth_id,
-    networkUrl: input.profile,
-  });
-  const llmsFull = buildLlmsFull(siteName, manifest.map((entry) => ({ entry, markdown: markdownOf(entry) })));
-  const sitemapMd = buildSitemapMd(siteName, manifest);
+  const homeEntry = input.manifest.find((p) => pathOf(p.entry.url) === "/" && (!p.entry.part || p.entry.part.n === 1));
+  const summary = input.summary ?? (homeEntry ? homeEntry.description : "");
+  const llmsTxt = buildLlmsTxt({ siteName: input.org, domain, summary, pages: input.manifest.map((m) => ({ entry: m.entry, description: m.description })), troothId: input.identity.trooth_id, networkUrl: input.profile });
+  const sitemapMd = buildSitemapMd(input.org, manifest);
+  return { file, receipt, llms: { llmsTxt, llmsFull: input.llmsFull, sitemapMd } };
+}
 
-  return { file, bodies, receipt, llms: { llmsTxt, llmsFull, sitemapMd }, signals };
+export async function buildVersion(input: BuildInput): Promise<BuildOutput> {
+  const partLimit = input.partLimitBytes ?? 2_000_000;
+  const prev = input.previous ?? null;
+  const fetchedByUrl = new Map(input.fetched.map((f) => [f.url, f] as const));
+  const plan = planBuild(input.discovery.urls, fetchedByUrl, prev ? { manifest: prev.file.header.pages_manifest, hasBody: (id) => Boolean(prev.bodies[id]) } : null, input.changed_urls);
+
+  // Chrome by repetition over the pages rendered in this build, by block key.
+  const toRender = plan.items.filter((i) => i.action === "render").map((i) => fetchedByUrl.get(i.url)!);
+  const chromeKeys = detectChrome(toRender.map((f) => pageBlockKeys(f.html, f.url)), input.chromeThreshold ?? 0.6);
+
+  const prevByUrl = new Map<string, PageEntry[]>();
+  const prevFactsByUrl = new Map<string, Fact[]>();
+  if (prev) {
+    for (const p of prev.file.header.pages_manifest) prevByUrl.set(p.url, [...(prevByUrl.get(p.url) ?? []), p]);
+    for (const f of prev.file.facts) prevFactsByUrl.set(f.evidence.url, [...(prevFactsByUrl.get(f.evidence.url) ?? []), f]);
+  }
+
+  const manifest: { entry: PageEntry; description: string }[] = [];
+  const bodies: Record<string, Uint8Array> = {};
+  const signals: Record<string, IndexSignals> = {};
+  const factLists: Fact[][] = [];
+  const dec = new TextDecoder();
+  for (const item of plan.items) {
+    if (item.action === "render") {
+      const r = await renderPage(fetchedByUrl.get(item.url)!, { robots: input.discovery.robots, chromeKeys, partLimitBytes: partLimit });
+      signals[item.url] = r.signals;
+      for (const e of r.entries) {
+        manifest.push({ entry: e.entry, description: e.description });
+        bodies[e.entry.id] = e.bytes;
+      }
+      factLists.push(r.facts);
+      continue;
+    }
+    for (const e of prevByUrl.get(item.url) ?? []) {
+      const body = prev!.bodies[e.id]!;
+      manifest.push({ entry: e, description: describePage(dec.decode(body)) });
+      bodies[e.id] = body;
+      signals[item.url] = { noindex: e.index.noindex, nosnippet: e.index.nosnippet, canonical: e.index.canonical, hreflang: [], robots_blocked: e.index.robots_blocked };
+    }
+    factLists.push(prevFactsByUrl.get(item.url) ?? []);
+  }
+  const llmsFull = buildLlmsFull(input.org, manifest.map((m) => ({ entry: m.entry, markdown: dec.decode(bodies[m.entry.id]!) })));
+  const out = await assembleVersion({
+    org: input.org,
+    identity: input.identity,
+    profile: input.profile,
+    version: input.version,
+    supersedes: input.supersedes,
+    built_at: input.built_at,
+    found: input.discovery.urls.length,
+    manifest,
+    facts: dedupeFacts(factLists),
+    left_out: plan.left_out,
+    ...(prev ? { previousManifest: prev.file.header.pages_manifest } : {}),
+    ...(input.controls ? { controls: input.controls } : {}),
+    ...(input.question_map ? { question_map: input.question_map } : {}),
+    ...(input.documents ? { documents: input.documents } : {}),
+    ...(input.products ? { products: input.products } : {}),
+    ...(input.summary !== undefined ? { summary: input.summary } : {}),
+    ...(input.not_after !== undefined ? { not_after: input.not_after } : {}),
+    llmsFull,
+  });
+  return { file: out.file, bodies, receipt: out.receipt, llms: { llmsTxt: out.llms.llmsTxt, llmsFull, sitemapMd: out.llms.sitemapMd }, signals };
 }
 
 /** The body text of a stored page, without front matter. */

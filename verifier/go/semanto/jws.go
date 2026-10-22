@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Trooth, LLC
 //
 // Ed25519 JWKs (RFC 8037, RFC 7638 thumbprints as key ids) and JWS compact

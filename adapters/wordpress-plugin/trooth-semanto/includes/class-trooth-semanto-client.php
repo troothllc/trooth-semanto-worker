@@ -55,11 +55,12 @@ final class Trooth_Semanto_Client {
 			// Vouch for the host the reader addressed and its address, signed with the connector key.
 			$headers['Trooth-Forwarded-Authority'] = strtolower( (string) ( $request_headers['Host'] ?? wp_parse_url( home_url(), PHP_URL_HOST ) ) );
 			$headers['Trooth-Forwarded-For']       = (string) ( $request_headers['Client-Address'] ?? '' );
+			$headers['Trooth-Forwarded-Path']      = (string) ( $request_headers['Forwarded-Path'] ?? '/' );
 			$fwd = Trooth_Semanto_Signer::available() ? Trooth_Semanto_Signer::sign_forwarding( $url, $headers ) : null;
 			if ( $fwd ) {
 				$headers = array_merge( $headers, $fwd );
 			} else {
-				unset( $headers['Trooth-Forwarded-Authority'], $headers['Trooth-Forwarded-For'] );
+				unset( $headers['Trooth-Forwarded-Authority'], $headers['Trooth-Forwarded-For'], $headers['Trooth-Forwarded-Path'] );
 			}
 		}
 		if ( is_array( $cached ) && ! empty( $cached['etag'] ) ) {

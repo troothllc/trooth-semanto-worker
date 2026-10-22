@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// Copyright (c) 2026 Trooth, LLC
+//
+// Tests for src/core: encodings, hashing, RFC 8785, RFC 6962, keys, JWS, RFC 9421, negotiation, ids.
+
 import { describe, it, expect } from "vitest";
 import { canonicalize } from "@/core/canonical";
 import { digest, sha256Hex } from "@/core/hash";

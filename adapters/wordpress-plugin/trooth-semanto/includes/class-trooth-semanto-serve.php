@@ -70,8 +70,13 @@ final class Trooth_Semanto_Serve {
 		if ( ! empty( $_SERVER['HTTP_HOST'] ) ) {
 			$request_headers['Host'] = strtolower( (string) wp_unslash( $_SERVER['HTTP_HOST'] ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
 		}
+		// REMOTE_ADDR is the address the web server itself saw, never a header the client sent.
 		if ( ! empty( $_SERVER['REMOTE_ADDR'] ) ) {
 			$request_headers['Client-Address'] = (string) wp_unslash( $_SERVER['REMOTE_ADDR'] ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		}
+		// The path and query the reader asked for, so a reader that signs @path is proven against it.
+		if ( ! empty( $_SERVER['REQUEST_URI'] ) ) {
+			$request_headers['Forwarded-Path'] = (string) wp_unslash( $_SERVER['REQUEST_URI'] ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
 		}
 		$res = $this->client->get( $decision['url'], $request_headers );
 		if ( is_wp_error( $res ) ) {

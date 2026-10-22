@@ -11,7 +11,9 @@
 //     Cloudflare's converter drops ETag because its bytes change; Semanto's
 //     bytes are signed and stable, so the ETag is kept and 304 works.
 //   x-markdown-tokens, x-original-tokens: Cloudflare's names (Markdown for
-//     Agents, 26 Feb 2026) so a reader needs one code path.
+//     Agents, 26 Feb 2026) so a reader needs one code path. These two are the
+//     only X- names Semanto sends, kept on purpose for compatibility with
+//     Cloudflare's converter; every Trooth header has no X- prefix (RFC 6648).
 //   Trooth-Contract, Trooth-Semanto-Version, Trooth-Page-Hash: the proof
 //     headers. Trooth-Page-Hash is ALWAYS the digest of the exact body bytes
 //     of this response, so a reader can check it against Content-Digest and
@@ -40,7 +42,7 @@ import { SEMANTO_CONTRACT } from "../core/semanto";
 import type { PrivateJwk } from "../core/keys";
 import { contentSignalHeader, type ContentSignals } from "../settings/delivery";
 
-export type ServedRepresentation = "markdown" | "jsonld" | "json" | "problem_json" | "text" | "tsv";
+export type ServedRepresentation = "markdown" | "jsonld" | "json" | "problem_json" | "text" | "tsv" | "csv";
 
 export const CONTENT_TYPES: Record<ServedRepresentation, string> = {
   markdown: "text/markdown; charset=utf-8",
@@ -49,6 +51,7 @@ export const CONTENT_TYPES: Record<ServedRepresentation, string> = {
   problem_json: "application/problem+json",
   text: "text/plain; charset=utf-8",
   tsv: "text/tab-separated-values; charset=utf-8",
+  csv: "text/csv; charset=utf-8",
 };
 
 export const CACHE_MAX_AGE_SECONDS = 300;
@@ -121,9 +124,11 @@ export interface ResponseSpec {
   /**
    * Trooth-Semanto-State: "behind" when the live page changed after the last
    * signature (the last signed bytes are served); "witnessed-not-signed" for a
-   * Semanto Basic record, which Trooth witnessed and the company did not sign.
+   * Semanto Basic record, which Trooth witnessed and the company did not sign;
+   * "unsigned" on a redirect to a live page that changed after signing (the
+   * company chose serve_live_marked_unsigned).
    */
-  state?: "behind" | "witnessed-not-signed" | null;
+  state?: "behind" | "witnessed-not-signed" | "unsigned" | null;
   retry_after_seconds?: number | null;
   /** Clock, so the signature's created and expires are stable in tests. */
   now: Date;

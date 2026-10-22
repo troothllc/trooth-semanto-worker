@@ -10,12 +10,22 @@ export interface Env {
   DB: D1Database;
   /** R2: page bodies, Semanto parts, ledger leaves and tiles, feeds. */
   STORE: R2Bucket;
-  /** KV: serving cache keys, host detection results, rate limits. */
+  /** KV: the Web Bot Auth key directory cache and the nonce fallback. */
   CACHE: KVNamespace;
-  /** Queue: compile jobs. */
-  COMPILE_QUEUE?: Queue<CompileJob>;
-  /** Trooth's own witness signing key, as a private JWK JSON string (secret). */
-  TROOTH_WITNESS_KEY: string;
+  /** Queue: compile jobs, build stages and the per-company cron fan-out (src/pipeline.ts QueueMessage). */
+  COMPILE_QUEUE?: Queue<QueueMessage>;
+  /**
+   * Trooth's own witness signing key, as a private JWK JSON string (secret).
+   * Without it the Worker still answers: routes that sign or witness answer a
+   * 503 witness_key_missing problem and the rest keep working.
+   */
+  TROOTH_WITNESS_KEY?: string;
+  /** Earlier witness public keys (JSON array of public JWKs with exp or revoked_at), still served so old signatures check out. */
+  TROOTH_WITNESS_PREVIOUS_KEYS?: string;
+  /** PKCS #8 PEM of the Domain Connect signing key (secret); only used once a DNS provider has onboarded the template. */
+  DOMAIN_CONNECT_PRIVATE_KEY?: string;
+  /** Durable Object RateLimitDO (src/readers/rate-limit.ts): token buckets per client and route group, and read receipts counted per minute. */
+  RATE?: DurableObjectNamespace;
   /** Base URLs. */
   PUBLIC_API_BASE: string; // https://api.trooth.co/public/semanto
   NETWORK_BASE: string; // https://trooth.co/network/company
@@ -40,14 +50,28 @@ export interface Env {
   NONCES?: DurableObjectNamespace;
   /** Durable Object LogDO (src/ledger/log-do.ts): the one writer for the public log, so appends are serialized. */
   LOG?: DurableObjectNamespace;
+  /** "production" or "development"; production refuses to start a build without the compile queue. */
   ENVIRONMENT: "development" | "production";
 }
 
 export interface CompileJob {
   trooth_id: string;
   domain: string;
-  reason: "first_build" | "change_detected" | "manual" | "scheduled";
+  reason: "first_build" | "change_detected" | "manual" | "scheduled" | "setup";
   /** Only these urls changed; absent means full discovery. */
   changed_urls?: string[];
   requested_at: string;
 }
+
+/** The per-company work the crons fan out, at most 25 companies a message. */
+export interface CompaniesMessage {
+  kind: "companies";
+  job: "changes" | "gap" | "proof";
+  trooth_ids: string[];
+}
+
+/** One build stage (src/compiler/stream.ts StageMessage). */
+export type { StageMessage } from "./compiler/stream";
+import type { StageMessage } from "./compiler/stream";
+
+export type QueueMessage = CompileJob | StageMessage | CompaniesMessage;

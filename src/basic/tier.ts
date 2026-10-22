@@ -5,17 +5,23 @@
 //
 //   claim -> domain_proved -> basic_built -> upgraded
 //
-// Domain proof is a DNS TXT record at _trooth.<domain> or a well-known file,
-// the same two methods ACME uses (RFC 8555, dns-01 and http-01) and Google
-// Search Console offers. Once proved, Trooth builds and hosts the record from
-// the public site in state "read": the company signs nothing yet, so the
-// record is witnessed by Trooth and not signed by the company, and every
-// Basic response says so in those words. "Upgraded" is the full tier after the
-// Trust Profile, when the company's own key signs the version.
+// One domain proof record format (docs/audit/workflow-research.md section 6,
+// item 1, the Domain Connect template's split): the proof is a DNS TXT record
+// at _trooth-challenge.<domain> whose value is trooth-domain-challenge= and 48
+// lowercase hex characters, or the same value in the well-known file
+// /.well-known/trooth-claim.txt, the two methods ACME uses (RFC 8555, dns-01
+// and http-01) and Google Search Console offers. _trooth.<domain> is reserved
+// for the pointer v=trooth1; id=<trooth_id>; key=<kid> and is never read as
+// proof. The domain is the one fixed at the claim; a proof never names another.
+// Once proved, the record Trooth read from the public site (a read may start
+// before the proof and is held) is witnessed by Trooth and not signed by the
+// company, and every Basic response says so in those words. "Upgraded" is the
+// full tier, when the company's own key signs the version.
 //
-// The ten-minute setup is a checklist with a timing target per step, and the
-// time spent is measured from timestamps, so the target is measured, not
-// claimed.
+// The setup is nine steps with a timing target each (section 5): Basic is
+// steps 1 to 4 within 600 seconds, the full path steps 1 to 9 within 900. The
+// time spent is measured from server timestamps, so the target is measured,
+// not claimed.
 
 import { isTroothId } from "../core/ids";
 import type { BuiltRecord, DomainProofPort, RecordBuilderPort } from "./ports";
@@ -40,19 +46,57 @@ export interface BasicCompany {
 
 export const WITNESSED_NOT_SIGNED = "This record is witnessed by Trooth and not signed by the company. Semanto Basic builds it from the public site; the company has not signed it.";
 
-export const DNS_NAME_PREFIX = "_trooth";
+/** The proof record's name prefix: _trooth-challenge.<domain>. */
+export const DNS_NAME_PREFIX = "_trooth-challenge";
+/** Reserved for the pointer record v=trooth1; id=<trooth_id>; key=<kid>. Never read as proof. */
+export const POINTER_NAME_PREFIX = "_trooth";
 export const WELL_KNOWN_PATH = "/.well-known/trooth-claim.txt";
+export const CHALLENGE_PREFIX = "trooth-domain-challenge=";
+export const CHALLENGE_RE = /^trooth-domain-challenge=[0-9a-f]{48}$/;
+export const POINTER_RE = /^v=trooth1;\s*id=[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?;\s*key=[A-Za-z0-9_-]{16,128}$/;
 
-export function dnsClaimRecord(token: string): string {
-  return `v=trooth1; claim=${token}`;
+/** A fresh proof value from 24 random bytes: trooth-domain-challenge= and 48 lowercase hex. */
+export function newChallenge(random: Uint8Array): string {
+  if (random.length !== 24) throw new Error("newChallenge: 24 random bytes");
+  return CHALLENGE_PREFIX + [...random].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** The TXT value to publish. The proof value is the whole record. */
+export function dnsClaimRecord(token: string): string {
+  return token;
+}
+
+/** The proof record's name: _trooth-challenge.<domain>. */
 export function dnsClaimName(domain: string): string {
   return `${DNS_NAME_PREFIX}.${domain.toLowerCase()}`;
 }
 
+/** The pointer record's name: _trooth.<domain>. */
+export function pointerRecordName(domain: string): string {
+  return `${POINTER_NAME_PREFIX}.${domain.toLowerCase()}`;
+}
+
+/** The pointer record's value. */
+export function pointerRecordValue(trooth_id: string, kid: string): string {
+  return `v=trooth1; id=${trooth_id}; key=${kid}`;
+}
+
 export function wellKnownClaimUrl(domain: string): string {
   return `https://${domain.toLowerCase()}${WELL_KNOWN_PATH}`;
+}
+
+/**
+ * Clean what a person pastes into the website field: the scheme, a leading
+ * www., any path, query, fragment and port go, and the host is lowercased.
+ * Null when what is left is not a domain name.
+ */
+export function cleanDomain(input: string): string | null {
+  let d = input.trim().toLowerCase();
+  d = d.replace(/^[a-z][a-z0-9+.-]*:\/\//, "");
+  d = d.replace(/[/?#].*$/, "").replace(/:\d+$/, "").replace(/\.+$/, "");
+  d = d.replace(/^www\./, "");
+  if (d.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(d)) return null;
+  return d;
 }
 
 /** What Basic serves and what it does not. Data, so the dashboard and the docs read the same list. */
@@ -75,9 +119,9 @@ export const BASIC_ENTITLEMENTS = {
 
 export function claim(trooth_id: string, domain: string, claim_token: string, now: Date): BasicCompany {
   if (!isTroothId(trooth_id)) throw new Error("claim: not a Trooth id");
-  const d = domain.toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(d)) throw new Error("claim: not a domain");
-  if (!/^[A-Za-z0-9_-]{16,}$/.test(claim_token)) throw new Error("claim: token too short");
+  const d = cleanDomain(domain);
+  if (!d) throw new Error("claim: not a domain");
+  if (!CHALLENGE_RE.test(claim_token)) throw new Error("claim: not a proof value (trooth-domain-challenge= and 48 hex)");
   return { trooth_id, domain: d, state: "claim", claim_token, claimed_at: now.toISOString() };
 }
 
@@ -94,7 +138,7 @@ export async function proveDomain(c: BasicCompany, port: DomainProofPort, now: D
   const checked = { dns_name, dns_values, well_known_url, well_known_found: file !== null };
   if (c.state !== "claim") return { ok: false, reason: "already_proved", checked };
   const want = dnsClaimRecord(c.claim_token);
-  const dnsOk = dns_values.some((v) => v.trim().replace(/^"|"$/g, "") === want);
+  const dnsOk = dns_values.some((v) => v.trim().replace(/^"+|"+$/g, "").trim() === want);
   if (dnsOk) return { ok: true, method: "dns_txt", company: { ...c, state: "domain_proved", domain_proved_at: now.toISOString(), proof_method: "dns_txt" } };
   if (file !== null) {
     if (file.trim() === c.claim_token) return { ok: true, method: "well_known", company: { ...c, state: "domain_proved", domain_proved_at: now.toISOString(), proof_method: "well_known" } };
@@ -145,28 +189,45 @@ export function basicHeaders(): Record<string, string> {
   return { "Trooth-Record-State": "read", "Trooth-Witnessed-By": "Trooth", "Trooth-Signed-By-Company": "no" };
 }
 
-// ------------------------------------------------------------------ the ten-minute setup
+// ------------------------------------------------------------------ the setup: nine steps, measured
+
+export type SetupStepId = "sign_in" | "company" | "prove_domain" | "read_site" | "review" | "sign" | "install" | "check" | "monitoring";
 
 export interface SetupStep {
-  id: string;
+  n: number;
+  id: SetupStepId;
   words: string;
   /** Who does it. */
-  who: "company" | "trooth";
-  target_seconds: number;
+  who: "owner" | "trooth" | "owner_then_trooth" | "trooth_then_owner";
+  /** Target in Basic, or null when the step is not in Basic. */
+  basic_seconds: number | null;
+  full_seconds: number;
 }
 
-/** Targets sum to 600 seconds. They are targets; `measureSetup` reports what was spent. */
-export const SETUP_CHECKLIST: SetupStep[] = [
-  { id: "enter_domain", words: "Type your domain", who: "company", target_seconds: 30 },
-  { id: "publish_token", words: "Add the DNS record or upload the well-known file", who: "company", target_seconds: 240 },
-  { id: "prove_domain", words: "Trooth checks the record", who: "trooth", target_seconds: 60 },
-  { id: "build_record", words: "Trooth reads your public site and builds the record", who: "trooth", target_seconds: 180 },
-  { id: "add_head_tag", words: "Paste one line into your site's <head>", who: "company", target_seconds: 60 },
-  { id: "first_report", words: "Trooth starts your first competitor report", who: "trooth", target_seconds: 30 },
+/** docs/audit/workflow-research.md section 5. Basic steps 1 to 4 sum to 570 (target 600); full steps 1 to 9 to 855 (target 900). */
+export const SETUP_STEPS: SetupStep[] = [
+  { n: 1, id: "sign_in", words: "Sign in", who: "owner", basic_seconds: 30, full_seconds: 30 },
+  { n: 2, id: "company", words: "Name your company and website", who: "owner", basic_seconds: 30, full_seconds: 30 },
+  { n: 3, id: "prove_domain", words: "Prove you control the domain", who: "owner_then_trooth", basic_seconds: 270, full_seconds: 270 },
+  { n: 4, id: "read_site", words: "Trooth reads your site; you look at what it read", who: "trooth_then_owner", basic_seconds: 240, full_seconds: 240 },
+  { n: 5, id: "review", words: "Review and confirm the facts", who: "owner", basic_seconds: null, full_seconds: 60 },
+  { n: 6, id: "sign", words: "Sign the version", who: "owner", basic_seconds: null, full_seconds: 45 },
+  { n: 7, id: "install", words: "Put it on your site", who: "owner", basic_seconds: null, full_seconds: 120 },
+  { n: 8, id: "check", words: "Trooth checks it works", who: "trooth", basic_seconds: null, full_seconds: 30 },
+  { n: 9, id: "monitoring", words: "Start monitoring", who: "trooth_then_owner", basic_seconds: null, full_seconds: 30 },
 ];
 
+export const BASIC_TARGET_SECONDS = 600;
+export const FULL_TARGET_SECONDS = 900;
+
 export interface StepTiming {
-  id: string;
+  id: SetupStepId;
+  target_seconds: number;
+  spent_seconds: number | null;
+  within_target: boolean | null;
+}
+
+export interface PathTiming {
   target_seconds: number;
   spent_seconds: number | null;
   within_target: boolean | null;
@@ -174,38 +235,46 @@ export interface StepTiming {
 
 export interface SetupTiming {
   steps: StepTiming[];
-  total_target_seconds: number;
-  total_spent_seconds: number | null;
-  within_ten_minutes: boolean | null;
-  /** Steps with no timestamps yet. */
-  not_started: string[];
+  basic: PathTiming;
+  full: PathTiming;
+  /** Steps with no timestamp yet. */
+  not_started: SetupStepId[];
 }
 
 /**
- * Time spent per step from timestamps: `started` is when the checklist was
- * opened, and each entry in `completed_at` is when that step finished. A step
- * is measured from the previous step's completion (or from `started`).
+ * Time spent per step from server timestamps: `started` is when setup began,
+ * and each entry in `completed_at` is when that step finished. A step is
+ * measured from the latest earlier completion (or from `started`), so a step
+ * that overlaps an earlier one (the read runs during the proof) costs only
+ * what is left over. The per-step target is the full-path target.
  */
-export function measureSetup(started: string, completed_at: Partial<Record<string, string>>): SetupTiming {
+export function measureSetup(started: string, completed_at: Partial<Record<SetupStepId, string>>): SetupTiming {
   let prev = Date.parse(started);
   const steps: StepTiming[] = [];
-  const not_started: string[] = [];
-  let total = 0;
-  let complete = true;
-  for (const s of SETUP_CHECKLIST) {
+  const not_started: SetupStepId[] = [];
+  const spentById = new Map<SetupStepId, number>();
+  for (const s of SETUP_STEPS) {
     const done = completed_at[s.id];
     if (!done) {
-      steps.push({ id: s.id, target_seconds: s.target_seconds, spent_seconds: null, within_target: null });
+      steps.push({ id: s.id, target_seconds: s.full_seconds, spent_seconds: null, within_target: null });
       not_started.push(s.id);
-      complete = false;
       continue;
     }
     const t = Date.parse(done);
     const spent = Math.max(0, Math.round((t - prev) / 1000));
-    steps.push({ id: s.id, target_seconds: s.target_seconds, spent_seconds: spent, within_target: spent <= s.target_seconds });
-    total += spent;
-    prev = t;
+    steps.push({ id: s.id, target_seconds: s.full_seconds, spent_seconds: spent, within_target: spent <= s.full_seconds });
+    spentById.set(s.id, spent);
+    prev = Math.max(prev, t);
   }
-  const total_target_seconds = SETUP_CHECKLIST.reduce((n, s) => n + s.target_seconds, 0);
-  return { steps, total_target_seconds, total_spent_seconds: complete ? total : null, within_ten_minutes: complete ? total <= 600 : null, not_started };
+  const sum = (ids: SetupStepId[]): number | null => (ids.every((id) => spentById.has(id)) ? ids.reduce((n, id) => n + spentById.get(id)!, 0) : null);
+  const basicIds = SETUP_STEPS.filter((s) => s.basic_seconds !== null).map((s) => s.id);
+  const fullIds = SETUP_STEPS.map((s) => s.id);
+  const basicSpent = sum(basicIds);
+  const fullSpent = sum(fullIds);
+  return {
+    steps,
+    basic: { target_seconds: BASIC_TARGET_SECONDS, spent_seconds: basicSpent, within_target: basicSpent === null ? null : basicSpent <= BASIC_TARGET_SECONDS },
+    full: { target_seconds: FULL_TARGET_SECONDS, spent_seconds: fullSpent, within_target: fullSpent === null ? null : fullSpent <= FULL_TARGET_SECONDS },
+    not_started,
+  };
 }

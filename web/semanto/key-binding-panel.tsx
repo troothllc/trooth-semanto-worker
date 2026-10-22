@@ -17,7 +17,7 @@ export type BindingLevel = "none" | "host" | "domain" | "domain_and_entity";
 export const BINDING_TEXT: Record<BindingLevel, { label: string; body: string }> = {
   none: { label: "Not bound yet", body: "No key is published for this domain. Nothing can be signed until one is." },
   host: { label: "Bound to your web host", body: "The key is served from your domain's web server. Whoever runs that server could have published it." },
-  domain: { label: "Bound to your domain", body: "The key is served from your web server and named in your DNS. Both have to agree, so a web host alone cannot swap it." },
+  domain: { label: "Bound to your domain", body: "The key is served from your web server and named in your DNS record. Trooth looks at both when you open this page (GET /os/semanto/{id}/keys) and shows what it found; a version records the DNS binding only when that check found it." },
   domain_and_entity: { label: "Bound to your domain and your legal entity", body: "The key is in your web server and your DNS, and the legal name on your record matches your Legal Entity Identifier at GLEIF." },
 };
 

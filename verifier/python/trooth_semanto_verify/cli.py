@@ -1,11 +1,11 @@
-# SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Trooth, LLC
 #
 # semanto-verify for Python: the same commands as verifier/js/cli.mjs. Prints
 # one line per check in plain words and exits 0 only when every check passed.
 #
 #   semanto-verify file <semanto.json> [--pages <dir>] [--keys <keys.json>] [--now <iso>] [--revocations <file>]
-#   semanto-verify page <url> [--trooth <base>] [--now <iso>] [--allow-unwitnessed] [--allow-unlogged]
+#   semanto-verify page <url> [--trooth <base>] [--now <iso>] [--allow-unwitnessed] [--allow-unlogged] [--allow-unsigned]
 #   semanto-verify response <url> [--keys <keys.json>]
 #   semanto-verify log --from <n> --to <m> [--log <url>] [--keys <keys.json>]
 #
@@ -37,6 +37,8 @@ from .verify import (
 )
 
 TROOTH_API = "https://api.trooth.co"
+# Trooth's witness keys, served by the Semanto Worker; --trooth <base> reads <base>/.well-known/trooth-keys.json instead.
+TROOTH_KEYS_BASE = f"{TROOTH_API}/public/semanto"
 DEFAULT_LOG = f"{TROOTH_API}/public/semanto/log"
 
 
@@ -78,7 +80,7 @@ def _load_keys(domain: str, args: argparse.Namespace) -> Any:
     if args.keys:
         return _read_json(args.keys)
     keys: dict = {"company": {"keys": []}, "trooth": {"keys": []}}
-    for role, url in (("company", f"https://{domain}/.well-known/trooth-keys.json"), ("trooth", f"{args.trooth or TROOTH_API}/.well-known/trooth-keys.json")):
+    for role, url in (("company", f"https://{domain}/.well-known/trooth-keys.json"), ("trooth", f"{args.trooth or TROOTH_KEYS_BASE}/.well-known/trooth-keys.json")):
         try:
             keys[role] = _fetch_json(url)
             print(f"  ok   fetched the {'company' if role == 'company' else 'Trooth'} JWK Set at {url}")
@@ -168,7 +170,7 @@ def cmd_response(args: argparse.Namespace, also_proof: bool = False) -> int:
                     except Exception as e:  # noqa: BLE001
                         # Strict: a header that cannot be fetched is a failure, not a skip.
                         print(f"  FAIL {version_url} could not be read ({e}); without the header the proof is not tied to a signed version.")
-                pr = verify_page_proof(proof, body, keys, now=args.now, header=header, allow_unwitnessed=getattr(args, "allow_unwitnessed", False), allow_unlogged=getattr(args, "allow_unlogged", False))
+                pr = verify_page_proof(proof, body, keys, now=args.now, header=header, allow_unwitnessed=getattr(args, "allow_unwitnessed", False), allow_unlogged=getattr(args, "allow_unlogged", False), allow_unsigned=getattr(args, "allow_unsigned", False))
                 ok = _print(pr, f"Proof at {proof_url}") and ok
                 if header:
                     print(f"State now: {state_of({'header': header, 'root_hash': proof.get('root_hash'), 'signature': proof.get('signature')}, args.now)}.\n")
@@ -181,7 +183,7 @@ def cmd_response(args: argparse.Namespace, also_proof: bool = False) -> int:
 def cmd_log(args: argparse.Namespace) -> int:
     log = args.log or DEFAULT_LOG
     # Tree heads are Trooth's statements: only Trooth's keys check them.
-    keys = _read_json(args.keys) if args.keys else {"trooth": _fetch_json(f"{args.trooth or TROOTH_API}/.well-known/trooth-keys.json")}
+    keys = _read_json(args.keys) if args.keys else {"trooth": _fetch_json(f"{args.trooth or TROOTH_KEYS_BASE}/.well-known/trooth-keys.json")}
     old = _fetch_json(f"{log}/tree-head?size={args.from_size}")
     new = _fetch_json(f"{log}/tree-head?size={args.to_size}")
     cons = _fetch_json(f"{log}/consistency?from={args.from_size}&to={args.to_size}")
@@ -216,6 +218,7 @@ def main(argv: Optional[list] = None) -> int:
         if name == "page":
             s.add_argument("--allow-unwitnessed", action="store_true")
             s.add_argument("--allow-unlogged", action="store_true")
+            s.add_argument("--allow-unsigned", action="store_true")
     l = sub.add_parser("log", help="check two tree heads and the consistency proof between them")
     l.add_argument("--from", dest="from_size", type=int, required=True)
     l.add_argument("--to", dest="to_size", type=int, required=True)

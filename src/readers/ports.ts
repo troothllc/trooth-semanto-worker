@@ -200,6 +200,8 @@ export interface ReceiptRow {
   proof: "web_bot_auth" | "none";
   read_at: string;
   ip_hash: string;
+  /** How many reads this row stands for: receipts are counted per minute and written once a minute (src/readers/rate-limit.ts). Absent means 1. */
+  count?: number;
 }
 
 export interface ReceiptStore {
@@ -223,13 +225,27 @@ export class D1ReceiptStore implements ReceiptStore {
   constructor(private readonly db: D1Database) {}
   async put(r: ReceiptRow): Promise<void> {
     await this.db
-      .prepare("INSERT OR IGNORE INTO semanto_read_receipts (id, trooth_id, version, page_id, representation, agent_key_url, agent_keyid, proof, read_at, ip_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)")
-      .bind(r.id, r.trooth_id, r.version, r.page_id, r.representation, r.agent_key_url, r.keyid, r.proof, r.read_at, r.ip_hash)
+      .prepare("INSERT OR IGNORE INTO semanto_read_receipts (id, trooth_id, version, page_id, representation, agent_key_url, agent_keyid, proof, read_at, ip_hash, count, minute) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)")
+      .bind(r.id, r.trooth_id, r.version, r.page_id, r.representation, r.agent_key_url, r.keyid, r.proof, r.read_at, r.ip_hash, r.count ?? 1, r.read_at.slice(0, 16))
       .run();
+  }
+  /** Many rows in one D1 batch (the per-minute flush of src/readers/rate-limit.ts); a row already written for the same minute gets the counts added. */
+  async putMany(rows: ReceiptRow[]): Promise<void> {
+    for (let i = 0; i < rows.length; i += 50) {
+      await this.db.batch(
+        rows.slice(i, i + 50).map((r) =>
+          this.db
+            .prepare(
+              "INSERT INTO semanto_read_receipts (id, trooth_id, version, page_id, representation, agent_key_url, agent_keyid, proof, read_at, ip_hash, count, minute) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) ON CONFLICT(id) DO UPDATE SET count = count + excluded.count",
+            )
+            .bind(r.id, r.trooth_id, r.version, r.page_id, r.representation, r.agent_key_url, r.keyid, r.proof, r.read_at, r.ip_hash, r.count ?? 1, r.read_at.slice(0, 16)),
+        ),
+      );
+    }
   }
   async list(troothId: string, fromIso: string, toIso: string): Promise<ReceiptRow[]> {
     const res = await this.db
-      .prepare("SELECT id, trooth_id, version, page_id, representation, agent_key_url, agent_keyid AS keyid, proof, read_at, ip_hash FROM semanto_read_receipts WHERE trooth_id = ?1 AND read_at >= ?2 AND read_at < ?3 ORDER BY read_at")
+      .prepare("SELECT id, trooth_id, version, page_id, representation, agent_key_url, agent_keyid AS keyid, proof, read_at, ip_hash, count FROM semanto_read_receipts WHERE trooth_id = ?1 AND read_at >= ?2 AND read_at < ?3 ORDER BY read_at")
       .bind(troothId, fromIso, toIso)
       .all<ReceiptRow>();
     return res.results;

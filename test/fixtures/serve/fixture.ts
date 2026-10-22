@@ -198,7 +198,7 @@ export async function buildEstate(now: () => Date = () => FIXED_NOW): Promise<Es
 
   const version2: MemoryVersion = { file: pre.file, pages: pre.bytes, original_tokens: pre.original, signed_at: "2026-10-01T10:00:00.000Z", withdrawn_at: null };
   const acme: MemoryCompany = {
-    record: { trooth_id: "acme-inc", domain: "acme.com", org: "Acme Inc", tier: "full", legal_name: "Acme Inc.", current_version: 2, custody: "hosted" },
+    record: { trooth_id: "acme-inc", domain: "acme.com", org: "Acme Inc", tier: "full", legal_name: "Acme Inc.", current_version: 2, custody: "hosted", domain_proven_at: "2026-09-01T08:00:00.000Z" },
     versions: new Map([
       [1, { file: v1.file, pages: v1.bytes, original_tokens: v1.original, signed_at: "2026-09-01T10:00:00.000Z", withdrawn_at: "2026-09-20T10:00:00.000Z" }],
       [2, version2],
@@ -213,7 +213,7 @@ export async function buildEstate(now: () => Date = () => FIXED_NOW): Promise<Es
   const betaKey = await generateKeyPair();
   const beta = await buildVersion({ pages: [ACME_PAGES[2]!], version: 1, supersedes: null, state: "read", companyKey: betaKey.privateJwk, witness: w.privateJwk, built_at: "2026-10-05T09:00:00.000Z", trooth_id: "beta-ltd", domain: "beta.example", org: "Beta Ltd", kid_url: "https://beta.example/.well-known/trooth-keys.json" });
   store.add({
-    record: { trooth_id: "beta-ltd", domain: "beta.example", org: "Beta Ltd", tier: "basic", current_version: null, custody: "customer" },
+    record: { trooth_id: "beta-ltd", domain: "beta.example", org: "Beta Ltd", tier: "basic", current_version: null, custody: "customer", domain_proven_at: "2026-10-05T08:00:00.000Z" },
     versions: new Map([[1, { file: beta.file, pages: beta.bytes, original_tokens: beta.original, signed_at: null, withdrawn_at: null }]]),
     live: new Map(),
     jwks: { keys: [betaKey.publicJwk] },

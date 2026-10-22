@@ -17,12 +17,15 @@ import type { PrivateJwk, PublicJwk } from "./core/keys";
 import type { Authorization, SigningPolicy } from "./identity/roles";
 import type { Custody, PreparedSigning } from "./identity/keys";
 import type { AvailableSurfaces } from "./monitor/run";
+import type { MerchantCenterTarget } from "./monitor/writeback";
 import type { QuestionKind } from "./gap/prompts";
 import type { GapReport } from "./gap/report";
 import type { RevocationEntry } from "./ledger/revocation";
 import type { BasicCompany } from "./basic/tier";
 import type { FirstPublicationRecord } from "./basic/first-publication";
 import type { CompanyRecord } from "./serve/ports";
+import type { BodyPort } from "./compiler/stream";
+import type { SetupRecord } from "./setup/state";
 import type { MemoryVersionStore } from "./serve/memory-ports";
 
 /** Per-company settings the pipeline reads. Delivery settings live in SettingsPort. */
@@ -33,9 +36,11 @@ export interface CompanyConfig {
   surfaces: AvailableSurfaces;
   /** Who gets the plain-language alerts. */
   alert_emails: string[];
-  gap: { kinds: QuestionKind[]; products: string[]; competitor?: { name: string; domain: string }; service?: string };
+  gap: { kinds: QuestionKind[]; products: string[]; competitor?: { name: string; domain: string }; service?: string; /** The owner's own questions (setup step 9), asked with every report. */ questions?: string[] };
   /** public_record facts from registries (GLEIF), added to every build. */
   public_record_facts: Fact[];
+  /** Write-back targets the company connected (GET /os/semanto/{id}/writeback previews against them). */
+  writeback?: { merchant_center?: MerchantCenterTarget; business_profile_location?: string };
 }
 
 export const DEFAULT_CONFIG: CompanyConfig = {
@@ -56,7 +61,8 @@ export interface StoredVersion {
 }
 
 export interface VersionFiles {
-  llms: { llmsTxt: string; llmsFull: string; sitemapMd: string };
+  /** llmsFull is null when every page together is too large to hold; the route then builds it from the pages. */
+  llms: { llmsTxt: string; llmsFull: string | null; sitemapMd: string };
   /** facts.jsonld bytes. */
   jsonld: Uint8Array;
 }
@@ -86,8 +92,29 @@ export interface CompanyKey {
   created_at: string;
 }
 
-export interface PipelineStore {
+export interface PipelineStore extends BodyPort {
   getCompany(trooth_id: string): Promise<CompanyRecord | null>;
+  getCompanyByDomain(domain: string): Promise<CompanyRecord | null>;
+  /** The company a worker-f workspace claimed (semanto_companies.os_company_id). */
+  getCompanyByOsCompany(os_company_id: string): Promise<CompanyRecord | null>;
+  /** Link a company to the worker-f workspace that claimed it. Never moves an existing link. */
+  linkOsCompany(trooth_id: string, os_company_id: string): Promise<void>;
+  /** Record the domain proof against the company's own domain. */
+  markDomainProven(trooth_id: string, at: string, method: "dns_txt" | "well_known"): Promise<void>;
+  getSetup(trooth_id: string): Promise<SetupRecord | null>;
+  putSetup(record: SetupRecord): Promise<void>;
+  /** The newest version's file without its page bodies, and when it was signed. */
+  latestFile(trooth_id: string): Promise<{ file: SemantoFile; signed_at: string | null } | null>;
+  /** One version's file without its page bodies. */
+  getFile(trooth_id: string, version: number): Promise<SemantoFile | null>;
+  /** Store a version assembled from a streamed build; its page bodies were written already with putBody. */
+  saveAssembled(trooth_id: string, file: SemantoFile, files: VersionFiles): Promise<void>;
+  /** Withdraw a version: state withdrawn, withdrawn_at set; when it was current, the newest earlier signed version that is not withdrawn becomes current, or none. */
+  withdrawVersion(trooth_id: string, version: number, at: string): Promise<void>;
+  /** Append a revocation entry with its log leaf index. */
+  putRevocation(trooth_id: string, entry: RevocationEntry, log_index: number): Promise<void>;
+  /** The newest signed revocation list for a company (or for everyone with null). */
+  getRevocationList(trooth_id: string | null): Promise<{ jws: string; issued_at: string } | null>;
   /** Insert or update the company row (domain, org, tier, legal name, LEI). current_version and custody are managed by markSigned and putKey. */
   putCompany(company: CompanyRecord): Promise<void>;
   /** Companies with a current signed version ("signed") or every company ("all"). */
@@ -160,19 +187,95 @@ export class MemoryPipelineStore implements PipelineStore {
   readonly firstPublications: FirstPublicationRecord[] = [];
   readonly blobs = new Map<string, { bytes: Uint8Array; contentType: string }>();
   readonly files = new Map<string, VersionFiles>();
+  readonly setups = new Map<string, SetupRecord>();
+  /** Bodies written by a streamed build before the version is assembled, by trooth_id/version/page_id. */
+  readonly pendingBodies = new Map<string, Uint8Array>();
 
   constructor(readonly versions: MemoryVersionStore) {}
 
   async getCompany(trooth_id: string): Promise<CompanyRecord | null> {
     return this.versions.companies.get(trooth_id)?.record ?? null;
   }
+  async getCompanyByDomain(domain: string): Promise<CompanyRecord | null> {
+    for (const c of this.versions.companies.values()) if (c.record.domain === domain) return c.record;
+    return null;
+  }
+  async getCompanyByOsCompany(os_company_id: string): Promise<CompanyRecord | null> {
+    for (const c of this.versions.companies.values()) if (c.record.os_company_id === os_company_id) return c.record;
+    return null;
+  }
+  async linkOsCompany(trooth_id: string, os_company_id: string): Promise<void> {
+    const c = this.versions.companies.get(trooth_id);
+    if (c && !c.record.os_company_id) c.record = { ...c.record, os_company_id };
+  }
+  async markDomainProven(trooth_id: string, at: string, _method: "dns_txt" | "well_known"): Promise<void> {
+    const c = this.versions.companies.get(trooth_id);
+    if (c && !c.record.domain_proven_at) c.record = { ...c.record, domain_proven_at: at };
+  }
+  async getSetup(trooth_id: string): Promise<SetupRecord | null> {
+    const r = this.setups.get(trooth_id);
+    return r ? structuredClone(r) : null;
+  }
+  async putSetup(record: SetupRecord): Promise<void> {
+    this.setups.set(record.trooth_id, structuredClone(record));
+  }
+  async latestFile(trooth_id: string): Promise<{ file: SemantoFile; signed_at: string | null } | null> {
+    const c = this.versions.companies.get(trooth_id);
+    if (!c || c.versions.size === 0) return null;
+    const v = c.versions.get(Math.max(...c.versions.keys()))!;
+    return { file: v.file, signed_at: v.signed_at };
+  }
+  async getFile(trooth_id: string, version: number): Promise<SemantoFile | null> {
+    return this.versions.companies.get(trooth_id)?.versions.get(version)?.file ?? null;
+  }
+  async putBody(trooth_id: string, version: number, page_id: string, bytes: Uint8Array): Promise<void> {
+    this.pendingBodies.set(`${trooth_id}/${version}/${page_id}`, bytes.slice());
+  }
+  async getBody(trooth_id: string, version: number, page_id: string): Promise<Uint8Array | null> {
+    const pending = this.pendingBodies.get(`${trooth_id}/${version}/${page_id}`);
+    if (pending) return pending.slice();
+    return this.versions.companies.get(trooth_id)?.versions.get(version)?.pages.get(page_id)?.slice() ?? null;
+  }
+  async saveAssembled(trooth_id: string, file: SemantoFile, files: VersionFiles): Promise<void> {
+    const n = file.header.version;
+    const bodies: Record<string, Uint8Array> = {};
+    const original_tokens: Record<string, number> = {};
+    for (const p of file.header.pages_manifest) {
+      const b = await this.getBody(trooth_id, n, p.id);
+      if (!b) throw new Error(`saveAssembled: no body for ${p.id}`);
+      bodies[p.id] = b;
+      original_tokens[p.id] = p.original_tokens ?? 0;
+      this.pendingBodies.delete(`${trooth_id}/${n}/${p.id}`);
+    }
+    await this.saveBuilt(trooth_id, { file, bodies, original_tokens, signed_at: null }, files);
+  }
+  async withdrawVersion(trooth_id: string, version: number, at: string): Promise<void> {
+    const c = this.versions.companies.get(trooth_id);
+    const v = c?.versions.get(version);
+    if (!c || !v) throw new Error(`withdrawVersion: no version ${version} for ${trooth_id}`);
+    v.file = { ...v.file, header: { ...v.file.header, state: "withdrawn" } };
+    v.withdrawn_at = at;
+    if (c.record.current_version === version) {
+      const earlier = [...c.versions.values()].filter((x) => x.file.header.version < version && x.file.header.state === "signed").sort((a, b) => b.file.header.version - a.file.header.version)[0];
+      c.record = { ...c.record, current_version: earlier ? earlier.file.header.version : null };
+    }
+    if (c.record.basic_version === version) c.record = { ...c.record, basic_version: null };
+  }
+  async putRevocation(trooth_id: string, entry: RevocationEntry, _log_index: number): Promise<void> {
+    this.revocationEntries.push({ trooth_id, entry });
+  }
+  async getRevocationList(trooth_id: string | null): Promise<{ jws: string; issued_at: string } | null> {
+    const list = this.revocationLists.filter((r) => r.trooth_id === trooth_id);
+    const last = list[list.length - 1];
+    return last ? { jws: last.jws, issued_at: last.issued_at } : null;
+  }
   async putCompany(company: CompanyRecord): Promise<void> {
     const c = this.versions.companies.get(company.trooth_id);
     if (c) {
-      c.record = { ...company, current_version: c.record.current_version, custody: c.record.custody, basic_version: c.record.basic_version ?? null };
+      c.record = { ...company, current_version: c.record.current_version, custody: c.record.custody, basic_version: c.record.basic_version ?? null, domain_proven_at: c.record.domain_proven_at ?? company.domain_proven_at ?? null, os_company_id: c.record.os_company_id ?? company.os_company_id ?? null };
       return;
     }
-    this.versions.add({ record: { ...company }, versions: new Map(), live: new Map(), jwks: { keys: [] }, hostedKey: null });
+    this.versions.add({ record: { domain_proven_at: null, os_company_id: null, ...company }, versions: new Map(), live: new Map(), jwks: { keys: [] }, hostedKey: null });
   }
   async listCompanies(which: "signed" | "all"): Promise<CompanyRecord[]> {
     const all = [...this.versions.companies.values()].map((c) => c.record);
@@ -209,7 +312,7 @@ export class MemoryPipelineStore implements PipelineStore {
       withdrawn_at: null,
       jsonld: files.jsonld,
       llms: new TextEncoder().encode(files.llms.llmsTxt),
-      llms_full: new TextEncoder().encode(files.llms.llmsFull),
+      ...(files.llms.llmsFull !== null ? { llms_full: new TextEncoder().encode(files.llms.llmsFull) } : {}),
       sitemap: new TextEncoder().encode(files.llms.sitemapMd),
     });
     this.files.set(`${trooth_id}/${v.file.header.version}`, files);

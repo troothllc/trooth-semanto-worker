@@ -28,6 +28,22 @@ export interface CompanyRecord {
   custody: "hosted" | "customer";
   /** Semanto Basic: the version Trooth witnessed (not signed by the company), served while there is no signed version. */
   basic_version?: number | null;
+  /**
+   * When the company proved control of `domain` (the domain fixed at the
+   * claim), or null. Nothing is published, signed, witnessed or served for a
+   * company whose domain is not proven.
+   */
+  domain_proven_at?: string | null;
+  /** The worker-f workspace (app_users.company_id) that claimed the company, or null. */
+  os_company_id?: string | null;
+}
+
+/** Thrown when a route needs Trooth's witness key and the deployment has none (src/core/keys.ts); routes answer a 503 witness_key_missing problem. */
+export { WitnessKeyMissingError } from "../core/keys";
+
+/** True when the company proved control of its domain. */
+export function isDomainProven(c: Pick<CompanyRecord, "domain_proven_at"> | null | undefined): boolean {
+  return typeof c?.domain_proven_at === "string" && c.domain_proven_at.length > 0;
 }
 
 /** A line in the versions list. */
@@ -172,7 +188,10 @@ export interface JobPort {
   hourlyChangeDetection(): Promise<void>;
   nightlyCheckpoint(): Promise<void>;
   weeklyGapReports(): Promise<void>;
+  /** One queue message: a compile job, a build stage or a per-company fan-out. */
   compile(job: unknown): Promise<void>;
+  /** A message that failed its last attempt (it goes to the dead letter queue next). */
+  failed?(job: unknown, error: unknown): Promise<void>;
 }
 
 export interface ServeConfig {
@@ -209,13 +228,38 @@ export interface WorkspaceAuth {
 }
 
 /** The workspace actions, each served at POST /os/semanto/{trooth_id}/{action}. */
-export const WORKSPACE_ACTIONS = ["build", "sign", "gap-report", "monitor/run", "keys/rotate", "lei", "basic/claim", "basic/prove", "first-publication", "connectors"] as const;
+export const WORKSPACE_ACTIONS = [
+  "build",
+  "sign",
+  "gap-report",
+  "monitor/run",
+  "keys/rotate",
+  "lei",
+  "basic/claim",
+  "basic/prove",
+  "first-publication",
+  "connectors",
+  "withdraw",
+  "detect",
+  "competitor-report",
+  "setup/look-again",
+  "setup/read-again",
+  "setup/choose",
+  "setup/confirm",
+  "setup/host",
+  "setup/install-check",
+  "setup/monitoring",
+  "setup/save-for-later",
+  "setup/resume",
+] as const;
 export type WorkspaceAction = (typeof WORKSPACE_ACTIONS)[number];
 
 /** What a workspace handler answers; routes.ts signs it and turns a problem into RFC 9457. */
 export interface WorkspaceResult {
   status: number;
   body?: unknown;
+  /** A body that is not JSON (receipts.csv), with its content type. */
+  raw?: { contentType: "text/csv"; text: string };
   problem?: { code: ProblemCode; detail: string };
   /** Extra headers (Basic's Trooth-Record-State, say), set before the response is signed. */
   headers?: Record<string, string>;
@@ -228,9 +272,32 @@ export interface SignedRequest {
   body: Uint8Array;
 }
 
+/** A worker-f session before it is mapped to a company: what the claim routes read. */
+export interface WorkspaceSession {
+  os_company_id: string;
+  user_id: string;
+  name: string;
+  /** worker-f's workspaceRole when it sends one. */
+  role: WorkspaceRole | null;
+  /** worker-f's app_company_profile slug, when the session answer carries companySlug. */
+  company_slug: string | null;
+  /** When the person signed in, when the session answer carries signedInAt. */
+  signed_in_at: string | null;
+  email: string | null;
+}
+
+/** The read-only workspace routes (GET), answered by the pipeline. */
+export type WorkspaceRead = "setup" | "setup/review" | "keys" | "writeback" | "receipts" | "receipts.csv";
+
 /** The pipeline behind the /os routes (src/pipeline.ts). */
 export interface WorkspaceHandlers {
   handle(action: WorkspaceAction, ws: WorkspaceAuth, trooth_id: string, input: unknown): Promise<WorkspaceResult>;
+  /** GET routes: the setup state, the review document, keys, write-back previews, receipts. */
+  read?(what: WorkspaceRead, ws: WorkspaceAuth, trooth_id: string, query: Record<string, string>): Promise<WorkspaceResult>;
+  /** The claim routes, for a session with no company yet: POST /os/semanto/claim, POST /os/semanto/setup/start, GET /os/semanto/setup. */
+  session?(what: "claim" | "setup/start" | "setup", session: WorkspaceSession, input: unknown): Promise<WorkspaceResult>;
+  /** POST /os/semanto/{id}/keys/{kid}/revoke. */
+  revokeKey?(ws: WorkspaceAuth, trooth_id: string, kid: string, input: unknown): Promise<WorkspaceResult>;
   /** POST /os/semanto/{trooth_id}/commerce/catalog: authenticated by an RFC 9421 connector signature, not a workspace session. */
   catalog(trooth_id: string, request: SignedRequest): Promise<WorkspaceResult>;
 }

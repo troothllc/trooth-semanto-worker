@@ -76,9 +76,14 @@ export const printDigest = (b: Uint8Array): string => `sha256:${toHex(b)}`;
 export class TransparencyLog implements LogReader {
   constructor(
     private readonly store: LogStore,
-    private readonly witnessKey: PrivateJwk,
+    /** The witness key, or a function that answers it (and throws when the deployment has none, so reads still work). */
+    private readonly witness: PrivateJwk | (() => PrivateJwk),
     private readonly now: () => Date = () => new Date(),
   ) {}
+
+  private get witnessKey(): PrivateJwk {
+    return typeof this.witness === "function" ? this.witness() : this.witness;
+  }
 
   async size(): Promise<number> {
     return this.store.size();

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Trooth, LLC
 //
 // Type declarations for verify.mjs, so TypeScript callers (the repository's
@@ -61,6 +61,8 @@ export interface VerifyOptions {
   allowUnwitnessed?: boolean;
   /** verifyPageProof: accept a proof with no log entry ("absent" does not fail). */
   allowUnlogged?: boolean;
+  /** Accept a page proof with no company signature: a Semanto Basic page, witnessed by Trooth and not signed by the company. */
+  allowUnsigned?: boolean;
 }
 
 export const JWS_TYPES: Record<string, string>;

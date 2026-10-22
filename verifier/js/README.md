@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright (c) 2026 Trooth, LLC -->
+
 # semanto-verify (JavaScript)
 
 One dependency-free ES module, `verify.mjs`, for Node 20+ and browsers (WebCrypto only), plus `cli.mjs`.

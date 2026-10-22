@@ -108,3 +108,11 @@ export function parseDnsKeyRecords(txt: string[]): string[] {
   }
   return kids;
 }
+
+/** Thrown when Trooth's witness key is needed and the deployment has none; the Worker answers a 503 problem instead of failing to start. */
+export class WitnessKeyMissingError extends Error {
+  constructor() {
+    super("TROOTH_WITNESS_KEY is not set. Set the witness private JWK as a Worker secret.");
+    this.name = "WitnessKeyMissingError";
+  }
+}

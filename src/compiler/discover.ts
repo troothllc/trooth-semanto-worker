@@ -53,6 +53,16 @@ export interface DiscoverOptions {
   productToken?: string;
   /** Most sitemaps read, counting index files. */
   maxSitemaps?: number;
+  /**
+   * Called with each page discovery read, as soon as its links are taken.
+   * With keepFetched false the page is not kept in the result, so a build
+   * can write each body away and hold no page in memory (src/compiler/stream.ts).
+   */
+  onFetched?: (page: FetchOk) => Promise<void>;
+  /** Keep every fetched page in the result (default true). */
+  keepFetched?: boolean;
+  /** Called after each page fetch with the urls found so far and the pages read so far. */
+  onProgress?: (found: number, fetched: number) => Promise<void>;
 }
 
 export interface DiscoveryResult {
@@ -257,6 +267,8 @@ export async function discover(domain: string, fetcher: Fetcher, opts: DiscoverO
   const entries = new Map<string, DiscoveredUrl>();
   const order: string[] = [];
   const fetched: Record<string, FetchOk> = {};
+  const keep = opts.keepFetched ?? true;
+  let fetchedCount = 0;
 
   const add = (url: string | null, source: DiscoverySource, lastmod?: string): DiscoveredUrl | null => {
     if (!url) return null;
@@ -338,7 +350,9 @@ export async function discover(domain: string, fetcher: Fetcher, opts: DiscoverO
       entry.excluded = { reason: `not an html page (${ctype.split(";")[0]})` };
       continue;
     }
-    fetched[url] = res;
+    if (keep) fetched[url] = res;
+    fetchedCount++;
+    if (opts.onFetched) await opts.onFetched(res);
     const { links, canonical } = extractLinks(res.text, res.finalUrl);
     if (canonical && canonical !== url && sameRegistrableDomain(hostOf(canonical), hostOf(home))) {
       const c = add(canonical, "canonical");
@@ -360,6 +374,7 @@ export async function discover(domain: string, fetcher: Fetcher, opts: DiscoverO
         queue.push(link);
       }
     }
+    if (opts.onProgress) await opts.onProgress(entries.size, fetchedCount);
   }
 
   const urls = [home, ...order.filter((u) => u !== home)].map((u) => entries.get(u)).filter((e): e is DiscoveredUrl => Boolean(e));

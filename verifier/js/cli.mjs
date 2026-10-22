@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Trooth, LLC
 //
 // semanto-verify: the command line in front of verify.mjs. It prints what it
@@ -8,7 +8,7 @@
 // the test vectors need no network; `page`, `response` and `log` fetch.
 //
 //   semanto-verify file <semanto.json> --pages <dir> [--keys <keys.json>] [--now <iso>] [--revocations <file>]
-//   semanto-verify page <url>          [--trooth <base>] [--now <iso>] [--allow-unwitnessed] [--allow-unlogged]
+//   semanto-verify page <url>          [--trooth <base>] [--now <iso>] [--allow-unwitnessed] [--allow-unlogged] [--allow-unsigned]
 //   semanto-verify response <url>      [--keys <keys.json>]
 //   semanto-verify log --from <n> --to <m> [--log <url>] [--keys <keys.json>]
 //
@@ -16,8 +16,9 @@
 // manifest), the layout verifier/test-vectors/v1/pages uses.
 //
 // Keys are kept apart by role: the company's JWK Set (from its domain) checks
-// company signatures, Trooth's (from api.trooth.co) checks witness
-// statements, tree heads, checkpoints and revocation lists. A --keys file in
+// company signatures, Trooth's (from https://api.trooth.co/public/semanto/
+// .well-known/trooth-keys.json, which the Semanto Worker serves) checks
+// witness statements, tree heads, checkpoints and revocation lists. A --keys file in
 // the { company, trooth } shape is used as is. `page` is strict by default:
 // the version header must be fetched, the company signature must check out,
 // and a missing witness statement or log entry fails unless allowed.
@@ -38,7 +39,9 @@ import {
 } from "./verify.mjs";
 
 const TROOTH_API = "https://api.trooth.co";
-const TROOTH_KEYS = `${TROOTH_API}/.well-known/trooth-keys.json`;
+// Trooth's witness keys, served by the Semanto Worker. --trooth <base> reads <base>/.well-known/trooth-keys.json instead.
+const TROOTH_KEYS_BASE = `${TROOTH_API}/public/semanto`;
+const TROOTH_KEYS = `${TROOTH_KEYS_BASE}/.well-known/trooth-keys.json`;
 const DEFAULT_LOG = `${TROOTH_API}/public/semanto/log`;
 
 function parseArgs(argv) {
@@ -63,7 +66,7 @@ function usage(code = 2) {
       "semanto-verify: check a Semanto file, a page, a signed response or the public log.",
       "",
       "  semanto-verify file <semanto.json> --pages <dir> [--keys <keys.json>] [--now <iso>] [--revocations <file>]",
-      "  semanto-verify page <url> [--trooth <base>] [--now <iso>] [--allow-unwitnessed] [--allow-unlogged]",
+      "  semanto-verify page <url> [--trooth <base>] [--now <iso>] [--allow-unwitnessed] [--allow-unlogged] [--allow-unsigned]",
       "  semanto-verify response <url> [--keys <keys.json>]",
       "  semanto-verify log --from <n> --to <m> [--log <url>] [--keys <keys.json>]",
       "",
@@ -91,10 +94,10 @@ async function fetchJson(url) {
   return r.json();
 }
 
-/** The company's set from its domain and Trooth's from api.trooth.co, kept apart by role. */
+/** The company's set from its domain and Trooth's from the Semanto Worker, kept apart by role. */
 async function loadKeysFor(domain, args) {
   if (args.keys) return { keys: readJson(args.keys), notes: [] };
-  const troothBase = args.trooth ?? TROOTH_API;
+  const troothBase = args.trooth ?? TROOTH_KEYS_BASE;
   const keys = { company: { keys: [] }, trooth: { keys: [] } };
   const notes = [];
   for (const [role, url] of [
@@ -205,7 +208,7 @@ async function cmdResponse(args, { alsoProof = false } = {}) {
             process.stdout.write(`  FAIL ${versionUrl} could not be read (${e.message}); without the header the proof is not tied to a signed version.\n`);
           }
         }
-        const pr = await verifyPageProof(proof, body, keys, { now: args.now, header, allowUnwitnessed: args["allow-unwitnessed"] === true, allowUnlogged: args["allow-unlogged"] === true });
+        const pr = await verifyPageProof(proof, body, keys, { now: args.now, header, allowUnwitnessed: args["allow-unwitnessed"] === true, allowUnlogged: args["allow-unlogged"] === true, allowUnsigned: args["allow-unsigned"] === true });
         ok = printChecks(`Proof at ${proofUrl}`, pr) && ok;
         if (header) process.stdout.write(`State now: ${stateOf({ header, root_hash: proof.root_hash, signature: proof.signature }, args.now ? new Date(args.now) : new Date())}.\n\n`);
       } catch (e) {
@@ -224,12 +227,13 @@ async function cmdLog(args) {
   const log = args.log ?? DEFAULT_LOG;
   // Tree heads are Trooth's statements: only Trooth's keys check them.
   const keys = args.keys ? readJson(args.keys) : { trooth: await fetchJson(args.trooth ? `${args.trooth}/.well-known/trooth-keys.json` : TROOTH_KEYS) };
-  const oldHead = await fetchJson(`${log}/tree-head?size=${from}`);
+  // An empty log is a prefix of every log: from 0 there is no old tree head to fetch and nothing to prove consistent.
+  const oldHead = from === 0 ? null : await fetchJson(`${log}/tree-head?size=${from}`);
   const newHead = await fetchJson(`${log}/tree-head?size=${to}`);
-  const consistency = await fetchJson(`${log}/consistency?from=${from}&to=${to}`);
+  const consistency = from === 0 ? null : await fetchJson(`${log}/consistency?from=${from}&to=${to}`);
   let ok = true;
   for (const [name, head] of [
-    [`Tree head at size ${from}`, oldHead],
+    ...(oldHead ? [[`Tree head at size ${from}`, oldHead]] : []),
     [`Tree head at size ${to}`, newHead],
   ]) {
     const v = await verifyTreeHead(head, keys, { now: args.now });
@@ -237,7 +241,7 @@ async function cmdLog(args) {
     ok = ok && v.ok;
   }
   const rootOf = (head) => head.payload?.root_hash ?? head.root_hash;
-  const c = await verifyConsistency({ from, to, old_root: rootOf(oldHead), new_root: rootOf(newHead), path: consistency.path ?? consistency });
+  const c = from === 0 ? true : await verifyConsistency({ from, to, old_root: rootOf(oldHead), new_root: rootOf(newHead), path: consistency.path ?? consistency });
   process.stdout.write(`Consistency ${from} to ${to}: ${c ? "the older tree is a prefix of the newer one; nothing was removed or rewritten" : "FAIL the proof does not connect the two roots"}\n`);
   process.exit(ok && c ? 0 : 1);
 }

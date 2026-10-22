@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright (c) 2026 Trooth, LLC -->
+
 # trooth-semanto-verify (Python)
 
 Check a Semanto by Trooth file, a page proof, a signed response or the public log, offline. Standard library plus `cryptography` (for Ed25519). Python 3.11 or newer.

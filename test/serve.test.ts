@@ -453,7 +453,7 @@ describe("host detection", () => {
         "https://acme.com/.well-known/trooth.semanto": { status: 200, headers: {}, body: semanto },
         "https://acme.com/.well-known/trooth-keys.json": { status: 200, headers: {}, body: utf8('{"keys":[ ]}') },
       }),
-      dnsTxt: async (name) => (name === "_trooth.acme.com" ? ["v=trooth1; kid=fixturekidfixturekidfixturekidfixturekidfix"] : []),
+      dnsTxt: async (name) => (name === "_trooth.acme.com" ? ["v=trooth1; id=acme-inc; key=fixturekidfixturekidfixturekidfixturekidfix"] : []),
       networkCopy: { semanto, keys },
     };
     const d = await detectHost("acme.com", ports, FIXED_NOW);

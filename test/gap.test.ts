@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// Copyright (c) 2026 Trooth, LLC
+//
+// Tests for src/gap: buyer questions, provider adapters, comparison and the competitor view.
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { factId, type Fact } from "@/core/semanto";
@@ -12,6 +17,7 @@ import type { FetchPort, SerpPort, SerpAnswer, SerpEngine } from "@/gap/ports";
 import { compareAnswer, citationNote, normalizeHours, extractMoney, type CompareContext } from "@/gap/compare";
 import { buildGapReport, renderGapReportMarkdown, diffReports, renderDiffMarkdown, weeklyRunPlan, nextWeeklyRun, WEEKLY_RUN, runGapReport, type GapReport } from "@/gap/report";
 import { buildCompetitorView, renderCompetitorHtml, renderCompetitorMarkdown, runCompetitorQuestions, type CompetitorRun } from "@/gap/competitor";
+import { BANNED_WORDS, ELLIPSIS, THREE_DOTS } from "./helpers/house-rules";
 
 const fixture = <T>(name: string): T => JSON.parse(readFileSync(new URL(`./fixtures/gap/${name}`, import.meta.url), "utf8")) as T;
 
@@ -62,7 +68,7 @@ describe("gap question sets", () => {
     expect(questionsFor("local", PARAMS).find((x) => x.id === "local.service_price")?.text).toContain("a tune-up");
   });
   it("never uses the banned words in question copy", () => {
-    for (const set of Object.values(QUESTION_SETS)) for (const t of set) expect(t.text(PARAMS, "Acme Widget")).not.toMatch(/\b(score|verified|certified)\b/i);
+    for (const set of Object.values(QUESTION_SETS)) for (const t of set) expect(t.text(PARAMS, "Acme Widget")).not.toMatch(BANNED_WORDS);
   });
 });
 
@@ -251,8 +257,8 @@ describe("gap report", () => {
     expect(md).toContain("Microsoft Copilot: not configured");
     expect(md).toContain("The signed record says: The Acme Widget costs $49.");
     expect(md).toContain("1 of 1 answers");
-    expect(md).not.toMatch(/\b(score|verified|certified)\b/i);
-    expect(md).not.toContain("...");
+    expect(md).not.toMatch(BANNED_WORDS);
+    expect(md).not.toContain(THREE_DOTS);
   });
   it("diffs two reports by classification: a corrected price counts as resolved", async () => {
     const before = await sampleReport("2026-10-13T09:00:00Z", answers.wrong_price!);
@@ -334,10 +340,10 @@ describe("competitor view", () => {
     expect(html.match(/#1A73E8/g)).toHaveLength(1);
     expect(html.match(/<a /g)).toHaveLength(1);
     expect(html).toContain("Named in 1 of 1 answers");
-    expect(html).not.toMatch(/\b(score|verified|certified)\b/i);
+    expect(html).not.toMatch(BANNED_WORDS);
     const md = renderCompetitorMarkdown(v);
     expect(md).toContain("Your business was named in");
-    expect(md).not.toContain("...");
+    expect(md).not.toContain(THREE_DOTS);
   });
   it("asks the set about each company through the adapters", async () => {
     const seen: string[] = [];

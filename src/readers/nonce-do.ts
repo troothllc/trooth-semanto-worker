@@ -104,12 +104,26 @@ export interface NonceNamespace {
   get(id: never): { fetch(input: Request | string, init?: RequestInit): Promise<Response> };
 }
 
+/** Shards per agent key: one busy agent key spreads over this many objects. */
+export const NONCE_SHARDS_PER_KEY = 16;
+
+/**
+ * The object a nonce key is claimed in. The same key always lands in the same
+ * object (a replay is still caught); different nonces of one agent key spread
+ * over NONCE_SHARDS_PER_KEY objects instead of one.
+ */
+export function nonceShard(key: string): string {
+  const prefix = key.includes(":") ? key.slice(0, key.indexOf(":")) : key;
+  let h = 2166136261;
+  for (let i = 0; i < key.length; i++) h = Math.imul(h ^ key.charCodeAt(i), 16777619) >>> 0;
+  return `nonces:${prefix}:${h % NONCE_SHARDS_PER_KEY}`;
+}
+
 /** The NonceStore over the NONCES binding. A failure to reach the object is a refusal (the nonce is not treated as fresh). */
 export class DurableNonceStore implements NonceStore {
   constructor(private readonly ns: NonceNamespace) {}
   private stub(key: string) {
-    const shard = key.includes(":") ? key.slice(0, key.indexOf(":")) : key;
-    return this.ns.get(this.ns.idFromName(`nonces:${shard}`) as never);
+    return this.ns.get(this.ns.idFromName(nonceShard(key)) as never);
   }
   async claim(key: string, expiresAtMs: number, nowMs: number): Promise<boolean> {
     try {

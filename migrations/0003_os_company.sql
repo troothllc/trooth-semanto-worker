@@ -1,3 +1,8 @@
+-- SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+-- Copyright (c) 2026 Trooth, LLC
+--
+-- The worker-f workspace link (docs/reports/integration.md).
+
 -- Map a worker-f workspace (app_users.company_id, for example co-ada-acme-com) to its Semanto
 -- trooth_id, so the /os routes authorize through worker-f's GET /auth/session without guessing.
 ALTER TABLE semanto_companies ADD COLUMN os_company_id TEXT;

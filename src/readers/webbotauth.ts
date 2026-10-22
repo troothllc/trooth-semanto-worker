@@ -95,6 +95,12 @@ export interface WebBotAuthDeps {
   now?: () => number;
   /** Resolves the directory's host so its addresses are checked too (DNS over HTTPS in the Worker). A resolver error is a refusal. */
   resolve?: Resolver;
+  /**
+   * Limits directory fetches per directory origin and per client address
+   * (src/readers/rate-limit.ts, the RateLimitDO in the Worker). False means
+   * over the limit: the directory is not fetched and the reader is not proven.
+   */
+  limit?: (key: string, group: "directory_origin" | "directory_client") => Promise<boolean>;
 }
 
 // ---------------------------------------------------------------- Signature-Agent
@@ -130,7 +136,7 @@ export function directoryUrl(agentUrl: string): string {
  * before launch (a founder step in the report).
  */
 export const KNOWN_DIRECTORIES: Record<string, string> = {
-  "https://chatgpt.com": "ChatGPT agent (OpenAI)",
+  // Empty until each operator's own documentation names its key directory URL. Until then a proven reader is shown by its directory's host name.
 };
 
 export function directoryDisplayName(agentKeyUrl: string | null, proof: "web_bot_auth" | "none", known: Record<string, string> = KNOWN_DIRECTORIES): string {
@@ -161,7 +167,7 @@ function parseMaxAge(cacheControl: string | undefined): number | null {
   return m ? Number(m[1]) : null;
 }
 
-export async function fetchDirectory(agentUrl: string, deps: WebBotAuthDeps): Promise<DirectoryFetch> {
+export async function fetchDirectory(agentUrl: string, deps: WebBotAuthDeps, client: string | null = null): Promise<DirectoryFetch> {
   const url = directoryUrl(agentUrl);
   const origin = new URL(url).origin;
   const nowMs = (deps.now ? deps.now() : Math.floor(Date.now() / 1000)) * 1000;
@@ -173,6 +179,10 @@ export async function fetchDirectory(agentUrl: string, deps: WebBotAuthDeps): Pr
       await deps.cache.putFailure(origin, nowMs + DIRECTORY_FAILURE_TTL_SECONDS * 1000);
       return r;
     };
+    // A stranger can name a fresh origin with every request: fetches are limited per origin and per client before any network call.
+    if (deps.limit && (!(await deps.limit(origin, "directory_origin")) || !(await deps.limit(client ?? "unknown", "directory_client")))) {
+      return { ok: false, reason: "directory_refused", sentence: `The key directory at ${url} is not fetched now: too many directory fetches from this origin or this client. Try again later.` };
+    }
     const guard = await checkUrlResolved(url, deps.resolve, { refuseIpLiterals: true });
     if (!guard.ok) return failed({ ok: false, reason: "directory_refused", sentence: `The key directory at ${url} is not fetched: ${guard.detail} (${guard.reason}).` });
     let res: Awaited<ReturnType<HttpPort["get"]>>;
@@ -316,7 +326,7 @@ export async function verifyWebBotAuth(req: IncomingRequest, deps: WebBotAuthDep
   const nonceKey = `${params.keyid}:${params.nonce}`;
   if (await deps.nonces.seen(nonceKey, now * 1000)) return fail("replayed_nonce");
 
-  const dir = await fetchDirectory(agent.url, deps);
+  const dir = await fetchDirectory(agent.url, deps, header(req.headers, "cf-connecting-ip"));
   if (!dir.ok) return { proven: false, reason: dir.reason, sentence: dir.sentence };
   const key = dir.directory.keys.find((k) => k.kid === params.keyid);
   if (!key) return fail("unknown_key");

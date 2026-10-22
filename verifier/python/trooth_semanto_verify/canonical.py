@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Trooth, LLC
 #
 # JSON Canonicalization Scheme, RFC 8785, written by hand so the package needs

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Trooth, LLC
 //
 // The Semanto verifier for JavaScript: one ES module, no dependencies, runs in
@@ -855,7 +855,8 @@ function validateStructure(file, out) {
  * /pages/{id}/proof returns) against the page's bytes, strictly. The version
  * header (opts.header, fetched beside the proof) and the company signature
  * are required. The witness statement and the log entry are required unless
- * opts.allowUnwitnessed or opts.allowUnlogged; when one is missing it is a
+ * opts.allowUnwitnessed or opts.allowUnlogged (and the company signature unless
+ * opts.allowUnsigned, for a Semanto Basic page); when one is missing it is a
  * check named "witness" or "log" that reads "absent", never a silent skip.
  * Keys: { company, trooth }; the company signature resolves only against
  * `company`, the witness and the tree head only against `trooth`.
@@ -888,7 +889,8 @@ export async function verifyPageProof(proof, pageBytes, keys = {}, opts = {}) {
     const root = await rootHash(h);
     const bound = h.pages_root === proof.pages_root && root === proof.root_hash && !!entry && entry.id === proof.page_id && entry.hash === proof.page_hash && h.version === proof.version;
     c.add("header", bound, bound ? `The version header hashes to root_hash ${root} and lists this page at index ${index}.` : root !== proof.root_hash ? `The header hashes to ${root}, not the proof's root_hash ${proof.root_hash}.` : "The header does not list this page at that index with this hash.", root !== proof.root_hash ? "root_hash_mismatch" : "manifest_mismatch");
-    if (!proof.signature) c.add("company_signature", false, "The proof carries no company signature.", "signature_absent");
+    // A Semanto Basic page is witnessed by Trooth and not signed by the company: opts.allowUnsigned accepts it knowingly, and the check says so.
+    if (!proof.signature) c.add("company_signature", !!opts.allowUnsigned, opts.allowUnsigned ? "Absent: the proof carries no company signature (allowed by the caller: a record witnessed by Trooth and not signed by the company)." : "The proof carries no company signature.", "signature_absent");
     else {
       const sig = await verifyJws(proof.signature, companyKey, { expectTyp: JWS_TYPES.semantoVersion, payload: h, at });
       c.add("company_signature", sig.ok, sig.ok ? `The header is signed by the company's key ${sig.header.kid} (typ semanto-version).` : `The company's signature did not check out: ${sig.reason}.`, sig.ok ? undefined : sig.reason);

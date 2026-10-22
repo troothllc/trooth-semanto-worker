@@ -29,7 +29,13 @@ export type ProblemCode =
   | "signature_invalid"
   | "log_entry_not_found"
   | "upstream_unavailable"
-  | "payload_too_large";
+  | "payload_too_large"
+  | "domain_fixed"
+  | "domain_claimed_elsewhere"
+  | "domain_not_proven"
+  | "representation_not_offered"
+  | "internal_error"
+  | "witness_key_missing";
 
 export interface Problem {
   type: string;
@@ -126,7 +132,7 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
     retryable: true,
     terminal: false,
     what_happened: "This reader sent more requests than the limit allows in the current window.",
-    what_to_do: "Wait for the number of seconds in Retry-After, then try again. Signed agents (Web Bot Auth) get a higher limit.",
+    what_to_do: "Wait for the number of seconds in Retry-After, then try again.",
   },
   unauthorized: {
     status: 401,
@@ -191,6 +197,54 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
     terminal: true,
     what_happened: "The body is larger than this route reads. Nothing was read or stored.",
     what_to_do: "Send it in smaller parts.",
+  },
+  domain_fixed: {
+    status: 409,
+    title: "The domain cannot change",
+    retryable: false,
+    terminal: true,
+    what_happened: "The domain was fixed when the company was claimed. Later requests cannot change it.",
+    what_to_do: "Use the domain on the claim. To set up a different domain, use a different Trooth workspace.",
+  },
+  domain_claimed_elsewhere: {
+    status: 409,
+    title: "Another Trooth workspace holds this domain",
+    retryable: false,
+    terminal: true,
+    what_happened: "This domain is already held by another Trooth workspace.",
+    what_to_do: "Ask to join that workspace, or ask Trooth to review the claim.",
+  },
+  domain_not_proven: {
+    status: 409,
+    title: "Prove the domain first",
+    retryable: true,
+    terminal: false,
+    what_happened: "Nothing is built for publication, signed, witnessed or served until the company proves it controls its domain.",
+    what_to_do: "Add the proof record shown in setup. Trooth finds it on its own.",
+  },
+  representation_not_offered: {
+    status: 404,
+    title: "This format is turned off",
+    retryable: false,
+    terminal: true,
+    what_happened: "The company turned this format off in its delivery settings.",
+    what_to_do: "Ask for another format, or read the company's HTML pages.",
+  },
+  internal_error: {
+    status: 500,
+    title: "Something failed inside Trooth",
+    retryable: true,
+    terminal: false,
+    what_happened: "A step failed inside Trooth. Nothing outside Trooth caused it.",
+    what_to_do: "Try again in a few minutes. If it keeps failing, quote the request id to Trooth support.",
+  },
+  witness_key_missing: {
+    status: 503,
+    title: "This deployment cannot sign yet",
+    retryable: true,
+    terminal: false,
+    what_happened: "Trooth's witness key is not set on this deployment, so nothing can be signed or witnessed here yet. This answer carries no signature for the same reason.",
+    what_to_do: "Try again later. The operator sets the witness key as a Worker secret.",
   },
 };
 

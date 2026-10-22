@@ -54,16 +54,17 @@ async function V_core_inclusion(p: { index: number; tree_size: number; leaf_hash
 }
 import { MemoryPipelineStore } from "@/pipeline-store";
 import { Pipeline, ReaderReceipts, troothOsAuthorize, webBotAuthReaders, withCompanies, type PipelineDeps, type ServiceFetcher } from "@/pipeline";
-import type { CompileJob } from "@/env";
+import type { CompileJob, QueueMessage } from "@/env";
 import { openPrivateJwk, sealPrivateJwk } from "@/db/key-seal";
 import { catalogToInputs } from "@/pipeline";
-import { D1CommerceStore, D1Keys, D1MonitorStore, D1PipelineStore, D1ReceiptStore, D1Settings, D1VersionStore } from "@/db/d1";
+import { D1BuildStaging, D1CommerceStore, D1Keys, D1MonitorStore, D1PipelineStore, D1ReceiptStore, D1Settings, D1VersionStore } from "@/db/d1";
 import { D1LogStore } from "@/ledger/store-d1";
 import { TransparencyLog } from "@/ledger/log";
 import { LedgerLogPort } from "@/serve/ledger-port";
 import { FixtureD1, FixtureR2 } from "./fixtures/integration/fixture-d1-shim";
 import * as JSV from "../verifier/js/verify.mjs";
 import { signPost, generateConnectorKey } from "../adapters/shared/sign-request.mjs";
+import { BANNED_WORDS, ELLIPSIS } from "./helpers/house-rules";
 
 const COMPILER = fileURLToPath(new URL("./fixtures/compiler/", import.meta.url));
 const FIX = fileURLToPath(new URL("./fixtures/integration/", import.meta.url));
@@ -128,7 +129,7 @@ interface World {
   pipeline: Pipeline;
   app: ReturnType<typeof createApp>;
   deps: PipelineDeps;
-  queued: CompileJob[];
+  queued: QueueMessage[];
   receiptRows: MemoryReceiptStore;
   agent: { priv: PrivateJwk; pub: PublicJwk };
 }
@@ -141,7 +142,8 @@ async function world(opts: { custody?: "hosted" | "customer"; trooth_id?: string
   const ports = memoryPorts(versions, w.privateJwk, { now });
   const store = new MemoryPipelineStore(versions);
   const trooth_id = opts.trooth_id ?? "acme";
-  if (opts.company !== false) await store.putCompany({ trooth_id, domain: "acme.com", org: "Acme Inc", tier: "full", legal_name: "Acme Inc", current_version: null, custody: opts.custody ?? "hosted" });
+  // A company that proved its domain (nothing is built for publication, signed or served before that).
+  if (opts.company !== false) await store.putCompany({ trooth_id, domain: "acme.com", org: "Acme Inc", tier: "full", legal_name: "Acme Inc", current_version: null, custody: opts.custody ?? "hosted", domain_proven_at: NOW.toISOString() });
   const site = fixtureSite();
   const commerce = withCompanies(new InMemoryCommerceStore(), store, API);
   const livePages: Record<string, string> = {};
@@ -170,7 +172,7 @@ async function world(opts: { custody?: "hosted" | "customer"; trooth_id?: string
       }),
     },
   });
-  const queued: CompileJob[] = [];
+  const queued: QueueMessage[] = [];
   const tsa = opts.tsa
     ? {
         url: "https://tsa.fixture.test/",
@@ -194,10 +196,11 @@ async function world(opts: { custody?: "hosted" | "customer"; trooth_id?: string
     site: { http: site, fetcher: { minIntervalMs: 0 } },
     monitor: { fetch: monitorFetch, store: memoryStore() },
     identity: { http: identityHttp },
-    domainProof: memoryDomainProof({ txt: { [dnsClaimName("acme.com")]: [dnsClaimRecord(`trooth-claim-${toBase64Url(new Uint8Array(18))}`)] } }),
+    // The proof value a zero random source gives (src/basic/tier.ts newChallenge).
+    domainProof: memoryDomainProof({ txt: { [dnsClaimName("acme.com")]: [dnsClaimRecord(`trooth-domain-challenge=${"00".repeat(24)}`)] } }),
     ...(tsa ? { tsa } : {}),
     gapAdapters: gapAnswers,
-    ...(opts.queue ? { enqueue: async (job: CompileJob) => void queued.push(job) } : {}),
+    ...(opts.queue ? { enqueue: async (job: QueueMessage) => void queued.push(job) } : {}),
     ...(opts.random ? { random: opts.random } : {}),
     // Review finding 19: catalog nonces are claimed once (the NonceDO in the Worker).
     nonces: new MemoryNonceStore(),
@@ -227,6 +230,10 @@ const post = (w: World, path: string, body: unknown, token = "Bearer owner-token
 const json = async (r: Response) => (await r.json()) as Record<string, any>;
 const get = (w: World, path: string, headers: Record<string, string> = {}) => w.app.request(`${API}${path}`, { headers });
 const settle = () => new Promise((r) => setTimeout(r, 10));
+/** Run every queued message, and the messages they queue, as the queue consumer would. */
+async function drain(w: World): Promise<void> {
+  while (w.queued.length) await w.pipeline.jobs().compile(w.queued.shift());
+}
 
 async function buildAndSign(w: World, trooth_id = "acme"): Promise<{ file: SemantoFile; signed: Record<string, any> }> {
   const built = await post(w, `/${trooth_id}/build`, {});
@@ -500,6 +507,7 @@ describe("4. the same flow over the D1 and R2 adapters the Worker uses (SQLite a
       identity: { http: new IdentityHttp({}) },
       domainProof: memoryDomainProof(),
       gapAdapters: gapAnswers,
+      staging: new D1BuildStaging(db, bucket),
     });
     const app = createApp({
       ports: { versions, log, keys, receipts: new ReaderReceipts(receiptRows, "fixture-receipt-salt-secret"), settings, jobs: pipeline.jobs(), config: TEST_CONFIG, now },
@@ -511,6 +519,10 @@ describe("4. the same flow over the D1 and R2 adapters the Worker uses (SQLite a
 
     await store.putCompany({ trooth_id: "acme", domain: "acme.com", org: "Acme Inc", tier: "full", legal_name: "Acme Inc", current_version: null, custody: "hosted" });
     expect((await store.getCompany("acme"))?.custody).toBe("hosted");
+    // Not proven yet: nothing is built for publication or served.
+    expect((await osPost("/acme/build", {})).status).toBe(409);
+    await store.markDomainProven("acme", NOW.toISOString(), "dns_txt");
+    expect((await store.getCompany("acme"))?.domain_proven_at).toBe(NOW.toISOString());
     expect((await app.request(`${API}/acme`)).status).toBe(409);
     expect((await osPost("/acme/build", {})).status).toBe(200);
     const signedRes = await osPost("/acme/sign", {});
@@ -702,24 +714,30 @@ describe("4. signing paths, keys and the workspace actions", () => {
 
   it("Semanto Basic: claims, proves by DNS, builds the witnessed record and measures the setup", async () => {
     const w = await world({ company: false, random: (n) => new Uint8Array(n) });
-    const claimed = await json(await post(w, "/acme/basic/claim", { domain: "https://acme.com/", org: "Acme Inc" }));
-    expect(claimed.dns).toEqual({ name: "_trooth.acme.com", type: "TXT", value: dnsClaimRecord(`trooth-claim-${toBase64Url(new Uint8Array(18))}`) });
+    await w.store.putCompany({ trooth_id: "acme", domain: "acme.com", org: "Acme Inc", tier: "basic", current_version: null, custody: "customer", domain_proven_at: null });
+    const claimed = await json(await post(w, "/acme/basic/claim", { domain: "https://acme.com/" }));
+    expect(claimed.dns).toEqual({ name: "_trooth-challenge.acme.com", type: "TXT", value: `trooth-domain-challenge=${"00".repeat(24)}` });
     const proved = await post(w, "/acme/basic/prove", {});
     expect(proved.status).toBe(200);
     expect(proved.headers.get("trooth-record-state")).toBe("read");
     const body = await json(proved);
     expect(body.signed_by_company).toBe(false);
-    expect(body.body.state).toBe("basic_built");
-    expect(body.body.record.page_count).toBeGreaterThan(3);
-    expect(body.body.setup.steps.map((s: any) => s.id)).toEqual(["enter_domain", "publish_token", "prove_domain", "build_record", "add_head_tag", "first_report"]);
-    expect(body.body.setup.within_ten_minutes).toBeNull();
+    expect(body.body.proved).toBe(true);
+    expect(body.body.method).toBe("dns_txt");
+    expect(body.body.read.status).toBe("done");
+    expect(body.body.read.read).toBeGreaterThan(3);
+    expect(body.body.setup.steps.map((s: any) => s.id)).toEqual(["sign_in", "company", "prove_domain", "read_site", "review", "sign", "install", "check", "monitoring"]);
+    expect(body.body.setup.basic.spent_seconds).toBeNull();
 
     // Review finding 15: the Basic build is witnessed (Trooth's witness statement and a "witness" log leaf), never signed by the company.
-    expect(body.body.record_state).toBe("read");
-    expect(body.body.witnessed).toBe(true);
-    expect(body.body.record.witnessed).toBe(true);
-    const leaf = await json(await get(w, `/log/leaves/${body.body.witness.log_index}`));
-    expect(leaf.leaf).toMatchObject({ kind: "witness", trooth_id: "acme" });
+    const leaves: LogLeaf[] = [];
+    for (let i = 0; ; i++) {
+      const r = await get(w, `/log/leaves/${i}`);
+      if (r.status !== 200) break;
+      leaves.push((await json(r)).leaf);
+    }
+    expect(leaves.map((l) => l.kind)).toEqual(["witness"]);
+    expect(leaves[0]).toMatchObject({ kind: "witness", trooth_id: "acme" });
     const served = (await w.versions.getCurrent("acme"))!;
     expect(served.header.state).toBe("read");
     expect(served.signature).toBeNull();
@@ -804,7 +822,8 @@ describe("4. signing paths, keys and the workspace actions", () => {
     const r = await post(w, "/acme/build", {});
     expect(r.status).toBe(202);
     expect(w.queued).toHaveLength(1);
-    await w.pipeline.jobs().compile(w.queued[0]);
+    // The job becomes a build in stages (discover, render of at most 25 pages, assemble), each its own message.
+    await drain(w);
     expect((await w.store.latestVersion("acme"))?.file.header.state).toBe("read");
   });
 });
@@ -815,10 +834,14 @@ describe("4. scheduled work", () => {
   it("hourly: detects a changed signed page, queues a rebuild of that url, and the page is served as behind", async () => {
     const w = await world({ queue: true });
     await post(w, "/acme/build", {});
-    await w.pipeline.jobs().compile(w.queued.shift());
+    await drain(w);
     await post(w, "/acme/sign", {});
     w.site.set("https://acme.com/about", { body: readCompiler("about.html").replace("coyote", "roadrunner"), headers: { "content-type": "text/html" } });
-    const result = await w.pipeline.hourlyChangeDetection();
+    // The cron fans out one message per 25 companies; the message checks them and queues the rebuild.
+    await w.pipeline.hourlyChangeDetection();
+    expect(w.queued).toEqual([{ kind: "companies", job: "changes", trooth_ids: ["acme"] }]);
+    w.queued.length = 0;
+    const result = await w.pipeline.checkCompanyChanges(["acme"]);
     expect(result).toEqual([{ trooth_id: "acme", changed: ["https://acme.com/about"] }]);
     expect(w.queued[0]).toMatchObject({ trooth_id: "acme", reason: "change_detected", changed_urls: ["https://acme.com/about"] });
     const file = (await w.versions.getCurrent("acme"))!;
@@ -827,7 +850,7 @@ describe("4. scheduled work", () => {
     expect(page.headers.get("trooth-semanto-state")).toBe("behind");
     // The next hour, the same new bytes are not a new change.
     w.queued.length = 0;
-    expect((await w.pipeline.hourlyChangeDetection())[0]!.changed).toEqual([]);
+    expect((await w.pipeline.checkCompanyChanges(["acme"]))[0]!.changed).toEqual([]);
     // The rebuild keeps unchanged pages and re-renders the changed one.
     const summary = await w.pipeline.compile({ trooth_id: "acme", domain: "acme.com", reason: "change_detected", changed_urls: ["https://acme.com/about"], requested_at: NOW.toISOString() });
     expect(summary.version).toBe(2);
@@ -953,9 +976,9 @@ describe("6. house rules across every source file", () => {
   walk(fileURLToPath(new URL("../src", import.meta.url)));
   walk(fileURLToPath(new URL("../migrations", import.meta.url)));
 
-  // Every folder a person reads (review finding 19): src, migrations, adapters, verifier, web and docs, every text file,
-  // excluding node_modules, vendored lockfiles and caches. The Next.js folder name [[...path]] is framework syntax and is
-  // removed from the text before the ellipsis check.
+  // Every folder a person reads (review finding 19, audit finding 22): src, migrations, adapters, verifier, web, docs
+  // and test, plus the text files at the repository root, excluding node_modules, vendored lockfiles and caches. The
+  // Next.js folder name [[...path]] is framework syntax and is removed from the text before the ellipsis check.
   const everyFile: string[] = [];
   const SKIP_DIRS = new Set(["node_modules", "__pycache__", ".pytest_cache", ".git"]);
   const SKIP_FILES = new Set(["package-lock.json", "go.sum", "yarn.lock", "pnpm-lock.yaml"]);
@@ -968,32 +991,30 @@ describe("6. house rules across every source file", () => {
       } else if (TEXT.test(name) && !SKIP_FILES.has(name)) everyFile.push(p);
     }
   };
-  for (const d of ["src", "migrations", "adapters", "verifier", "web", "docs"]) walkAll(fileURLToPath(new URL(`../${d}`, import.meta.url)));
+  for (const d of ["src", "migrations", "adapters", "verifier", "web", "docs", "test"]) walkAll(fileURLToPath(new URL(`../${d}`, import.meta.url)));
+  const rootDir = fileURLToPath(new URL("..", import.meta.url));
+  for (const name of readdirSync(rootDir)) if (TEXT.test(name) && !SKIP_FILES.has(name) && statSync(`${rootDir}${name}`).isFile()) everyFile.push(`${rootDir}${name}`);
 
-  it("no banned word, no ellipsis and no X-prefixed Semanto header in src, migrations, adapters, verifier, web or docs", () => {
-    const banned = new RegExp(`\\b(${["sc", "veri", "certi"].map((x, i) => x + ["ore", "fied", "fied"][i]).join("|")})\\b`, "i");
+  it("no banned word (inflections included), no ellipsis and no X-prefixed Semanto header in any folder or root file", () => {
     const xHeader = new RegExp(["X", "Semanto", ""].join("-"), "i");
-    expect(everyFile.length).toBeGreaterThan(200);
+    expect(everyFile.length).toBeGreaterThan(250);
+    expect(everyFile.some((f) => f.includes("/test/"))).toBe(true);
     for (const f of everyFile) {
       const s = readFileSync(f, "utf8").split("[[...path]]").join("");
-      expect([f, banned.test(s)]).toEqual([f, false]);
-      expect([f, s.includes("\u2026")]).toEqual([f, false]);
-      expect([f, /\.\.\.(?![A-Za-z_$([{])/.test(s)]).toEqual([f, false]);
+      expect([f, BANNED_WORDS.test(s)]).toEqual([f, false]);
+      expect([f, ELLIPSIS.test(s)]).toEqual([f, false]);
       expect([f, xHeader.test(s)]).toEqual([f, false]);
     }
   });
-  // Built from parts so this file never holds the words it bans.
-  const banned = new RegExp(`\\b(${["sc", "veri", "certi"].map((x, i) => x + ["ore", "fied", "fied"][i]).join("|")})\\b`, "i");
   const seeding = new RegExp(["mention", "seed"].join("[-_ ]?") + "|" + ["seed", "mention"].join("[-_ ]?") + "|" + ["astro", "turf"].join(""), "i");
 
   it("no banned word, no ellipsis, no X-Semanto header, and no mention-seeding feature anywhere in src or the migrations", () => {
     expect(files.length).toBeGreaterThan(60);
     for (const f of files) {
       const s = readFileSync(f, "utf8");
-      expect([f, banned.test(s)]).toEqual([f, false]);
-      expect([f, s.includes("…")]).toEqual([f, false]);
-      expect([f, /\.\.\.(?![A-Za-z_$([{])/.test(s)]).toEqual([f, false]);
-      expect([f, /X-Semanto-/i.test(s)]).toEqual([f, false]);
+      expect([f, BANNED_WORDS.test(s)]).toEqual([f, false]);
+      expect([f, ELLIPSIS.test(s)]).toEqual([f, false]);
+      expect([f, new RegExp(["X", "Semanto", ""].join("-"), "i").test(s)]).toEqual([f, false]);
       expect([f, seeding.test(s)]).toEqual([f, false]);
     }
   });
@@ -1005,10 +1026,19 @@ describe("6. house rules across every source file", () => {
     }
   });
 
-  it("every source file carries the SPDX and copyright header", () => {
+  it("every source file carries the SPDX and copyright header (audit finding 22): proprietary everywhere, Apache-2.0 in verifier/", () => {
     for (const f of files.filter((x) => x.endsWith(".ts"))) {
       const s = readFileSync(f, "utf8");
       expect([f, s.startsWith("// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary\n// Copyright (c) 2026 Trooth, LLC")]).toEqual([f, true]);
+    }
+    // Code and configuration in every folder and at the root. JSON cannot carry a comment, and the page vectors are hashed bytes.
+    const CODE = /\.(ts|tsx|mts|mjs|js|sql|py|go|php|conf|toml|sh)$|^_redirects$|^go\.mod$/;
+    const code = [...everyFile.filter((f) => CODE.test(f.split("/").pop()!)), ...["verifier/go/go.mod"].map((x) => `${rootDir}${x}`)];
+    expect(code.length).toBeGreaterThan(150);
+    for (const f of code) {
+      const head = readFileSync(f, "utf8").split("\n").slice(0, 4).join("\n");
+      const license = f.includes("/verifier/") ? "Apache-2.0" : "LicenseRef-Trooth-Proprietary";
+      expect([f, head.includes(`SPDX-License-Identifier: ${license}`) && head.includes("Copyright (c) 2026 Trooth, LLC")]).toEqual([f, true]);
     }
   });
 });

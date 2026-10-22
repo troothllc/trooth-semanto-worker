@@ -5,8 +5,10 @@
 // only when its request carried a Web Bot Auth signature that checked out
 // against its key directory (draft-ietf-webbotauth-httpsig-protocol); every
 // other read is "unproven reader", never a guess from a User-Agent string.
-// Counts include Trooth's own hourly checks and the panel says so. The CSV
-// link is the parent's.
+// Trooth's hourly change detection reads the company's own pages, not the
+// served record, so it is not in these counts; the panel says so, and the
+// "Trooth's checks" column stays for a future Trooth key directory. The CSV
+// link is the parent's (GET /os/semanto/{id}/receipts.csv).
 
 "use client";
 
@@ -27,7 +29,7 @@ export interface ReadReceiptDay {
   reads: number;
   proven: ProvenAgent[];
   unproven_reads: number;
-  /** Reads made by Trooth's own monitor that day, included in `reads`. */
+  /** Reads of the served record made by a Trooth key directory that day, included in `reads`. Zero today: Trooth has no reader key directory yet. */
   trooth_checks: number;
 }
 
@@ -53,7 +55,7 @@ export function ReadReceiptsPanel({ days, csv_href, total_reads }: ReadReceiptsP
             Who read your Semanto
           </h2>
           <p className="mt-1 text-[13px] text-text-secondary">
-            {days.length === 0 ? "No reads recorded yet." : `${fmtCount(total_reads)} reads over ${days.length} ${days.length === 1 ? "day" : "days"}, of which ${fmtCount(trooth)} were Trooth's own hourly checks and ${fmtCount(proven)} came from readers who proved who they were.`}
+            {days.length === 0 ? "No reads recorded yet." : `${fmtCount(total_reads)} reads over ${days.length} ${days.length === 1 ? "day" : "days"}, of which ${trooth ? `${fmtCount(trooth)} were Trooth's own checks and ` : ""}${fmtCount(proven)} came from readers who proved who they were.`}
           </p>
         </div>
         <a href={csv_href} className="inline-flex items-center gap-1.5 text-[13px] text-text-secondary underline underline-offset-2 hover:text-text-primary" download>
@@ -123,7 +125,7 @@ export function ReadReceiptsPanel({ days, csv_href, total_reads }: ReadReceiptsP
           </tbody>
         </table>
       </div>
-      <p className="px-5 py-3 text-[12.5px] text-text-secondary">A read is one answer of a signed page, the facts file or the whole file. Trooth's own hourly checks are counted and shown in their own column so you can take them out.</p>
+      <p className="px-5 py-3 text-[12.5px] text-text-secondary">A read is one answer of a signed page, the facts file or the whole file. Trooth's hourly change check reads your own pages, not this record, so it is not counted here.</p>
     </section>
   );
 }

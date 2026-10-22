@@ -15,6 +15,7 @@ import { canonicalize } from "@/core/canonical";
 import { pagesRoot, factsRoot, rootHash, type SemantoFile } from "@/core/semanto";
 import { utf8 } from "@/core/encoding";
 import * as V from "../verifier/js/verify.mjs";
+import { BANNED_WORDS, ELLIPSIS, THREE_DOTS } from "./helpers/house-rules";
 
 const ROOT = join(__dirname, "..");
 const DIR = join(ROOT, "verifier", "test-vectors", "v1");
@@ -192,8 +193,8 @@ describe("verifier test vectors (JavaScript)", () => {
 
   it("the vectors contain no banned words and no ellipses", () => {
     const text = manifest.files.map((f) => readFileSync(join(DIR, f), "utf8")).join("\n") + readFileSync(join(DIR, "README.md"), "utf8");
-    expect(text).not.toMatch(/…|\.\.\./);
-    expect(text).not.toMatch(/\b(verified|certified|score)\b/i);
+    expect(text).not.toMatch(ELLIPSIS);
+    expect(text).not.toMatch(BANNED_WORDS);
     const bytes = utf8(text);
     expect(bytes.length).toBeGreaterThan(0);
   });
