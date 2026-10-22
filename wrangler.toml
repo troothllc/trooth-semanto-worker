@@ -1,0 +1,73 @@
+name = "trooth-semanto-worker"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+[vars]
+ENVIRONMENT = "development"
+PUBLIC_API_BASE = "https://api.trooth.co/public/semanto"
+NETWORK_BASE = "https://trooth.co/network/company"
+LEDGER_URL = "https://api.trooth.co/public/semanto/log"
+
+# Hourly: change detection for every signed company; nightly: log checkpoint and timestamp; weekly: gap reports.
+[triggers]
+crons = ["15 * * * *", "30 1 * * *", "0 6 * * 1"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "trooth_semanto"
+database_id = "REPLACE_WITH_D1_ID"
+
+[[r2_buckets]]
+binding = "STORE"
+bucket_name = "trooth-semanto"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "REPLACE_WITH_KV_ID"
+
+[[queues.producers]]
+binding = "COMPILE_QUEUE"
+queue = "trooth-semanto-compile"
+
+[[queues.consumers]]
+queue = "trooth-semanto-compile"
+max_batch_size = 1
+max_retries = 3
+
+[env.production]
+name = "trooth-semanto-worker"
+workers_dev = false
+routes = [
+  { pattern = "api.trooth.co/public/semanto/*", zone_name = "trooth.co" },
+  { pattern = "api.trooth.co/os/semanto/*", zone_name = "trooth.co" },
+]
+
+[env.production.vars]
+ENVIRONMENT = "production"
+PUBLIC_API_BASE = "https://api.trooth.co/public/semanto"
+NETWORK_BASE = "https://trooth.co/network/company"
+LEDGER_URL = "https://api.trooth.co/public/semanto/log"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "trooth_semanto"
+database_id = "REPLACE_WITH_D1_ID"
+
+[[env.production.r2_buckets]]
+binding = "STORE"
+bucket_name = "trooth-semanto"
+
+[[env.production.kv_namespaces]]
+binding = "CACHE"
+id = "REPLACE_WITH_KV_ID"
+
+[[env.production.queues.producers]]
+binding = "COMPILE_QUEUE"
+queue = "trooth-semanto-compile"
+
+[[env.production.queues.consumers]]
+queue = "trooth-semanto-compile"
+max_batch_size = 1
+max_retries = 3

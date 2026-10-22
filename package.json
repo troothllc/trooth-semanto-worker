@@ -1,0 +1,27 @@
+{
+  "name": "trooth-semanto-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Semanto by Trooth: the compiler, signer, ledger and server for a company's signed whole-website file, served to people and agents on any host.",
+  "type": "module",
+  "license": "LicenseRef-Trooth-Proprietary",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --env production",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "vectors": "tsx verifier/test-vectors/generate.ts",
+    "verify": "node verifier/js/cli.mjs"
+  },
+  "dependencies": {
+    "hono": "^4.10.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261019.1",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0",
+    "wrangler": "^4.40.0"
+  }
+}
