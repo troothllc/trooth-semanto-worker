@@ -16,10 +16,13 @@
 //   smt_  a signed tree head         digest of the tree head
 //   smd_  a read receipt
 //   smb_  a first-publication record
+//   smg_  a gap report                digest of the canonical report body
+//   smm_  a monitor run               digest of the run
+//   sma_  an alert                    digest of company, kind and key
 
 import { DIGEST_RE } from "./hash";
 
-export type IdPrefix = "smv" | "smr" | "smp" | "smf" | "smo" | "smk" | "sms" | "smn" | "smt" | "smd" | "smb";
+export type IdPrefix = "smv" | "smr" | "smp" | "smf" | "smo" | "smk" | "sms" | "smn" | "smt" | "smd" | "smb" | "smg" | "smm" | "sma";
 
 const B32 = "abcdefghijklmnopqrstuvwxyz234567";
 
@@ -38,7 +41,7 @@ export function semantoId(prefix: IdPrefix, digest: string): string {
 
 export function isSemantoId(value: unknown, prefix?: IdPrefix): value is string {
   if (typeof value !== "string") return false;
-  const m = /^(smv|smr|smp|smf|smo|smk|sms|smn|smt|smd|smb)_[a-z2-7]{26}$/.exec(value);
+  const m = /^(smv|smr|smp|smf|smo|smk|sms|smn|smt|smd|smb|smg|smm|sma)_[a-z2-7]{26}$/.exec(value);
   return Boolean(m) && (!prefix || m![1] === prefix);
 }
 

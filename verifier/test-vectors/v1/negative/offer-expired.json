@@ -1,0 +1,28 @@
+{
+  "kind": "offer",
+  "description": "An offer whose exp passed 23 days before now.",
+  "now": "2026-10-22T12:00:10Z",
+  "offer_id": "smo_bbfonwr3ikdagwkpunovl3wxug",
+  "payload": {
+    "sku": "ACME-STARTER",
+    "name": "Acme Starter plan",
+    "url": "https://acme.com/pricing",
+    "price": {
+      "amount": 4900,
+      "currency": "USD",
+      "per": "month"
+    },
+    "seller": {
+      "trooth_id": "acme",
+      "domain": "acme.com"
+    },
+    "semanto_version": "smv_sf26uv6f5niw6xllfj2i6ru6ym",
+    "issued_at": "2026-09-22T12:00:00Z"
+  },
+  "jws": "eyJhbGciOiJFZERTQSIsImV4cCI6IjIwMjYtMDktMjlUMTI6MDA6MDAuMDAwWiIsImlhdCI6IjIwMjYtMDktMjJUMTI6MDA6MDAuMDAwWiIsImtpZCI6IkY0NnZicnJjSlRRT2d6V2w0RDhlczNJZ0VQRUx4djctVGxkazZ0cDJxaEkiLCJuYmYiOiIyMDI2LTA5LTIyVDEyOjAwOjAwLjAwMFoiLCJ0eXAiOiJodHRwczovL3Ryb290aC5jby90eXBlcy9zaWduZWQtb2ZmZXIifQ.eyJpc3N1ZWRfYXQiOiIyMDI2LTA5LTIyVDEyOjAwOjAwWiIsIm5hbWUiOiJBY21lIFN0YXJ0ZXIgcGxhbiIsInByaWNlIjp7ImFtb3VudCI6NDkwMCwiY3VycmVuY3kiOiJVU0QiLCJwZXIiOiJtb250aCJ9LCJzZWxsZXIiOnsiZG9tYWluIjoiYWNtZS5jb20iLCJ0cm9vdGhfaWQiOiJhY21lIn0sInNlbWFudG9fdmVyc2lvbiI6InNtdl9zZjI2dXY2ZjVuaXc2eGxsZmoyaTZydTZ5bSIsInNrdSI6IkFDTUUtU1RBUlRFUiIsInVybCI6Imh0dHBzOi8vYWNtZS5jb20vcHJpY2luZyJ9.Olu3_x81FpBYBew80ioj62McwVmV1fCAxgGTmtw9yM8bKzF91XotxE90mfV3MRzcW8s8KkSu-6eKma13fShuCA",
+  "kid": "F46vbrrcJTQOgzWl4D8es3IgEPELxv7-Tldk6tp2qhI",
+  "expect": {
+    "ok": false,
+    "reason": "expired"
+  }
+}

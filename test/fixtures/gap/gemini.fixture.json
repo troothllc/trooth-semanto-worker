@@ -1,0 +1,17 @@
+{
+  "candidates": [
+    {
+      "content": { "role": "model", "parts": [{ "text": "Acme Inc holds a SOC 2 Type II report, " }, { "text": "renewed every year." }] },
+      "finishReason": "STOP",
+      "groundingMetadata": {
+        "webSearchQueries": ["Acme Inc SOC 2"],
+        "groundingChunks": [
+          { "web": { "uri": "https://example-reviews.test/acme", "title": "example-reviews.test" } },
+          { "web": { "uri": "https://example-directory.test/acme-inc", "title": "example-directory.test" } }
+        ],
+        "groundingSupports": []
+      }
+    }
+  ],
+  "modelVersion": "gemini-2.5-flash-fixture"
+}

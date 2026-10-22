@@ -1,0 +1,12 @@
+{
+  "ucp": {
+    "version": "2026-01-11",
+    "services": {
+      "dev.ucp.shopping": { "version": "2026-01-11", "spec": "https://ucp.dev/specification/overview", "rest": { "schema": "https://acme.com/ucp/openapi.json", "endpoint": "https://acme.com/ucp/v1" } }
+    },
+    "capabilities": [
+      { "name": "dev.ucp.shopping.checkout", "version": "2026-01-11" },
+      { "name": "dev.ucp.shopping.order", "version": "2026-01-11" }
+    ]
+  }
+}

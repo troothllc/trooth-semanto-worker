@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "node scripts/semanto-sync.mjs && next build",
+  "headers": [
+    {
+      "source": "/.well-known/trooth.semanto",
+      "headers": [
+        { "key": "Content-Type", "value": "application/json" },
+        { "key": "Vary", "value": "Accept" },
+        { "key": "Cache-Control", "value": "public, max-age=300, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/.well-known/trooth-keys.json",
+      "headers": [
+        { "key": "Content-Type", "value": "application/json" },
+        { "key": "Cache-Control", "value": "public, max-age=300, must-revalidate" }
+      ]
+    }
+  ]
+}

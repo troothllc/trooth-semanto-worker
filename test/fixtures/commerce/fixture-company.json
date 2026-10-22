@@ -1,0 +1,13 @@
+{
+  "_fixture": "Fictional feed settings for Acme Inc.",
+  "company": {
+    "trooth_id": "acme-inc",
+    "domain": "acme.com",
+    "public_base": "https://api.trooth.co/public/semanto/acme-inc",
+    "jwks_url": "https://acme.com/.well-known/trooth-keys.json",
+    "content_language": "en",
+    "target_country": "US",
+    "native_commerce": false,
+    "checkout": { "base_url": "https://acme.com/ucp", "create_session": "https://acme.com/ucp/checkout-sessions" }
+  }
+}

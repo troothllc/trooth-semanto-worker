@@ -51,6 +51,8 @@ export interface PageEntry {
   source_hash: string;
   bytes: number;
   tokens: number;
+  /** Token estimate of the HTML as fetched, for the x-original-tokens header. */
+  original_tokens?: number;
   /** ISO 8601, when Trooth fetched and rendered the page. */
   witnessed_at: string;
   /** Language tag when the page states one. */

@@ -1,0 +1,16 @@
+{
+  "name": "trooth-semanto-adapter-fastly",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "LicenseRef-Trooth-Proprietary",
+  "description": "Semanto by Trooth host adapter for Fastly Compute (JavaScript).",
+  "scripts": {
+    "build": "js-compute-runtime src/index.js bin/main.wasm",
+    "deploy": "fastly compute publish",
+    "dev": "fastly compute serve"
+  },
+  "devDependencies": {
+    "@fastly/js-compute": "^3.30.0"
+  }
+}

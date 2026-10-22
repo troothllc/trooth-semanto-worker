@@ -1,0 +1,329 @@
+// SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+// Copyright (c) 2026 Trooth, LLC
+//
+// Provider adapters for the gap report. One interface, ask(question, options),
+// returns the same shape from every assistant so the comparison never cares
+// who answered. Each adapter is a pure request builder plus a pure response
+// parser over the fetch port; the key comes from Env and a provider without a
+// key is reported as "not configured", never silently skipped.
+//
+// Request shapes follow each vendor's public API reference as of October 2026:
+//   OpenAI      Chat Completions with web_search_options (platform.openai.com,
+//               "Web search" guide) and url_citation annotations
+//   Anthropic   Messages API with the web_search_20250305 server tool and
+//               web_search_result_location citations (docs.anthropic.com,
+//               "Web search tool")
+//   Google      generateContent with the google_search tool (Grounding with
+//               Google Search, ai.google.dev) and groundingChunks
+//   Perplexity  Chat Completions, model sonar, with search_results
+//   Google AI Mode, AI Overviews and Microsoft Copilot
+//               through the SERP port only. No scraping of Google or Bing in
+//               this code, by design: those surfaces have no public API, and
+//               the founder connects a licensed SERP data provider.
+//
+// Model names live in MODELS so they can be updated in one place.
+
+import type { FetchPort, ProviderKeys, SerpEngine, SerpPort } from "./ports";
+
+export type ProviderName = "openai" | "anthropic" | "gemini" | "perplexity" | SerpEngine;
+
+export const PROVIDERS: ProviderName[] = ["openai", "anthropic", "gemini", "perplexity", "google_ai_mode", "google_ai_overviews", "copilot"];
+
+export const PROVIDER_LABELS: Record<ProviderName, string> = {
+  openai: "ChatGPT (OpenAI)",
+  anthropic: "Claude (Anthropic)",
+  gemini: "Gemini (Google)",
+  perplexity: "Perplexity",
+  google_ai_mode: "Google AI Mode",
+  google_ai_overviews: "Google AI Overviews",
+  copilot: "Microsoft Copilot",
+};
+
+/** The model each adapter asks for. Change here and nowhere else. */
+export const MODELS = {
+  openai: "gpt-4o-search-preview",
+  anthropic: "claude-sonnet-4-5",
+  gemini: "gemini-2.5-flash",
+  perplexity: "sonar",
+} as const;
+
+export const ENDPOINTS = {
+  openai: "https://api.openai.com/v1/chat/completions",
+  anthropic: "https://api.anthropic.com/v1/messages",
+  gemini: (model: string) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+  perplexity: "https://api.perplexity.ai/chat/completions",
+} as const;
+
+export const ANTHROPIC_VERSION = "2023-06-01";
+
+export interface Citation {
+  url: string;
+  title?: string;
+}
+
+export interface ProviderAnswer {
+  provider: ProviderName;
+  model: string;
+  answer_text: string;
+  citations: Citation[];
+  /** ISO 8601. */
+  asked_at: string;
+  raw: unknown;
+}
+
+export interface NotConfigured {
+  provider: ProviderName;
+  configured: false;
+  reason: string;
+}
+
+export interface ProviderError {
+  provider: ProviderName;
+  configured: true;
+  error: string;
+  status?: number;
+  asked_at: string;
+}
+
+export type AskResult = ProviderAnswer | NotConfigured | ProviderError;
+
+export const isAnswer = (r: AskResult): r is ProviderAnswer => "answer_text" in r;
+export const isNotConfigured = (r: AskResult): r is NotConfigured => "configured" in r && r.configured === false;
+export const isProviderError = (r: AskResult): r is ProviderError => "error" in r;
+
+export interface AskOptions {
+  /** Two-letter country for the SERP port. */
+  country?: string;
+  language?: string;
+  now?: () => Date;
+}
+
+export interface BuiltRequest {
+  url: string;
+  init: { method: "POST"; headers: Record<string, string>; body: string };
+}
+
+export interface Parsed {
+  answer_text: string;
+  citations: Citation[];
+  model: string;
+}
+
+export interface ProviderAdapter {
+  provider: ProviderName;
+  /** Why the provider is not configured, or null when it is. */
+  missing(): string | null;
+  ask(question: string, opts?: AskOptions): Promise<AskResult>;
+}
+
+// A sentence a buyer would type; the same framing to every provider so answers compare.
+export const USER_PROMPT_PREFIX = "Answer as you would for a buyer, with sources. ";
+
+const iso = (opts?: AskOptions) => (opts?.now ? opts.now() : new Date()).toISOString();
+
+function dedupe(cs: Citation[]): Citation[] {
+  const seen = new Set<string>();
+  const out: Citation[] = [];
+  for (const c of cs) {
+    if (!c.url || seen.has(c.url)) continue;
+    seen.add(c.url);
+    out.push(c.title ? { url: c.url, title: c.title } : { url: c.url });
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------ OpenAI
+
+export function buildOpenAiRequest(question: string, key: string): BuiltRequest {
+  return {
+    url: ENDPOINTS.openai,
+    init: {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: MODELS.openai,
+        web_search_options: {},
+        messages: [{ role: "user", content: USER_PROMPT_PREFIX + question }],
+      }),
+    },
+  };
+}
+
+export function parseOpenAiResponse(json: unknown): Parsed {
+  const j = json as { model?: string; choices?: { message?: { content?: string; annotations?: { type?: string; url_citation?: { url?: string; title?: string } }[] } }[] };
+  const msg = j.choices?.[0]?.message;
+  const citations: Citation[] = [];
+  for (const a of msg?.annotations ?? []) {
+    if (a.type === "url_citation" && a.url_citation?.url) citations.push({ url: a.url_citation.url, ...(a.url_citation.title ? { title: a.url_citation.title } : {}) });
+  }
+  return { answer_text: msg?.content ?? "", citations: dedupe(citations), model: j.model ?? MODELS.openai };
+}
+
+// ------------------------------------------------------------------ Anthropic
+
+export function buildAnthropicRequest(question: string, key: string): BuiltRequest {
+  return {
+    url: ENDPOINTS.anthropic,
+    init: {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": ANTHROPIC_VERSION },
+      body: JSON.stringify({
+        model: MODELS.anthropic,
+        max_tokens: 1024,
+        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
+        messages: [{ role: "user", content: USER_PROMPT_PREFIX + question }],
+      }),
+    },
+  };
+}
+
+export function parseAnthropicResponse(json: unknown): Parsed {
+  const j = json as {
+    model?: string;
+    content?: { type?: string; text?: string; citations?: { type?: string; url?: string; title?: string }[]; content?: { type?: string; url?: string; title?: string }[] }[];
+  };
+  let text = "";
+  const cited: Citation[] = [];
+  const searched: Citation[] = [];
+  for (const block of j.content ?? []) {
+    if (block.type === "text") {
+      text += block.text ?? "";
+      for (const c of block.citations ?? []) if (c.type === "web_search_result_location" && c.url) cited.push({ url: c.url, ...(c.title ? { title: c.title } : {}) });
+    } else if (block.type === "web_search_tool_result") {
+      for (const r of block.content ?? []) if (r.type === "web_search_result" && r.url) searched.push({ url: r.url, ...(r.title ? { title: r.title } : {}) });
+    }
+  }
+  // Citations the model attached to its text are what it relied on; the search
+  // results are the fallback when it attached none.
+  return { answer_text: text, citations: dedupe(cited.length ? cited : searched), model: j.model ?? MODELS.anthropic };
+}
+
+// ------------------------------------------------------------------ Gemini
+
+export function buildGeminiRequest(question: string, key: string): BuiltRequest {
+  return {
+    url: ENDPOINTS.gemini(MODELS.gemini),
+    init: {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: USER_PROMPT_PREFIX + question }] }],
+        tools: [{ google_search: {} }],
+      }),
+    },
+  };
+}
+
+export function parseGeminiResponse(json: unknown): Parsed {
+  const j = json as {
+    modelVersion?: string;
+    candidates?: { content?: { parts?: { text?: string }[] }; groundingMetadata?: { groundingChunks?: { web?: { uri?: string; title?: string } }[] } }[];
+  };
+  const cand = j.candidates?.[0];
+  const text = (cand?.content?.parts ?? []).map((p) => p.text ?? "").join("");
+  const citations: Citation[] = [];
+  for (const ch of cand?.groundingMetadata?.groundingChunks ?? []) if (ch.web?.uri) citations.push({ url: ch.web.uri, ...(ch.web.title ? { title: ch.web.title } : {}) });
+  return { answer_text: text, citations: dedupe(citations), model: j.modelVersion ?? MODELS.gemini };
+}
+
+// ------------------------------------------------------------------ Perplexity
+
+export function buildPerplexityRequest(question: string, key: string): BuiltRequest {
+  return {
+    url: ENDPOINTS.perplexity,
+    init: {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model: MODELS.perplexity, messages: [{ role: "user", content: USER_PROMPT_PREFIX + question }] }),
+    },
+  };
+}
+
+export function parsePerplexityResponse(json: unknown): Parsed {
+  const j = json as { model?: string; choices?: { message?: { content?: string } }[]; search_results?: { url?: string; title?: string }[]; citations?: string[] };
+  const citations: Citation[] = [];
+  for (const r of j.search_results ?? []) if (r.url) citations.push({ url: r.url, ...(r.title ? { title: r.title } : {}) });
+  for (const u of j.citations ?? []) citations.push({ url: u });
+  return { answer_text: j.choices?.[0]?.message?.content ?? "", citations: dedupe(citations), model: j.model ?? MODELS.perplexity };
+}
+
+// ------------------------------------------------------------------ adapters
+
+type HttpProvider = "openai" | "anthropic" | "gemini" | "perplexity";
+
+const HTTP: Record<HttpProvider, { keyName: keyof ProviderKeys; build: (q: string, key: string) => BuiltRequest; parse: (json: unknown) => Parsed }> = {
+  openai: { keyName: "OPENAI_API_KEY", build: buildOpenAiRequest, parse: parseOpenAiResponse },
+  anthropic: { keyName: "ANTHROPIC_API_KEY", build: buildAnthropicRequest, parse: parseAnthropicResponse },
+  gemini: { keyName: "GEMINI_API_KEY", build: buildGeminiRequest, parse: parseGeminiResponse },
+  perplexity: { keyName: "PERPLEXITY_API_KEY", build: buildPerplexityRequest, parse: parsePerplexityResponse },
+};
+
+export function httpAdapter(provider: HttpProvider, keys: ProviderKeys, fetchPort: FetchPort): ProviderAdapter {
+  const spec = HTTP[provider];
+  const key = keys[spec.keyName];
+  const missing = () => (key ? null : `${spec.keyName} is not set`);
+  return {
+    provider,
+    missing,
+    async ask(question, opts) {
+      const why = missing();
+      if (why) return { provider, configured: false, reason: why };
+      const asked_at = iso(opts);
+      const req = spec.build(question, key!);
+      let res;
+      try {
+        res = await fetchPort(req.url, req.init);
+      } catch (e) {
+        return { provider, configured: true, error: `request failed: ${(e as Error).message}`, asked_at };
+      }
+      const bodyText = await res.text();
+      if (res.status < 200 || res.status >= 300) return { provider, configured: true, error: `provider answered ${res.status}`, status: res.status, asked_at };
+      let json: unknown;
+      try {
+        json = JSON.parse(bodyText);
+      } catch {
+        return { provider, configured: true, error: "provider answer was not JSON", status: res.status, asked_at };
+      }
+      const parsed = spec.parse(json);
+      return { provider, model: parsed.model, answer_text: parsed.answer_text, citations: parsed.citations, asked_at, raw: json };
+    },
+  };
+}
+
+export function serpAdapter(engine: SerpEngine, serp: SerpPort | undefined): ProviderAdapter {
+  const missing = () => {
+    if (!serp) return `no SERP data provider is connected for ${PROVIDER_LABELS[engine]}`;
+    if (!serp.engines.includes(engine)) return `the SERP data provider ${serp.name} does not return ${PROVIDER_LABELS[engine]}`;
+    return null;
+  };
+  return {
+    provider: engine,
+    missing,
+    async ask(question, opts) {
+      const why = missing();
+      if (why) return { provider: engine, configured: false, reason: why };
+      const asked_at = iso(opts);
+      let a;
+      try {
+        a = await serp!.fetchAnswer(engine, question, { ...(opts?.country ? { country: opts.country } : {}), ...(opts?.language ? { language: opts.language } : {}) });
+      } catch (e) {
+        return { provider: engine, configured: true, error: `SERP provider failed: ${(e as Error).message}`, asked_at };
+      }
+      if (!a) return { provider: engine, model: `${serp!.name}:${engine}`, answer_text: "", citations: [], asked_at, raw: null };
+      return { provider: engine, model: a.model ?? `${serp!.name}:${engine}`, answer_text: a.answer_text, citations: dedupe(a.citations), asked_at, raw: a.raw };
+    },
+  };
+}
+
+/** Every adapter, configured or not, so the report can say which is which. */
+export function allAdapters(keys: ProviderKeys, fetchPort: FetchPort, serp?: SerpPort): ProviderAdapter[] {
+  return [
+    httpAdapter("openai", keys, fetchPort),
+    httpAdapter("anthropic", keys, fetchPort),
+    httpAdapter("gemini", keys, fetchPort),
+    httpAdapter("perplexity", keys, fetchPort),
+    serpAdapter("google_ai_mode", serp),
+    serpAdapter("google_ai_overviews", serp),
+    serpAdapter("copilot", serp),
+  ];
+}

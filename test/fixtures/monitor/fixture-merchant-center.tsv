@@ -1,0 +1,3 @@
+id	title	link	price	availability	gtin	brand	consumer_notice
+KET-100	Acme Kettle 1.7L	https://acme.com/products/kettle-1	45.00 USD	in stock	12345678905	Acme	prop_65:WARNING: This product can expose you to chemicals known to the State of California to cause cancer.
+TST-200	Acme Toaster	https://acme.com/products/toaster-2	27.50 USD	in stock		Acme	

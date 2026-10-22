@@ -1,0 +1,8 @@
+# Semanto by Trooth: the no-code fallback. If you do not want the edge
+# function, these two lines proxy the well-known files to the signed copy
+# Trooth holds (200! means proxy, and take precedence over a file at that
+# path). Replace example-inc with your Trooth ID. Note that a proxied
+# response keeps the body byte for byte and the standard headers; the edge
+# function is the full adapter.
+/.well-known/trooth.semanto     https://api.trooth.co/public/semanto/example-inc            200!
+/.well-known/trooth-keys.json   https://api.trooth.co/public/semanto/example-inc/keys.json  200!

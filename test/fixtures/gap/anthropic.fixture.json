@@ -1,0 +1,24 @@
+{
+  "id": "msg_fixture",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-5-fixture",
+  "content": [
+    { "type": "server_tool_use", "id": "srvtoolu_fixture", "name": "web_search", "input": { "query": "Acme Widget price" } },
+    {
+      "type": "web_search_tool_result",
+      "tool_use_id": "srvtoolu_fixture",
+      "content": [
+        { "type": "web_search_result", "url": "https://acme.com/widget", "title": "Acme Widget", "encrypted_content": "fixture", "page_age": "October 1, 2026" },
+        { "type": "web_search_result", "url": "https://example-reviews.test/acme", "title": "Acme review", "encrypted_content": "fixture", "page_age": null }
+      ]
+    },
+    { "type": "text", "text": "According to Acme's product page, " },
+    {
+      "type": "text",
+      "text": "the Acme Widget costs $49.",
+      "citations": [{ "type": "web_search_result_location", "url": "https://acme.com/widget", "title": "Acme Widget", "encrypted_index": "fixture", "cited_text": "Price: $49" }]
+    }
+  ],
+  "stop_reason": "end_turn"
+}

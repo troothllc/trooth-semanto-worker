@@ -1,0 +1,4 @@
+{
+  "edgeworker-version": "0.1.0",
+  "description": "Semanto by Trooth host adapter: signed markdown, JSON-LD and the well-known files on your own domain, decided on Accept and path suffix only."
+}

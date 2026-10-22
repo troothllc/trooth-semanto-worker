@@ -1,0 +1,25 @@
+{
+  "kind": "revocations",
+  "description": "Trooth's signed revocation list. It names a fixture company's old version, not Acme's, so Acme's version stays current.",
+  "now": "2026-10-22T12:00:10Z",
+  "payload": {
+    "trooth_id": null,
+    "issued_at": "2026-10-22T12:00:00Z",
+    "next_update": "2026-10-23T12:00:00Z",
+    "revocations": [
+      {
+        "kind": "version",
+        "ref": "smv_fixtureoneaaaaaaaaaaaaaaaaaaa",
+        "reason": "superseded",
+        "revoked_at": "2026-10-20T12:00:00Z"
+      }
+    ]
+  },
+  "jws": "eyJhbGciOiJFZERTQSIsImlhdCI6IjIwMjYtMTAtMjJUMTI6MDA6MDAuMDAwWiIsImtpZCI6IjFBbkJLd0ZEbDRDcEZhMUt2OXZ5dlB3cGhyUW5ZaDJEaGpsUk4wdTZwY3ciLCJ0eXAiOiJodHRwczovL3Ryb290aC5jby90eXBlcy9yZXZvY2F0aW9uLWxpc3QifQ.eyJpc3N1ZWRfYXQiOiIyMDI2LTEwLTIyVDEyOjAwOjAwWiIsIm5leHRfdXBkYXRlIjoiMjAyNi0xMC0yM1QxMjowMDowMFoiLCJyZXZvY2F0aW9ucyI6W3sia2luZCI6InZlcnNpb24iLCJyZWFzb24iOiJzdXBlcnNlZGVkIiwicmVmIjoic212X2ZpeHR1cmVvbmVhYWFhYWFhYWFhYWFhYWFhYWFhIiwicmV2b2tlZF9hdCI6IjIwMjYtMTAtMjBUMTI6MDA6MDBaIn1dLCJ0cm9vdGhfaWQiOm51bGx9.26hw2nRM2FayEcjHrJLgSHa6nWx9H0C-NMvT5kOXtyyp_Di0aWJBgpCZVVDSkyKSZcof9a9Sjvh5mtERPgeUDQ",
+  "kid": "1AnBKwFDl4CpFa1Kv9vyvPwphrQnYh2DhjlRN0u6pcw",
+  "version_id": "smv_sf26uv6f5niw6xllfj2i6ru6ym",
+  "expect": {
+    "ok": true,
+    "state": "current"
+  }
+}

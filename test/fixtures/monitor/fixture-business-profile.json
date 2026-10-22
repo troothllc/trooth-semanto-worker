@@ -1,0 +1,15 @@
+{
+  "name": "locations/1234567890",
+  "title": "Acme Inc",
+  "phoneNumbers": { "primaryPhone": "(312) 555-0100" },
+  "storefrontAddress": { "regionCode": "US", "postalCode": "62701", "administrativeArea": "IL", "locality": "Springfield", "addressLines": ["120 N Main St", "Ste 4"] },
+  "websiteUri": "https://acme.com/",
+  "regularHours": { "periods": [
+    { "openDay": "MONDAY", "openTime": { "hours": 9 }, "closeDay": "MONDAY", "closeTime": { "hours": 17 } },
+    { "openDay": "TUESDAY", "openTime": { "hours": 9 }, "closeDay": "TUESDAY", "closeTime": { "hours": 17 } },
+    { "openDay": "WEDNESDAY", "openTime": { "hours": 9 }, "closeDay": "WEDNESDAY", "closeTime": { "hours": 17 } },
+    { "openDay": "THURSDAY", "openTime": { "hours": 9 }, "closeDay": "THURSDAY", "closeTime": { "hours": 17 } },
+    { "openDay": "FRIDAY", "openTime": { "hours": 9 }, "closeDay": "FRIDAY", "closeTime": { "hours": 17 } }
+  ] },
+  "categories": { "primaryCategory": { "name": "categories/gcid:kitchen_supply_store", "displayName": "Kitchen supply store" } }
+}

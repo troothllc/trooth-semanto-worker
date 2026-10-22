@@ -1,0 +1,22 @@
+{
+  "kind": "web-bot-auth-request",
+  "description": "A request signed per draft-ietf-webbotauth-httpsig-protocol: tag web-bot-auth, @authority and signature-agent covered, keys at the Signature-Agent directory.",
+  "now": "2026-10-22T12:00:10Z",
+  "now_epoch": 1792670410,
+  "request": {
+    "method": "GET",
+    "url": "https://acme.com/security",
+    "headers": {
+      "host": "acme.com",
+      "accept": "text/markdown",
+      "signature-agent": "\"https://agent.fixture.example\"",
+      "Signature-Input": "sig1=(\"@authority\" \"signature-agent\");created=1792670400;expires=1792670460;keyid=\"j-oBnmAqa6Bm0NxoqL4f5Z1sVznUw0ZL43LRvCx4LCw\";alg=\"ed25519\";nonce=\"fixture-nonce-0001\";tag=\"web-bot-auth\"",
+      "Signature": "sig1=:qOjisuuTpkn+Y5eVzVufsAYzjdZ/qzQOu0y7Xjrb+u8cVDexYlquyor1CwY4YcDbeoDcvCA/ocGAaff9zhY6Bw==:"
+    }
+  },
+  "expect": {
+    "ok": true,
+    "keyid": "j-oBnmAqa6Bm0NxoqL4f5Z1sVznUw0ZL43LRvCx4LCw",
+    "agent": "https://agent.fixture.example"
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "wrong_price": {
+    "provider": "openai",
+    "model": "fixture-model",
+    "answer_text": "The Acme Widget costs $59 and ships in two days. Acme sells it directly on acme.com.",
+    "citations": [{ "url": "https://acme.com/widget", "title": "Acme Widget" }],
+    "asked_at": "2026-10-20T09:00:00Z",
+    "raw": null
+  },
+  "right_price_own_site": {
+    "provider": "anthropic",
+    "model": "fixture-model",
+    "answer_text": "According to Acme's product page, the Acme Widget costs $49.",
+    "citations": [{ "url": "https://www.acme.com/widget" }],
+    "asked_at": "2026-10-20T09:00:00Z",
+    "raw": null
+  },
+  "fabricated_soc2": {
+    "provider": "gemini",
+    "model": "fixture-model",
+    "answer_text": "Acme Inc holds a SOC 2 Type II report, renewed every year.",
+    "citations": [{ "url": "https://example-reviews.test/acme" }],
+    "asked_at": "2026-10-20T09:00:00Z",
+    "raw": null
+  },
+  "third_party_mfa": {
+    "provider": "perplexity",
+    "model": "fixture-model",
+    "answer_text": "Yes, Acme supports multi-factor authentication through authenticator apps.",
+    "citations": [{ "url": "https://example-reviews.test/acme-security" }, { "url": "https://example-forum.test/thread/12" }],
+    "asked_at": "2026-10-20T09:00:00Z",
+    "raw": null
+  },
+  "network_cited_uptime": {
+    "provider": "copilot",
+    "model": "fixture-serp",
+    "answer_text": "Acme's SLA commits to 99.9% uptime each month.",
+    "citations": [{ "url": "https://trooth.co/network/company/acme-inc" }],
+    "asked_at": "2026-10-20T09:00:00Z",
+    "raw": null
+  },
+  "silent": {
+    "provider": "google_ai_mode",
+    "model": "fixture-serp",
+    "answer_text": "Acme Inc is a company that makes widgets.",
+    "citations": [],
+    "asked_at": "2026-10-20T09:00:00Z",
+    "raw": null
+  },
+  "wrong_hours": {
+    "provider": "openai",
+    "model": "fixture-model",
+    "answer_text": "Acme is open Monday to Friday from 8am to 6pm.",
+    "citations": [{ "url": "https://example-directory.test/acme" }],
+    "asked_at": "2026-10-20T09:00:00Z",
+    "raw": null
+  },
+  "right_phone_and_address": {
+    "provider": "gemini",
+    "model": "fixture-model",
+    "answer_text": "You can call Acme at 555-010-0100. It is located at 12 Example St, Springfield.",
+    "citations": [{ "url": "https://acme.com/contact" }],
+    "asked_at": "2026-10-20T09:00:00Z",
+    "raw": null
+  },
+  "walk_ins_wrong": {
+    "provider": "perplexity",
+    "model": "fixture-model",
+    "answer_text": "Acme welcomes walk-ins during business hours.",
+    "citations": [{ "url": "https://acme.com/contact" }],
+    "asked_at": "2026-10-20T09:00:00Z",
+    "raw": null
+  }
+}

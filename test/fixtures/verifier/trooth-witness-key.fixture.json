@@ -1,0 +1,10 @@
+{
+  "_fixture": "A fixture witness key for the test vectors. It is not Trooth's production witness key.",
+  "kty": "OKP",
+  "crv": "Ed25519",
+  "x": "Wc2jReA8idEAdCjraoDF0iAt3VuOD-uPh8UB_C7Ose0",
+  "kid": "1AnBKwFDl4CpFa1Kv9vyvPwphrQnYh2DhjlRN0u6pcw",
+  "alg": "EdDSA",
+  "use": "sig",
+  "d": "Jd6guR5mNTFqFru1KNnKTvQB57LnYuzCDuJEOcgV5Og"
+}

@@ -1,0 +1,5 @@
+{
+  "google_ai_mode": { "answer_text": "Acme's SLA commits to 99.9% uptime each month.", "citations": [{ "url": "https://acme.com/sla", "title": "Acme SLA" }], "model": "fixture-serp:ai-mode", "raw": { "fixture": true } },
+  "google_ai_overviews": null,
+  "copilot": { "answer_text": "Acme is open Monday to Friday from 8am to 6pm.", "citations": [{ "url": "https://example-directory.test/acme" }], "raw": { "fixture": true } }
+}

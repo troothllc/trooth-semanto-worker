@@ -1,0 +1,15 @@
+{
+  "_fixture": "Fictional leaves for the ledger tests. Acme Inc at acme.com does not exist. No value here is a measurement.",
+  "leaves": [
+    { "kind": "semanto_version", "trooth_id": "acme", "ref": "smv_aaaaaaaaaaaaaaaaaaaaaaaaaa", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000001", "at": "2026-10-01T00:00:00.000Z" },
+    { "kind": "witness", "trooth_id": "acme", "ref": "smv_aaaaaaaaaaaaaaaaaaaaaaaaaa", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000002", "at": "2026-10-01T00:00:01.000Z" },
+    { "kind": "receipt", "trooth_id": "acme", "ref": "smr_bbbbbbbbbbbbbbbbbbbbbbbbbb", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000003", "at": "2026-10-01T00:00:02.000Z" },
+    { "kind": "offer", "trooth_id": "acme", "ref": "smo_cccccccccccccccccccccccccc", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000004", "at": "2026-10-02T00:00:00.000Z" },
+    { "kind": "product_record", "trooth_id": "acme", "ref": "smk_dddddddddddddddddddddddddd", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000005", "at": "2026-10-02T00:00:01.000Z" },
+    { "kind": "seller_attestation", "trooth_id": "acme", "ref": "sms_eeeeeeeeeeeeeeeeeeeeeeeeee", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000006", "at": "2026-10-03T00:00:00.000Z" },
+    { "kind": "recall", "trooth_id": "acme", "ref": "smn_ffffffffffffffffffffffffff", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000007", "at": "2026-10-04T00:00:00.000Z" },
+    { "kind": "first_publication", "trooth_id": "acme", "ref": "smb_gggggggggggggggggggggggggg", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000008", "at": "2026-10-05T00:00:00.000Z" },
+    { "kind": "revocation", "trooth_id": "acme", "ref": "smv_aaaaaaaaaaaaaaaaaaaaaaaaaa", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000009", "at": "2026-10-06T00:00:00.000Z" },
+    { "kind": "key", "trooth_id": null, "ref": "fixture-kid-0000000000000000000000000000000000", "hash": "sha256:000000000000000000000000000000000000000000000000000000000000000a", "at": "2026-10-07T00:00:00.000Z" }
+  ]
+}

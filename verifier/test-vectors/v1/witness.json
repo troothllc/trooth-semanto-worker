@@ -1,0 +1,14 @@
+{
+  "kind": "witness",
+  "description": "Trooth's detached JWS over { root_hash, witnessed_at } with typ witness-statement.",
+  "now": "2026-10-22T12:00:10Z",
+  "payload": {
+    "root_hash": "sha256:9175ea57c5eb516f5d6b2a748f469ec33f8e3e0ea9cde9beacad4db4226fbf76",
+    "witnessed_at": "2026-10-22T12:00:00Z"
+  },
+  "jws": "eyJhbGciOiJFZERTQSIsImlhdCI6IjIwMjYtMTAtMjJUMTI6MDA6MDAuMDAwWiIsImtpZCI6IjFBbkJLd0ZEbDRDcEZhMUt2OXZ5dlB3cGhyUW5ZaDJEaGpsUk4wdTZwY3ciLCJ0eXAiOiJodHRwczovL3Ryb290aC5jby90eXBlcy93aXRuZXNzLXN0YXRlbWVudCJ9..nCI7hVhpLt6kjP4LHACL3KmpjBfvouCi3fIdDSNb5J4zOx688xcv0PBSxa0wEUOeOLdcStvD_EWCbquSqoXRBg",
+  "kid": "1AnBKwFDl4CpFa1Kv9vyvPwphrQnYh2DhjlRN0u6pcw",
+  "expect": {
+    "ok": true
+  }
+}

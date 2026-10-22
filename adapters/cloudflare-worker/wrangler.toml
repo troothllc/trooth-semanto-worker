@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+# Copyright (c) 2026 Trooth, LLC
+#
+# Semanto host adapter: a Worker on the customer's own zone. Change the three
+# values under [vars] and the route pattern, then `npx wrangler deploy`.
+# Routes reference: developers.cloudflare.com/workers/configuration/routing/routes/
+
+name = "trooth-semanto-adapter"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+workers_dev = false
+
+# The route covers the whole zone. The Worker passes every request it does not
+# serve straight to the origin, so a wide route is safe. Narrow it to
+# "example.com/.well-known/*" for proof_only if you prefer.
+routes = [
+  { pattern = "example.com/*", zone_name = "example.com" }
+]
+
+[vars]
+# Your Trooth ID, as shown on your Trooth dashboard.
+TROOTH_ID = "example-inc"
+# Where the signed copy lives. Leave as is unless Trooth tells you otherwise.
+TROOTH_API_BASE = "https://api.trooth.co"
+# semanto_only | semanto_then_cloudflare_for_unsigned | proof_only
+MODE = "semanto_only"
+
+[observability]
+enabled = true

@@ -1,0 +1,8 @@
+{
+  "kind": "content#productsListResponse",
+  "resources": [
+    { "kind": "content#product", "id": "online:en:US:KET-100", "offerId": "KET-100", "title": "Acme Kettle 1.7L", "link": "https://acme.com/products/kettle-1", "price": { "value": "45.00", "currency": "USD" }, "availability": "in stock", "gtin": "12345678905", "brand": "Acme", "contentLanguage": "en", "targetCountry": "US", "channel": "online" },
+    { "kind": "content#product", "id": "online:en:US:TST-200", "offerId": "TST-200", "title": "Acme Toaster", "link": "https://acme.com/products/toaster-2", "price": { "value": "27.50", "currency": "USD" }, "availability": "in stock", "brand": "Acme", "contentLanguage": "en", "targetCountry": "US", "channel": "online" },
+    { "kind": "content#product", "id": "online:en:US:MUG-300", "offerId": "MUG-300", "title": "Acme Mug", "link": "https://acme.com/products/mug-3", "price": { "value": "9.00", "currency": "USD" }, "availability": "in stock", "brand": "Acme", "contentLanguage": "en", "targetCountry": "US", "channel": "online" }
+  ]
+}

@@ -1,0 +1,8 @@
+# Acme Inc
+
+> Fixture llms.txt for the fictional company Acme Inc.
+
+## Pages
+
+- [About](https://acme.com/about): who we are
+- [Careers at Acme](https://acme.com/careers): open roles

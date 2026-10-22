@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trooth-semanto-verify"
+version = "0.1.0"
+description = "Check a Semanto by Trooth file, page proof, signed response or public log, offline."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "LicenseRef-Trooth-Proprietary" }
+dependencies = ["cryptography>=41"]
+
+[project.scripts]
+semanto-verify = "trooth_semanto_verify.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["trooth_semanto_verify*"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]

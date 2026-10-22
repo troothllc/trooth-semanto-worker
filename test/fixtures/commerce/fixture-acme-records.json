@@ -1,0 +1,85 @@
+{
+  "_fixture": "Fictional product records for Acme Inc (acme.com). No figure here is a measurement.",
+  "records": [
+    {
+      "product_id": "acme-cleanse",
+      "variant_id": "acme-cleanse-500-blue",
+      "gtin": "012345678905",
+      "sku": "ACME-CL-500-BLU",
+      "mpn": "CL500B",
+      "brand": "Acme",
+      "name": "Acme Surface Cleaner 500 ml, Blue",
+      "description": "A surface cleaner for kitchens and bathrooms. 500 ml bottle.",
+      "attributes": [
+        { "name": "Net volume", "value": "500", "unit": "ml" },
+        { "name": "Colour", "value": "Blue" },
+        { "name": "Scent", "value": "Citrus" }
+      ],
+      "ingredients": [
+        { "name": "Water", "synonyms": ["Aqua"], "inci": "AQUA" },
+        { "name": "Isopropyl alcohol", "synonyms": ["Isopropanol"], "inci": "ISOPROPYL ALCOHOL" },
+        { "name": "Sodium chloride", "synonyms": [], "inci": "SODIUM CHLORIDE" },
+        { "name": "Fragrance", "synonyms": [], "inci": "PARFUM" }
+      ],
+      "regulatory": {
+        "hazard": ["H319 Causes serious eye irritation"],
+        "consumer_notice": "WARNING: This product can expose you to chemicals known to the State of California to cause cancer. For more information go to www.P65Warnings.ca.gov.",
+        "consumer_notice_type": "prop_65",
+        "age_restriction": 18,
+        "country_restrictions": []
+      },
+      "media": [{ "url": "https://acme.com/img/cleaner-500-blue.jpg", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000001" }],
+      "url": "https://acme.com/products/surface-cleaner?variant=500-blue",
+      "parent_product_id": "acme-cleanse",
+      "variant_axes": { "size": "500 ml", "color": "Blue" },
+      "provenance": "declared",
+      "evidence": { "url": "https://acme.com/products/surface-cleaner", "witnessed_at": "2026-10-20T09:00:00Z" },
+      "not_before": "2026-10-20T09:00:00Z"
+    },
+    {
+      "product_id": "acme-cleanse",
+      "variant_id": "acme-cleanse-500-grn",
+      "gtin": "4006381333931",
+      "sku": "ACME-CL-500-GRN",
+      "mpn": "CL500G",
+      "brand": "Acme",
+      "name": "Acme Surface Cleaner 500 ml, Green",
+      "description": "A surface cleaner for kitchens and bathrooms. 500 ml bottle.",
+      "attributes": [
+        { "name": "Net volume", "value": "500", "unit": "ml" },
+        { "name": "Colour", "value": "Green" },
+        { "name": "Scent", "value": "Pine" }
+      ],
+      "regulatory": {},
+      "media": [{ "url": "https://acme.com/img/cleaner-500-green.jpg", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000002" }],
+      "url": "https://acme.com/products/surface-cleaner?variant=500-green",
+      "parent_product_id": "acme-cleanse",
+      "variant_axes": { "size": "500 ml", "color": "Green" },
+      "provenance": "declared",
+      "evidence": { "url": "https://acme.com/products/surface-cleaner", "witnessed_at": "2026-10-20T09:00:00Z" },
+      "not_before": "2026-10-20T09:00:00Z"
+    },
+    {
+      "product_id": "acme-cleanse",
+      "variant_id": "acme-cleanse-1000-blu",
+      "gtin": "96385074",
+      "sku": "ACME-CL-1000-BLU",
+      "mpn": "CL1000B",
+      "brand": "Acme",
+      "name": "Acme Surface Cleaner 1 l, Blue",
+      "description": "A surface cleaner for kitchens and bathrooms. 1 litre bottle.",
+      "attributes": [
+        { "name": "Net volume", "value": "1000", "unit": "ml" },
+        { "name": "Colour", "value": "Blue" }
+      ],
+      "regulatory": {},
+      "media": [{ "url": "https://acme.com/img/cleaner-1000-blue.jpg", "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000003" }],
+      "url": "https://acme.com/products/surface-cleaner?variant=1000-blue",
+      "parent_product_id": "acme-cleanse",
+      "variant_axes": { "size": "1 l", "color": "Blue" },
+      "provenance": "declared",
+      "evidence": { "url": "https://acme.com/products/surface-cleaner", "witnessed_at": "2026-10-20T09:00:00Z" },
+      "not_before": "2026-10-20T09:00:00Z"
+    }
+  ]
+}

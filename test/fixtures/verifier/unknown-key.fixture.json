@@ -1,0 +1,10 @@
+{
+  "_fixture": "A key that is in no published JWK Set. It signs the unknown-key negative vector.",
+  "kty": "OKP",
+  "crv": "Ed25519",
+  "x": "cyrnFalTxvvHcS6SxugTUPKH9uh59QCql6LiQYh3wqw",
+  "kid": "iEJfqrawvOXtfEvb5Wiqs1ykPPzfiCeHRDh83TfqZtg",
+  "alg": "EdDSA",
+  "use": "sig",
+  "d": "BYdeayuG-4RFRN5vzGEwgIyx9476gin45uT7mmHPfg8"
+}

@@ -1,0 +1,8 @@
+# Acme Inc fixture robots.txt
+User-agent: *
+Disallow: /internal/
+Allow: /
+
+User-agent: Googlebot
+Disallow: /internal/
+Disallow: /drafts/*

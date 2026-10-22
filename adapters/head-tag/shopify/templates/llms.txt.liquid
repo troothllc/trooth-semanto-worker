@@ -1,0 +1,23 @@
+{%- comment -%}
+SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+Copyright (c) 2026 Trooth, LLC
+Semanto by Trooth pointer lines for a Shopify store's /llms.txt (Shopify allows
+this template since 28 May 2026; see shopify.dev/changelog). Replace
+example-inc with your Trooth ID. Keep your own lines above or below.
+{%- endcomment -%}
+{%- layout none -%}
+# {{ shop.name }}
+
+> {{ shop.description | default: shop.name }}
+
+# Semanto by Trooth
+Signed copy of this site: https://api.trooth.co/public/semanto/example-inc
+Markdown sitemap: https://api.trooth.co/public/semanto/example-inc/sitemap.md
+Facts (JSON-LD): https://api.trooth.co/public/semanto/example-inc/facts.jsonld
+Public keys: https://api.trooth.co/public/semanto/example-inc/keys.json
+Trust Profile: https://trooth.co/network/company/example-inc
+
+## Pages
+{%- for link in linklists.main-menu.links %}
+- [{{ link.title }}]({{ shop.url }}{{ link.url }})
+{%- endfor %}

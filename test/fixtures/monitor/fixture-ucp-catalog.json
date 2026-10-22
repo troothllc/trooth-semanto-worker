@@ -1,0 +1,6 @@
+{
+  "items": [
+    { "id": "KET-100", "merchant_item_id": "p-100", "native_commerce": true, "title": "Acme Kettle 1.7L", "link": "https://acme.com/products/kettle-1", "price": { "amount": "49.00", "currency": "USD" }, "availability": "in_stock", "gtin": "00012345678905", "brand": "Acme", "consumer_notice": { "type": "prop_65", "message": "WARNING: This product can expose you to chemicals known to the State of California to cause cancer." } },
+    { "id": "TST-200", "merchant_item_id": "p-200", "native_commerce": true, "title": "Acme Toaster", "link": "https://acme.com/products/toaster-2", "price": { "amount": "27.50", "currency": "USD" }, "availability": "in_stock", "brand": "Acme" }
+  ]
+}

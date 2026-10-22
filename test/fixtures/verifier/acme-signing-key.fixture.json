@@ -1,0 +1,10 @@
+{
+  "_fixture": "A fictional company's signing key, used only to build the verifier test vectors. Acme Inc does not exist.",
+  "kty": "OKP",
+  "crv": "Ed25519",
+  "x": "eSzna8JSYTi1wcIsGtPiRlWt9GSjLCv-85d5lG10PJ4",
+  "kid": "F46vbrrcJTQOgzWl4D8es3IgEPELxv7-Tldk6tp2qhI",
+  "alg": "EdDSA",
+  "use": "sig",
+  "d": "BgYY9Uu6pjAriipNX94U3iBJRCw2uNvHRfhafKKnF58"
+}

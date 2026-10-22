@@ -4,3 +4,5 @@ dist
 .dev.vars
 *.pem
 coverage
+__pycache__/
+.pytest_cache/

@@ -1,0 +1,58 @@
+{
+  "_fixture": "A fictional Semanto header for Acme Inc (acme.com). Every figure here is made up for tests and is not a measurement.",
+  "header": {
+    "schema": "https://trooth.co/schemas/semanto/v1.json",
+    "contract": 1,
+    "org": "Acme Inc",
+    "trooth_id": "acme-inc",
+    "domains": ["acme.com"],
+    "profile": "https://trooth.co/network/company/acme-inc",
+    "version": 7,
+    "supersedes": 6,
+    "built_at": "2026-10-20T10:00:00Z",
+    "state": "signed",
+    "not_before": "2026-10-20T10:00:00Z",
+    "not_after": null,
+    "witness_meaning": "Witnessed means Trooth observed it, with a source and a date, not that it is true",
+    "pages_root": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "facts_root": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "pages_manifest": [
+      {
+        "id": "smp_b3c4d5e6f7g2h3j4k5m6n7p2q3",
+        "url": "https://acme.com/",
+        "title": "Acme Inc",
+        "hash": "sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+        "source_hash": "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0",
+        "bytes": 1200,
+        "tokens": 300,
+        "witnessed_at": "2026-10-20T09:58:00Z",
+        "status": 200,
+        "index": { "noindex": false, "nosnippet": false, "canonical": "https://acme.com/", "robots_blocked": false }
+      },
+      {
+        "id": "smp_a2b3c4d5e6f7g2h3j4k5m6n7p2",
+        "url": "https://acme.com/pricing",
+        "title": "Pricing",
+        "hash": "sha256:0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c",
+        "source_hash": "sha256:8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a09f",
+        "bytes": 2400,
+        "tokens": 600,
+        "witnessed_at": "2026-10-20T09:58:10Z",
+        "status": 200,
+        "index": { "noindex": false, "nosnippet": false, "canonical": "https://acme.com/pricing", "robots_blocked": false }
+      },
+      {
+        "id": "smp_c4d5e6f7g2h3j4k5m6n7p2q3r4",
+        "url": "https://acme.com/docs/getting-started/",
+        "title": "Getting started",
+        "hash": "sha256:0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d",
+        "source_hash": "sha256:7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a09f8e",
+        "bytes": 3200,
+        "tokens": 800,
+        "witnessed_at": "2026-10-20T09:58:20Z",
+        "status": 200,
+        "index": { "noindex": false, "nosnippet": false, "canonical": "https://acme.com/docs/getting-started/", "robots_blocked": false }
+      }
+    ]
+  }
+}

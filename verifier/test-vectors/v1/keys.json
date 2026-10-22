@@ -1,0 +1,52 @@
+{
+  "description": "Public keys for the vectors. The company's set is what acme.com would serve at /.well-known/trooth-keys.json; Trooth's set is what api.trooth.co serves; the agent's set is what the Signature-Agent URL serves.",
+  "company": {
+    "jwks_url": "https://acme.com/.well-known/trooth-keys.json",
+    "jwks": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "eSzna8JSYTi1wcIsGtPiRlWt9GSjLCv-85d5lG10PJ4",
+          "kid": "F46vbrrcJTQOgzWl4D8es3IgEPELxv7-Tldk6tp2qhI",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "dns_txt": [
+      "v=trooth1; kid=F46vbrrcJTQOgzWl4D8es3IgEPELxv7-Tldk6tp2qhI"
+    ],
+    "dns_name": "_trooth-keys.acme.com"
+  },
+  "trooth": {
+    "jwks_url": "https://api.trooth.co/.well-known/trooth-keys.json",
+    "jwks": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "Wc2jReA8idEAdCjraoDF0iAt3VuOD-uPh8UB_C7Ose0",
+          "kid": "1AnBKwFDl4CpFa1Kv9vyvPwphrQnYh2DhjlRN0u6pcw",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    }
+  },
+  "agent": {
+    "directory_url": "https://agent.fixture.example/.well-known/http-message-signatures-directory",
+    "jwks": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "ROGTC0UCXZRuKJs1f6oYZcQu9OGL1GZNS1HshoN6kUE",
+          "kid": "j-oBnmAqa6Bm0NxoqL4f5Z1sVznUw0ZL43LRvCx4LCw",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    }
+  }
+}

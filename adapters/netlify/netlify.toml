@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+# Copyright (c) 2026 Trooth, LLC
+#
+# Semanto host adapter for Netlify. Add the [[edge_functions]] block to your
+# netlify.toml (or copy this file if you have none) and set the three
+# environment variables in Site configuration, Environment variables.
+# Reference: docs.netlify.com/edge-functions/declarations/
+
+[[edge_functions]]
+  path = "/*"
+  function = "semanto"
+
+# Set these in the Netlify UI or with the CLI:
+#   netlify env:set TROOTH_ID example-inc
+#   netlify env:set MODE semanto_only
+#   netlify env:set TROOTH_API_BASE https://api.trooth.co

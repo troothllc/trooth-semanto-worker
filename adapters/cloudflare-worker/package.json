@@ -1,0 +1,15 @@
+{
+  "name": "trooth-semanto-adapter-cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "LicenseRef-Trooth-Proprietary",
+  "description": "Semanto by Trooth host adapter for a Cloudflare zone.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.40.0"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "note": "Fixture: the response shape of a page on a Cloudflare zone with Markdown for Agents on, as documented in the Cloudflare changelog of 26 Feb 2026. No value here is a measurement.",
+  "status": 200,
+  "headers": {
+    "content-type": "text/markdown; charset=utf-8",
+    "x-markdown-tokens": "412",
+    "x-original-tokens": "3180",
+    "vary": "Accept",
+    "server": "cloudflare",
+    "cf-ray": "fixture0000000000-ORD",
+    "content-signal": "ai-train=no, search=yes, ai-input=yes"
+  },
+  "body": "# Acme Inc\n\nAcme Inc makes anvils for workshops of every size.\n"
+}

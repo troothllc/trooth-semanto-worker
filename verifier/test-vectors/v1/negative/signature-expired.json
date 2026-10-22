@@ -1,0 +1,30 @@
+{
+  "kind": "response",
+  "description": "The response signed 600 seconds before the vector's now with a 300 second window. The signature has expired.",
+  "now": "2026-10-22T12:00:10Z",
+  "now_epoch": 1792670410,
+  "response": {
+    "url": "https://acme.com/security",
+    "status": 200,
+    "headers": {
+      "content-type": "text/markdown; charset=utf-8",
+      "content-digest": "sha-256=:YfSIot2m45x3ctsg60TBP+ccy1YRMZn5VNiAQtXSxBA=:",
+      "content-length": "221",
+      "trooth-contract": "1",
+      "trooth-semanto-version": "smv_sf26uv6f5niw6xllfj2i6ru6ym",
+      "trooth-page-hash": "sha256:61f488a2dda6e39c7772db20eb44c13fe71ccb56113199f954d88042d5d2c410",
+      "link": "<https://acme.com/security>; rel=\"canonical\", <https://api.trooth.co/public/semanto/acme/pages/smp_mh2iriw5u3rzy53s3mqowrgbh7/proof>; rel=\"https://trooth.co/rel/proof\", <https://acme.com/.well-known/trooth-keys.json>; rel=\"https://trooth.co/rel/keys\", <https://acme.com/.well-known/trooth.semanto>; rel=\"https://trooth.co/rel/semanto\"",
+      "vary": "Accept",
+      "etag": "\"61f488a2dda6e39c7772db20eb44c13fe71ccb56113199f954d88042d5d2c410\"",
+      "cache-control": "public, max-age=300",
+      "content-signal": "ai-train=no, search=yes, ai-input=yes",
+      "Signature-Input": "sig1=(\"@status\" \"content-type\" \"content-digest\" \"trooth-semanto-version\" \"trooth-page-hash\");created=1792669800;expires=1792670100;keyid=\"F46vbrrcJTQOgzWl4D8es3IgEPELxv7-Tldk6tp2qhI\";alg=\"ed25519\";tag=\"trooth-semanto\"",
+      "Signature": "sig1=:jd/U4lFoK906kELwq8U9zX1pOtlpQ+PDZCcbAouOiKUL79NrWj+6iN1IM95ckMmzyE+3BrT6udiGmwm9d9YLCg==:"
+    },
+    "body": "# Security at Acme\n\nEvery employee account uses multi-factor authentication.\n\nCustomer data is stored in the United States. Backups are taken every day and kept for 30 days.\n\nReport a security issue to security@acme.com.\n"
+  },
+  "expect": {
+    "ok": false,
+    "reason": "expired"
+  }
+}

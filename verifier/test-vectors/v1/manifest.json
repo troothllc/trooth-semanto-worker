@@ -1,0 +1,23 @@
+{
+  "version": "v1",
+  "generated_for": "2026-10-22T12:00:00Z",
+  "files": [
+    "keys.json",
+    "semanto.json",
+    "pages.json",
+    "witness.json",
+    "log.json",
+    "page-proof.json",
+    "response.json",
+    "web-bot-auth-request.json",
+    "offer.json",
+    "revocations.json",
+    "negative/page-tampered.json",
+    "negative/fact-tampered.json",
+    "negative/signature-expired.json",
+    "negative/unknown-key.json",
+    "negative/offer-expired.json",
+    "negative/version-withdrawn.json",
+    "negative/witness-mismatch.json"
+  ]
+}

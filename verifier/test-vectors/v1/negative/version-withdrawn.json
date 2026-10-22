@@ -1,0 +1,31 @@
+{
+  "kind": "revocations",
+  "description": "A revocation list that names Acme's current version. Its state is withdrawn.",
+  "now": "2026-10-22T12:00:10Z",
+  "payload": {
+    "trooth_id": null,
+    "issued_at": "2026-10-22T12:00:00Z",
+    "next_update": "2026-10-23T12:00:00Z",
+    "revocations": [
+      {
+        "kind": "version",
+        "ref": "smv_fixtureoneaaaaaaaaaaaaaaaaaaa",
+        "reason": "superseded",
+        "revoked_at": "2026-10-20T12:00:00Z"
+      },
+      {
+        "kind": "version",
+        "ref": "smv_sf26uv6f5niw6xllfj2i6ru6ym",
+        "reason": "withdrawn by the company",
+        "revoked_at": "2026-10-22T12:00:10Z"
+      }
+    ]
+  },
+  "jws": "eyJhbGciOiJFZERTQSIsImlhdCI6IjIwMjYtMTAtMjJUMTI6MDA6MTAuMDAwWiIsImtpZCI6IjFBbkJLd0ZEbDRDcEZhMUt2OXZ5dlB3cGhyUW5ZaDJEaGpsUk4wdTZwY3ciLCJ0eXAiOiJodHRwczovL3Ryb290aC5jby90eXBlcy9yZXZvY2F0aW9uLWxpc3QifQ.eyJpc3N1ZWRfYXQiOiIyMDI2LTEwLTIyVDEyOjAwOjAwWiIsIm5leHRfdXBkYXRlIjoiMjAyNi0xMC0yM1QxMjowMDowMFoiLCJyZXZvY2F0aW9ucyI6W3sia2luZCI6InZlcnNpb24iLCJyZWFzb24iOiJzdXBlcnNlZGVkIiwicmVmIjoic212X2ZpeHR1cmVvbmVhYWFhYWFhYWFhYWFhYWFhYWFhIiwicmV2b2tlZF9hdCI6IjIwMjYtMTAtMjBUMTI6MDA6MDBaIn0seyJraW5kIjoidmVyc2lvbiIsInJlYXNvbiI6IndpdGhkcmF3biBieSB0aGUgY29tcGFueSIsInJlZiI6InNtdl9zZjI2dXY2ZjVuaXc2eGxsZmoyaTZydTZ5bSIsInJldm9rZWRfYXQiOiIyMDI2LTEwLTIyVDEyOjAwOjEwWiJ9XSwidHJvb3RoX2lkIjpudWxsfQ.Eww3toL6AEQeiG_mOT6Rx8PmbNo-YJEK0_9zXh1SJrdDZz-2E2Yym1eUnkZ4CR69j8x7axo9NZ6x4Upl2s3kBA",
+  "kid": "1AnBKwFDl4CpFa1Kv9vyvPwphrQnYh2DhjlRN0u6pcw",
+  "version_id": "smv_sf26uv6f5niw6xllfj2i6ru6ym",
+  "expect": {
+    "ok": true,
+    "state": "withdrawn"
+  }
+}

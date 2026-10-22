@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0">
+<channel>
+<title>Acme Inc fixture feed</title>
+<link>https://acme.com/</link>
+<item>
+  <g:id>KET-100</g:id>
+  <title>Acme Kettle 1.7L</title>
+  <link>https://acme.com/products/kettle-1</link>
+  <g:price>45.00 USD</g:price>
+  <g:availability>in stock</g:availability>
+  <g:gtin>12345678905</g:gtin>
+  <g:brand>Acme</g:brand>
+  <g:consumer_notice>
+    <g:type>prop_65</g:type>
+    <g:message><![CDATA[WARNING: This product can expose you to chemicals known to the State of California to cause cancer.]]></g:message>
+  </g:consumer_notice>
+</item>
+<item>
+  <g:id>TST-200</g:id>
+  <title>Acme Toaster</title>
+  <link>https://acme.com/products/toaster-2</link>
+  <g:price>27.50 USD</g:price>
+  <g:availability>in stock</g:availability>
+  <g:brand>Acme</g:brand>
+</item>
+</channel>
+</rss>

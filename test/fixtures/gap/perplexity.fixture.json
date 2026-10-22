@@ -1,0 +1,11 @@
+{
+  "id": "fixture",
+  "model": "sonar-fixture",
+  "created": 1760000000,
+  "citations": ["https://example-reviews.test/acme-security", "https://example-forum.test/thread/12"],
+  "search_results": [
+    { "title": "Acme security review", "url": "https://example-reviews.test/acme-security", "date": "2026-09-01" },
+    { "title": "Forum thread", "url": "https://example-forum.test/thread/12", "date": null }
+  ],
+  "choices": [{ "index": 0, "finish_reason": "stop", "message": { "role": "assistant", "content": "Yes, Acme supports multi-factor authentication through authenticator apps." } }]
+}

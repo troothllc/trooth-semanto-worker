@@ -1,0 +1,10 @@
+{
+  "_fixture": "A fictional AI agent's Web Bot Auth key (agent.fixture.example), used only to build the test vectors.",
+  "kty": "OKP",
+  "crv": "Ed25519",
+  "x": "ROGTC0UCXZRuKJs1f6oYZcQu9OGL1GZNS1HshoN6kUE",
+  "kid": "j-oBnmAqa6Bm0NxoqL4f5Z1sVznUw0ZL43LRvCx4LCw",
+  "alg": "EdDSA",
+  "use": "sig",
+  "d": "hEP5iAIxCbCYnfAVWD0zWWUiMEKuFNNtNnbT2cq_EPY"
+}

@@ -1,0 +1,17 @@
+{
+  "kind": "pages",
+  "description": "The markdown of every page, exactly as served. Hash the UTF-8 bytes of each string to get the manifest hash. The same bytes are in pages/<id>.md.",
+  "by_url": {
+    "https://acme.com/": "# Acme Inc\n\nAcme Inc makes workflow software for small teams.\n\nFounded in Portland, Oregon. Offices in Portland and Austin.\n\n- [Security](https://acme.com/security)\n- [Pricing](https://acme.com/pricing)\n",
+    "https://acme.com/security": "# Security at Acme\n\nEvery employee account uses multi-factor authentication.\n\nCustomer data is stored in the United States. Backups are taken every day and kept for 30 days.\n\nReport a security issue to security@acme.com.\n",
+    "https://acme.com/pricing": "# Pricing\n\n| Plan | Price | Seats |\n| --- | --- | --- |\n| Starter | 49 USD a month | up to 5 |\n| Team | 149 USD a month | up to 25 |\n\nEvery plan includes a 14 day trial. No card is needed to start.\n"
+  },
+  "by_id": {
+    "smp_adglgylqlsd547z5cmjum5w6jm": "# Acme Inc\n\nAcme Inc makes workflow software for small teams.\n\nFounded in Portland, Oregon. Offices in Portland and Austin.\n\n- [Security](https://acme.com/security)\n- [Pricing](https://acme.com/pricing)\n",
+    "smp_mh2iriw5u3rzy53s3mqowrgbh7": "# Security at Acme\n\nEvery employee account uses multi-factor authentication.\n\nCustomer data is stored in the United States. Backups are taken every day and kept for 30 days.\n\nReport a security issue to security@acme.com.\n",
+    "smp_d3cg2phrlawntfrxsxsvah7y7f": "# Pricing\n\n| Plan | Price | Seats |\n| --- | --- | --- |\n| Starter | 49 USD a month | up to 5 |\n| Team | 149 USD a month | up to 25 |\n\nEvery plan includes a 14 day trial. No card is needed to start.\n"
+  },
+  "expect": {
+    "ok": true
+  }
+}

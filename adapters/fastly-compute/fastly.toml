@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+# Copyright (c) 2026 Trooth, LLC
+#
+# Semanto host adapter for Fastly Compute. Two backends: `trooth_api` for the
+# signed copy and `origin` for your site. Reference:
+# www.fastly.com/documentation/guides/compute/javascript/
+manifest_version = 3
+name = "trooth-semanto-adapter"
+description = "Semanto by Trooth host adapter: signed markdown, JSON-LD and the well-known files on your own domain."
+authors = ["Trooth, LLC"]
+language = "javascript"
+
+[scripts]
+  build = "npm run build"
+
+[local_server]
+  [local_server.backends]
+    [local_server.backends.trooth_api]
+      url = "https://api.trooth.co"
+      override_host = "api.trooth.co"
+    [local_server.backends.origin]
+      url = "https://origin.example.com"
+      override_host = "origin.example.com"
+  [local_server.config_stores]
+    [local_server.config_stores.trooth_semanto]
+      format = "inline-toml"
+      [local_server.config_stores.trooth_semanto.contents]
+        TROOTH_ID = "example-inc"
+        TROOTH_API_BASE = "https://api.trooth.co"
+        MODE = "semanto_only"
+
+[setup]
+  [setup.backends]
+    [setup.backends.trooth_api]
+      description = "The Trooth API, where the signed copy lives"
+      address = "api.trooth.co"
+      port = 443
+    [setup.backends.origin]
+      description = "Your website"
+      address = "origin.example.com"
+      port = 443
+  [setup.config_stores]
+    [setup.config_stores.trooth_semanto]
+      description = "Semanto settings"
+      [setup.config_stores.trooth_semanto.items]
+        [setup.config_stores.trooth_semanto.items.TROOTH_ID]
+          description = "Your Trooth ID"
+          value = "example-inc"
+        [setup.config_stores.trooth_semanto.items.MODE]
+          description = "semanto_only | semanto_then_cloudflare_for_unsigned | proof_only"
+          value = "semanto_only"
+        [setup.config_stores.trooth_semanto.items.TROOTH_API_BASE]
+          description = "Leave as is"
+          value = "https://api.trooth.co"

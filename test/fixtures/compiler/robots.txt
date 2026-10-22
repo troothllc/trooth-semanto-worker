@@ -1,0 +1,7 @@
+# fixture: acme.com robots.txt (fictional company)
+User-agent: *
+Disallow: /login
+Disallow: /internal/
+Allow: /internal/open
+
+Sitemap: https://acme.com/sitemap.xml

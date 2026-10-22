@@ -1,0 +1,19 @@
+{
+  "company": "Acme Inc",
+  "trooth_id": "acme-inc",
+  "domains": ["acme.com"],
+  "facts": [
+    { "key": "products.acme-widget.price", "statement": "The Acme Widget costs $49.", "value": 49, "provenance": "declared", "evidence": { "url": "https://acme.com/widget", "witnessed_at": "2026-10-01T09:00:00Z", "anchor": "Price: $49" } },
+    { "key": "security.mfa", "statement": "Acme supports multi-factor authentication with authenticator apps and passkeys.", "value": true, "provenance": "declared", "evidence": { "url": "https://acme.com/security", "witnessed_at": "2026-10-01T09:00:00Z" } },
+    { "key": "security.mfa_methods", "statement": "MFA methods: authenticator app, passkey.", "value": ["authenticator app", "passkey"], "provenance": "declared", "evidence": { "url": "https://acme.com/security", "witnessed_at": "2026-10-01T09:00:00Z" } },
+    { "key": "security.soc2", "statement": "Acme has not published a SOC 2 statement.", "value": "not_published", "provenance": "witnessed", "evidence": { "url": "https://acme.com/security", "witnessed_at": "2026-10-01T09:00:00Z" } },
+    { "key": "security.encryption_at_rest", "statement": "Customer data is encrypted at rest.", "value": true, "provenance": "declared", "evidence": { "url": "https://acme.com/security", "witnessed_at": "2026-10-01T09:00:00Z" } },
+    { "key": "terms.uptime_commitment", "statement": "Acme commits to 99.9% monthly uptime.", "value": 99.9, "provenance": "declared", "evidence": { "url": "https://acme.com/sla", "witnessed_at": "2026-10-01T09:00:00Z" } },
+    { "key": "commercial.returns_window_days", "statement": "Returns are accepted within 30 days.", "value": 30, "provenance": "declared", "evidence": { "url": "https://acme.com/returns", "witnessed_at": "2026-10-01T09:00:00Z" } },
+    { "key": "privacy.subprocessors", "statement": "Subprocessors: Example Cloud, Example Payments.", "value": ["Example Cloud", "Example Payments"], "provenance": "declared", "evidence": { "url": "https://acme.com/legal/subprocessors", "witnessed_at": "2026-10-01T09:00:00Z" } },
+    { "key": "local.hours", "statement": "Open Monday to Friday, 9am to 5pm.", "value": "9am-5pm", "provenance": "declared", "evidence": { "url": "https://acme.com/contact", "witnessed_at": "2026-10-01T09:00:00Z" } },
+    { "key": "local.phone", "statement": "Phone: (555) 010-0100.", "value": "(555) 010-0100", "provenance": "declared", "evidence": { "url": "https://acme.com/contact", "witnessed_at": "2026-10-01T09:00:00Z" } },
+    { "key": "local.address", "statement": "12 Example Street, Springfield.", "value": "12 Example Street", "provenance": "declared", "evidence": { "url": "https://acme.com/contact", "witnessed_at": "2026-10-01T09:00:00Z" } },
+    { "key": "local.walk_ins", "statement": "Walk-ins are not taken; book ahead.", "value": "no", "provenance": "declared", "evidence": { "url": "https://acme.com/contact", "witnessed_at": "2026-10-01T09:00:00Z" } }
+  ]
+}

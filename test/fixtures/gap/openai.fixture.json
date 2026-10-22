@@ -1,0 +1,19 @@
+{
+  "id": "chatcmpl-fixture",
+  "object": "chat.completion",
+  "model": "gpt-4o-search-preview-fixture",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The Acme Widget costs $59 according to a retailer listing.",
+        "annotations": [
+          { "type": "url_citation", "url_citation": { "url": "https://example-retailer.test/acme-widget", "title": "Acme Widget listing", "start_index": 0, "end_index": 10 } },
+          { "type": "url_citation", "url_citation": { "url": "https://acme.com/widget", "title": "Acme Widget", "start_index": 11, "end_index": 20 } }
+        ]
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}

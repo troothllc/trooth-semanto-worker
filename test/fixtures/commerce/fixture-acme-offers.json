@@ -1,0 +1,37 @@
+{
+  "_fixture": "Fictional offers for Acme Inc (acme.com). Prices are fixture values, not measurements.",
+  "offers": [
+    {
+      "sku": "ACME-CL-500-BLU",
+      "variant_id": "acme-cleanse-500-blue",
+      "price": { "amount": 1299, "currency": "USD" },
+      "availability": "in_stock",
+      "inventory_quantity": 40,
+      "as_of": "2026-10-22T12:00:00Z",
+      "seller": { "domain": "acme.com", "trooth_id": "acme-inc" },
+      "url": "https://acme.com/products/surface-cleaner?variant=500-blue",
+      "shipping": [{ "country": "US", "amount": 499, "currency": "USD", "days_min": 2, "days_max": 5 }],
+      "return_policy_url": "https://acme.com/returns"
+    },
+    {
+      "sku": "ACME-CL-500-GRN",
+      "variant_id": "acme-cleanse-500-grn",
+      "price": { "amount": 1299, "currency": "USD" },
+      "availability": "backorder",
+      "inventory_quantity": 0,
+      "as_of": "2026-10-22T12:00:00Z",
+      "seller": { "domain": "acme.com", "trooth_id": "acme-inc" },
+      "url": "https://acme.com/products/surface-cleaner?variant=500-green"
+    },
+    {
+      "sku": "ACME-CL-1000-BLU",
+      "variant_id": "acme-cleanse-1000-blu",
+      "price": { "amount": 2199, "currency": "USD" },
+      "availability": "in_stock",
+      "inventory_quantity": 12,
+      "as_of": "2026-10-22T12:00:00Z",
+      "seller": { "domain": "acme.com", "trooth_id": "acme-inc" },
+      "url": "https://acme.com/products/surface-cleaner?variant=1000-blue"
+    }
+  ]
+}

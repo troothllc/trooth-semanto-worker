@@ -1,0 +1,117 @@
+{
+  "kind": "log",
+  "description": "A public log of five leaves. Leaf data is the canonical JSON of the leaf record { kind, trooth_id, ref, hash, at }; leaf hash is SHA-256(0x00 || data) per RFC 6962. Acme's version is leaf 3. The checkpoint is a signed note with the origin and signer name the log publishes.",
+  "now": "2026-10-22T12:00:10Z",
+  "origin": "trooth.co/semanto/log/v1",
+  "signer_name": "trooth.co",
+  "log": "https://api.trooth.co/public/semanto/log",
+  "leaves": [
+    {
+      "index": 0,
+      "record": {
+        "kind": "semanto_version",
+        "trooth_id": "fixture-one",
+        "ref": "smv_fixtureoneaaaaaaaaaaaaaaaaaaa",
+        "hash": "sha256:fc1155a38ab78fede07e6c48f672569b4b2be8866494d3db4eea3c93fd1a6536",
+        "at": "2026-10-18T12:00:00Z"
+      },
+      "data": "{\"at\":\"2026-10-18T12:00:00Z\",\"hash\":\"sha256:fc1155a38ab78fede07e6c48f672569b4b2be8866494d3db4eea3c93fd1a6536\",\"kind\":\"semanto_version\",\"ref\":\"smv_fixtureoneaaaaaaaaaaaaaaaaaaa\",\"trooth_id\":\"fixture-one\"}",
+      "leaf_hash": "sha256:b444cc3dec1947e560b91a2d07f00402122bf72e35831e7d5358623bc65d7bc4"
+    },
+    {
+      "index": 1,
+      "record": {
+        "kind": "semanto_version",
+        "trooth_id": "fixture-two",
+        "ref": "smv_fixturetwoaaaaaaaaaaaaaaaaaaa",
+        "hash": "sha256:6c058ec5578982f79b227bf0b7d04ef63a2df9c60e3cbefb73cfe689c8d0c136",
+        "at": "2026-10-19T12:00:00Z"
+      },
+      "data": "{\"at\":\"2026-10-19T12:00:00Z\",\"hash\":\"sha256:6c058ec5578982f79b227bf0b7d04ef63a2df9c60e3cbefb73cfe689c8d0c136\",\"kind\":\"semanto_version\",\"ref\":\"smv_fixturetwoaaaaaaaaaaaaaaaaaaa\",\"trooth_id\":\"fixture-two\"}",
+      "leaf_hash": "sha256:33ba53a6751f3ca043c8fa1e30e7a5005cf02b73c6734395d2fa6fd35057f185"
+    },
+    {
+      "index": 2,
+      "record": {
+        "kind": "semanto_version",
+        "trooth_id": "fixture-one",
+        "ref": "smv_fixtureoneaaaaaaaaaaaaaaaaaab",
+        "hash": "sha256:e267955e060e974f07711899c92716316bed52bbff68f2abb2e1abf3e3112487",
+        "at": "2026-10-20T12:00:00Z"
+      },
+      "data": "{\"at\":\"2026-10-20T12:00:00Z\",\"hash\":\"sha256:e267955e060e974f07711899c92716316bed52bbff68f2abb2e1abf3e3112487\",\"kind\":\"semanto_version\",\"ref\":\"smv_fixtureoneaaaaaaaaaaaaaaaaaab\",\"trooth_id\":\"fixture-one\"}",
+      "leaf_hash": "sha256:2c78f15f1a5feaf413133e4486db200892ac56fd6067eae1b14c1737e18f0596"
+    },
+    {
+      "index": 3,
+      "record": {
+        "kind": "semanto_version",
+        "trooth_id": "acme",
+        "ref": "smv_sf26uv6f5niw6xllfj2i6ru6ym",
+        "hash": "sha256:9175ea57c5eb516f5d6b2a748f469ec33f8e3e0ea9cde9beacad4db4226fbf76",
+        "at": "2026-10-22T12:00:00Z"
+      },
+      "data": "{\"at\":\"2026-10-22T12:00:00Z\",\"hash\":\"sha256:9175ea57c5eb516f5d6b2a748f469ec33f8e3e0ea9cde9beacad4db4226fbf76\",\"kind\":\"semanto_version\",\"ref\":\"smv_sf26uv6f5niw6xllfj2i6ru6ym\",\"trooth_id\":\"acme\"}",
+      "leaf_hash": "sha256:af58729f2b60a404c5af04c5e801552ed6c4c132ac20db6648765f54fb95b5df"
+    },
+    {
+      "index": 4,
+      "record": {
+        "kind": "semanto_version",
+        "trooth_id": "fixture-three",
+        "ref": "smv_fixturethreeaaaaaaaaaaaaaaaaa",
+        "hash": "sha256:4dbcfaf954bc0e34cc9859b49bd2846b459f4eedc849af24ff5811ef3a7f1969",
+        "at": "2026-10-22T12:00:00Z"
+      },
+      "data": "{\"at\":\"2026-10-22T12:00:00Z\",\"hash\":\"sha256:4dbcfaf954bc0e34cc9859b49bd2846b459f4eedc849af24ff5811ef3a7f1969\",\"kind\":\"semanto_version\",\"ref\":\"smv_fixturethreeaaaaaaaaaaaaaaaaa\",\"trooth_id\":\"fixture-three\"}",
+      "leaf_hash": "sha256:96e9a6fb4e194319c679db06e0aac996565dede17c40485ab71259302e5264db"
+    }
+  ],
+  "tree_heads": {
+    "3": {
+      "payload": {
+        "tree_size": 3,
+        "root_hash": "sha256:378c50a37508c4394fe0ec666557365ea80919cdc4fccdf6a8f81437a7b8ae05",
+        "signed_at": "2026-10-20T12:00:00Z"
+      },
+      "jws": "eyJhbGciOiJFZERTQSIsImlhdCI6IjIwMjYtMTAtMjBUMTI6MDA6MDAuMDAwWiIsImtpZCI6IjFBbkJLd0ZEbDRDcEZhMUt2OXZ5dlB3cGhyUW5ZaDJEaGpsUk4wdTZwY3ciLCJ0eXAiOiJodHRwczovL3Ryb290aC5jby90eXBlcy9zaWduZWQtdHJlZS1oZWFkIn0.eyJyb290X2hhc2giOiJzaGEyNTY6Mzc4YzUwYTM3NTA4YzQzOTRmZTBlYzY2NjU1NzM2NWVhODA5MTljZGM0ZmNjZGY2YThmODE0MzdhN2I4YWUwNSIsInNpZ25lZF9hdCI6IjIwMjYtMTAtMjBUMTI6MDA6MDBaIiwidHJlZV9zaXplIjozfQ.JLWn7DBKt9bW_TTHH10eX3CSzTzjP6cgBaDIasMcIUgqBbHqNuIEZzh0-Z2As7J7M3VySSN7FxUJbXcC1hxdCA",
+      "kid": "1AnBKwFDl4CpFa1Kv9vyvPwphrQnYh2DhjlRN0u6pcw"
+    },
+    "5": {
+      "payload": {
+        "tree_size": 5,
+        "root_hash": "sha256:d2c12bfa8e44bbbb3a1cfe50e18bc8ca71fcfb1f9581d1bbe6e6937df838d7d0",
+        "signed_at": "2026-10-22T12:00:00Z"
+      },
+      "jws": "eyJhbGciOiJFZERTQSIsImlhdCI6IjIwMjYtMTAtMjJUMTI6MDA6MDAuMDAwWiIsImtpZCI6IjFBbkJLd0ZEbDRDcEZhMUt2OXZ5dlB3cGhyUW5ZaDJEaGpsUk4wdTZwY3ciLCJ0eXAiOiJodHRwczovL3Ryb290aC5jby90eXBlcy9zaWduZWQtdHJlZS1oZWFkIn0.eyJyb290X2hhc2giOiJzaGEyNTY6ZDJjMTJiZmE4ZTQ0YmJiYjNhMWNmZTUwZTE4YmM4Y2E3MWZjZmIxZjk1ODFkMWJiZTZlNjkzN2RmODM4ZDdkMCIsInNpZ25lZF9hdCI6IjIwMjYtMTAtMjJUMTI6MDA6MDBaIiwidHJlZV9zaXplIjo1fQ.B7LoFGT_1gik8LGB_KbABWC7NtIpF7Ra3Hnd7MZw4YM31uZxpXbcwT7kD_lIeS4hEWeWc3Ue45aY3M0OIx-nCQ",
+      "kid": "1AnBKwFDl4CpFa1Kv9vyvPwphrQnYh2DhjlRN0u6pcw"
+    }
+  },
+  "checkpoint": "trooth.co/semanto/log/v1\n5\n0sEr+o5Eu7s6HP5Q4YvIynH8+x+VgdG75uaTffg419A=\n\n— trooth.co wWw8+6b5Xoo8cKUaSlFSECeuraCbJ7Sg93qrtB6yaABJVo0VqSVtDh45BRmKM4ll1hmK1yWaHMQaRNzXrKZVf2M5eAY=\n",
+  "inclusion": {
+    "index": 3,
+    "tree_size": 5,
+    "leaf_hash": "sha256:af58729f2b60a404c5af04c5e801552ed6c4c132ac20db6648765f54fb95b5df",
+    "root_hash": "sha256:d2c12bfa8e44bbbb3a1cfe50e18bc8ca71fcfb1f9581d1bbe6e6937df838d7d0",
+    "path": [
+      "sha256:2c78f15f1a5feaf413133e4486db200892ac56fd6067eae1b14c1737e18f0596",
+      "sha256:03810b835993075ef9d864e61fa9db18260cea9c7cceaa72188f859f53658ffd",
+      "sha256:96e9a6fb4e194319c679db06e0aac996565dede17c40485ab71259302e5264db"
+    ]
+  },
+  "consistency": {
+    "from": 3,
+    "to": 5,
+    "old_root": "sha256:378c50a37508c4394fe0ec666557365ea80919cdc4fccdf6a8f81437a7b8ae05",
+    "new_root": "sha256:d2c12bfa8e44bbbb3a1cfe50e18bc8ca71fcfb1f9581d1bbe6e6937df838d7d0",
+    "path": [
+      "sha256:2c78f15f1a5feaf413133e4486db200892ac56fd6067eae1b14c1737e18f0596",
+      "sha256:af58729f2b60a404c5af04c5e801552ed6c4c132ac20db6648765f54fb95b5df",
+      "sha256:03810b835993075ef9d864e61fa9db18260cea9c7cceaa72188f859f53658ffd",
+      "sha256:96e9a6fb4e194319c679db06e0aac996565dede17c40485ab71259302e5264db"
+    ]
+  },
+  "expect": {
+    "ok": true
+  }
+}

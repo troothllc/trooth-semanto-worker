@@ -1,0 +1,11 @@
+{
+  "note": "Fixture: response headers of a page hosted on Vercel.",
+  "status": 200,
+  "headers": {
+    "content-type": "text/html; charset=utf-8",
+    "x-vercel-id": "fixture::iad1::abc",
+    "x-vercel-cache": "HIT",
+    "server": "Vercel"
+  },
+  "body": "<!doctype html><html><body>Acme</body></html>"
+}

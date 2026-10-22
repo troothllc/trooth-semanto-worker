@@ -1,0 +1,13 @@
+{
+  "_fixture": "A fictional recall notice from Acme Inc. The authority entry is the shape, not a real recall.",
+  "notice": {
+    "skus": ["ACME-CL-1000-BLU"],
+    "gtins": ["96385074"],
+    "lots": ["L2026-09-A", "L2026-09-B"],
+    "issued_at": "2026-10-21T15:00:00Z",
+    "authority": { "name": "U.S. Consumer Product Safety Commission", "url": "https://www.cpsc.gov/Recalls/fixture-acme-surface-cleaner", "reference": "FIXTURE-00000" },
+    "action": "stop_use",
+    "statement": "The 1 litre bottle cap can leak. Stop using lots L2026-09-A and L2026-09-B and contact Acme for a replacement.",
+    "url": "https://acme.com/safety/surface-cleaner-1l"
+  }
+}

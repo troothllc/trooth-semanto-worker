@@ -106,6 +106,7 @@ export const JWS_TYPES = {
   productRecord: "https://trooth.co/types/product-record",
   sellerAttestation: "https://trooth.co/types/seller-attestation",
   recall: "https://trooth.co/types/recall-notice",
+  marketplaceCatalog: "https://trooth.co/types/marketplace-catalog",
   firstPublication: "https://trooth.co/types/first-publication",
   readReceipt: "https://trooth.co/types/read-receipt",
   revocation: "https://trooth.co/types/revocation-list",

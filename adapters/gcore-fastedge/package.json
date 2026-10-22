@@ -1,0 +1,14 @@
+{
+  "name": "trooth-semanto-adapter-gcore-fastedge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "LicenseRef-Trooth-Proprietary",
+  "description": "Semanto by Trooth host adapter for Gcore FastEdge (JavaScript variant).",
+  "scripts": {
+    "build": "fastedge-build ./src/index.js ./dist/trooth-semanto.wasm"
+  },
+  "devDependencies": {
+    "@gcoredev/fastedge-sdk-js": "^1.0.0"
+  }
+}

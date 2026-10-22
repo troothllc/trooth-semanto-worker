@@ -1,0 +1,13 @@
+{
+  "_fixture": "A fictional attestation by Acme Inc that Example Mart (example-mart.com) may sell two skus.",
+  "attestation": {
+    "brand_trooth_id": "acme-inc",
+    "seller_domain": "example-mart.com",
+    "seller_trooth_id": "example-mart",
+    "scope": { "skus": ["ACME-CL-500-BLU", "ACME-CL-500-GRN"] },
+    "not_before": "2026-01-01T00:00:00Z",
+    "not_after": "2026-12-31T23:59:59Z",
+    "provenance": "attested",
+    "evidence": { "url": "https://acme.com/authorized-sellers", "witnessed_at": "2026-10-20T09:00:00Z" }
+  }
+}
