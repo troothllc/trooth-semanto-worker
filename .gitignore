@@ -9,3 +9,6 @@ __pycache__/
 
 # The QA harness writes its runs, local databases and screenshots here (qa/README.md).
 qa/.run/
+# The QA harness's process logs and pid file (qa/run.sh, qa/walk.sh).
+qa/.*.log
+qa/.walk-*
