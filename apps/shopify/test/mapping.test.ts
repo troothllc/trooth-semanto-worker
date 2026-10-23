@@ -25,7 +25,7 @@ type CatalogToInputs = (products: unknown[], ctx: { company: never; currency: st
 };
 async function workerPipeline(): Promise<{ catalogToInputs: CatalogToInputs }> {
   const address = ["..", "..", "..", "src", "pipeline"].join("/");
-  return (await import(/* @vite-ignore */ address)) as { catalogToInputs: CatalogToInputs };
+  return (await import(/* @vite-ignore */ new URL(address, import.meta.url).href)) as { catalogToInputs: CatalogToInputs };
 }
 const INFO = { name: "Fixture Store", url: STORE, currencyCode: "USD" };
 

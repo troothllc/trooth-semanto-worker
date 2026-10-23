@@ -32,7 +32,7 @@ interface OsWorldModule {
 
 async function workerWorld(): Promise<OsWorldModule> {
   const address = ["..", "..", "..", "test", "helpers", "os-world"].join("/");
-  return (await import(/* @vite-ignore */ address)) as OsWorldModule;
+  return (await import(/* @vite-ignore */ new URL(address, import.meta.url).href)) as OsWorldModule;
 }
 
 const SHOP = "acme-store.myshopify.com";
