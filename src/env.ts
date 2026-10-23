@@ -22,8 +22,6 @@ export interface Env {
   TROOTH_WITNESS_KEY?: string;
   /** Earlier witness public keys (JSON array of public JWKs with exp or revoked_at), still served so old signatures check out. */
   TROOTH_WITNESS_PREVIOUS_KEYS?: string;
-  /** PKCS #8 PEM of the Domain Connect signing key (secret); only used once a DNS provider has onboarded the template. */
-  DOMAIN_CONNECT_PRIVATE_KEY?: string;
   /** Durable Object RateLimitDO (src/readers/rate-limit.ts): token buckets per client and route group, and read receipts counted per minute. */
   RATE?: DurableObjectNamespace;
   /** Base URLs. */
@@ -68,6 +66,7 @@ export interface CompileJob {
 /** The per-company work the crons fan out, at most 25 companies a message. */
 export interface CompaniesMessage {
   kind: "companies";
+  /** "proof" was the hourly pending-proof sweep, retired with one signup: a message of that kind still in the queue is acknowledged and dropped. */
   job: "changes" | "gap" | "proof";
   trooth_ids: string[];
 }

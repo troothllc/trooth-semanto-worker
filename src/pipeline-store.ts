@@ -23,7 +23,7 @@ import type { MerchantCenterTarget } from "./monitor/writeback";
 import type { QuestionKind } from "./gap/prompts";
 import type { GapReport } from "./gap/report";
 import type { RevocationEntry } from "./ledger/revocation";
-import type { BasicCompany } from "./basic/tier";
+import type { BasicCompany, ProofMethod } from "./basic/tier";
 import type { FirstPublicationRecord } from "./basic/first-publication";
 import type { CompanyRecord } from "./serve/ports";
 import type { BodyPort } from "./compiler/stream";
@@ -102,7 +102,7 @@ export interface PipelineStore extends BodyPort {
   /** Link a company to the worker-f workspace that claimed it. Never moves an existing link. */
   linkOsCompany(trooth_id: string, os_company_id: string): Promise<void>;
   /** Record the domain proof against the company's own domain. */
-  markDomainProven(trooth_id: string, at: string, method: "dns_txt" | "well_known"): Promise<void>;
+  markDomainProven(trooth_id: string, at: string, method: ProofMethod): Promise<void>;
   getSetup(trooth_id: string): Promise<SetupRecord | null>;
   putSetup(record: SetupRecord): Promise<void>;
   /** The newest version's file without its page bodies, and when it was signed. */
@@ -184,6 +184,8 @@ export interface PipelineStore extends BodyPort {
   putRevocationList(trooth_id: string | null, jws: string, issued_at: string): Promise<void>;
 
   saveGapReport(report: GapReport): Promise<void>;
+  /** The newest gap report for the company (by ran_at), or null before the first. */
+  latestGapReport(trooth_id: string): Promise<GapReport | null>;
   getBasic(trooth_id: string): Promise<BasicCompany | null>;
   putBasic(c: BasicCompany): Promise<void>;
   putFirstPublication(r: FirstPublicationRecord): Promise<void>;
@@ -239,7 +241,7 @@ export class MemoryPipelineStore implements PipelineStore {
     const c = this.versions.companies.get(trooth_id);
     if (c && !c.record.os_company_id) c.record = { ...c.record, os_company_id };
   }
-  async markDomainProven(trooth_id: string, at: string, _method: "dns_txt" | "well_known"): Promise<void> {
+  async markDomainProven(trooth_id: string, at: string, _method: ProofMethod): Promise<void> {
     const c = this.versions.companies.get(trooth_id);
     if (c && !c.record.domain_proven_at) c.record = { ...c.record, domain_proven_at: at };
   }
@@ -480,6 +482,11 @@ export class MemoryPipelineStore implements PipelineStore {
   async putRevocationList(trooth_id: string | null, jws: string, issued_at: string): Promise<void> {
     this.revocationLists.push({ trooth_id, jws, issued_at });
   }
+  async latestGapReport(trooth_id: string): Promise<GapReport | null> {
+    const mine = this.gapReports.filter((r) => r.trooth_id === trooth_id).sort((a, b) => b.ran_at.localeCompare(a.ran_at));
+    return mine[0] ?? null;
+  }
+
   async saveGapReport(report: GapReport): Promise<void> {
     this.gapReports.push(report);
   }

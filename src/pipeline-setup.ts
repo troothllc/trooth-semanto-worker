@@ -1,41 +1,41 @@
 // SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
 // Copyright (c) 2026 Trooth, LLC
 //
-// The setup flow behind the six-screen wizard (docs/spec/setup-api.md,
-// docs/audit/workflow-research.md sections 5 and 6), over the pipeline's
-// ports:
+// The setup flow behind the Semanto pages of the trooth.co dashboard
+// (docs/spec/setup-api.md), over the pipeline's ports. One signup and one
+// domain proof (founder decision, 22 Oct 2026): Semanto is a second product
+// in the same trooth.co account, so it never runs a claim screen, a sign-in
+// screen or a DNS proof of its own.
 //
-//   claim      a worker-f session with no company yet claims the domain it
-//              names: the company row is created (or an unlinked row is
-//              linked) with os_company_id and the owner; the domain is fixed
-//              from then on; a domain linked to another workspace is refused
-//   start      the claim, then at once a read of the public site in held
-//              mode (stored, not published, not witnessed)
-//   prove      every poll looks the proof record up again (at most once in
-//              10 seconds), at _trooth-challenge.<domain> on two resolvers and
-//              in the well-known file; the find is recorded against the
-//              company's own domain and promotes the held read
-//   state      the step, the proof with its plain diagnosis and the DNS host's
-//              steps, the read with its receipt in plain words, review, sign,
-//              install and monitoring, the measured timings and the next action
+//   domains    the workspace's domains and their state come from trooth.co
+//              (worker-f, through the TROOTH_OS binding, with the caller's own
+//              credential: src/setup/workspace-domains.ts); a domain confirmed
+//              there counts as proven, recorded with the source
+//              "trooth_domain_claim" and the confirmation date
+//   claim      a worker-f session links its company to one of the workspace's
+//              confirmed domains; the domain is fixed from then on; a domain
+//              linked to another workspace is refused; any other domain is
+//              refused with a plain problem
+//   start      the claim, then at once a read of the public site
+//   state      the step, the domain's state on trooth.co (with the link to the
+//              trooth.co page that confirms it, never a second proof screen),
+//              the read with its receipt in plain words, review, sign, install
+//              and monitoring, the measured timings and the next action
 //   install    the automatic three-part check of the company's own site
 //
 // The server, not the browser, decides what is done (Stripe hosted
 // onboarding), and every state survives the owner leaving (save for later).
 
-import { digest } from "./core/hash";
 import { isTroothId } from "./core/ids";
 import { registrableDomain } from "./compiler/url";
 import type { BuildRow } from "./compiler/stream";
-import { claim, cleanDomain, dnsClaimName, measureSetup, newChallenge, pointerRecordName, pointerRecordValue, wellKnownClaimUrl, CHALLENGE_RE, type SetupStepId } from "./basic/tier";
+import { claim, cleanDomain, measureSetup, newChallenge, pointerRecordName, pointerRecordValue, CHALLENGE_RE, type ProofMethod, type SetupStepId } from "./basic/tier";
 import { currentKey } from "./identity/keys";
 import { HOST_GUIDES, HOST_KINDS, DEFAULT_SETTINGS, type HostKind } from "./settings/delivery";
 import { questionsFor } from "./gap/prompts";
-import { diagnose, exactFound, type Diagnosis, type ResolverAnswer } from "./setup/dns-diagnosis";
-import { hostFromNameservers, manualSteps, UNKNOWN_HOST } from "./setup/dns-hosts";
-import { applyUrl, discover as discoverDomainConnect } from "./setup/domain-connect";
 import { runInstallCheck, type InstallCheckResult } from "./setup/install-check";
-import { decideStep, etaSeconds, leftOutPlain, LONG_READ_MS, newSetupRecord, nextAction, reviewSections, DETECT_INTERVAL_MS, DNS_CHECK_INTERVAL_MS, type LeftOutCode, type NextAction, type SetupRecord, type SetupStep } from "./setup/state";
+import { decideStep, etaSeconds, leftOutPlain, LONG_READ_MS, newSetupRecord, nextAction, reviewSections, DETECT_INTERVAL_MS, type LeftOutCode, type NextAction, type SetupRecord, type SetupStep } from "./setup/state";
+import { confirmedDomain, confirmedDomains, CONFIRM_DOMAIN_URL, TROOTH_DOMAIN_CLAIM, type WorkspaceDomain, type WorkspaceDomainsAnswer, type WorkspaceDomainsPort } from "./setup/workspace-domains";
 import { isDomainProven, type CompanyRecord, type WorkspaceAction, type WorkspaceAuth, type WorkspaceResult, type WorkspaceSession } from "./serve/ports";
 import type { ProblemCode } from "./serve/errors";
 import type { Pipeline } from "./pipeline";
@@ -52,8 +52,27 @@ const VIEWER_ONLY = "A workspace viewer can read but cannot change setup. Ask an
 /** Trooth IDs never given: they collide with fixed routes. */
 export const RESERVED_TROOTH_IDS = new Set(["setup", "claim", "log", "verify", "first-publication", "keys", "revocations", "well-known", "catalogs", "os", "public"]);
 
-/** The address the wizard and the emails link to. */
-export const SETUP_PAGE_URL = "https://trooth.co/dashboard/semanto/setup";
+/** The address the emails link to: the Semanto page of the trooth.co dashboard. */
+export const SETUP_PAGE_URL = "https://trooth.co/dashboard/semanto";
+
+/**
+ * The domain's state as setup shows it. Never a record to publish: the proof
+ * is the confirmation on trooth.co, and `confirm_url` is the trooth.co page
+ * that gives it.
+ *
+ *   confirmed    proven: confirmed on trooth.co (source trooth_domain_claim),
+ *                or proven before one signup (source dns_txt or well_known)
+ *   unconfirmed  on the workspace's list on trooth.co, not confirmed yet
+ *   not_listed   not on the workspace's list on trooth.co
+ *   unavailable  the list on trooth.co could not be read just now; never read
+ *                as "not confirmed"
+ */
+export interface ProofDoc {
+  source: ProofMethod | null;
+  status: "confirmed" | "unconfirmed" | "not_listed" | "unavailable";
+  confirmed_at: string | null;
+  confirm_url: string;
+}
 
 // ---------------------------------------------------------------- the document the wizard reads
 
@@ -65,21 +84,8 @@ export interface SetupDoc {
   step: SetupStep;
   basic: boolean;
   saved_for_later: boolean;
-  proof: {
-    record_type: "TXT";
-    record_name: string;
-    name_to_type: string;
-    record_value: string;
-    status: "waiting" | "found_wrong_value" | "found" | "proved";
-    checked_at: string | null;
-    next_check_at: string | null;
-    proven_at: string | null;
-    method: "dns_txt" | "well_known" | null;
-    provider: { id: string; name: string; domain_connect_url?: string; manual_steps: string[] };
-    diagnosis: Diagnosis;
-    well_known: { url: string; body: string };
-    pointer: { record_name: string; record_value: string | null };
-  } | null;
+  /** The domain's state on trooth.co, plus the _trooth pointer record once the company has a signing key. */
+  proof: (ProofDoc & { pointer: { record_name: string; record_value: string | null } | null }) | null;
   read: {
     status: "queued" | "reading" | "done" | "failed";
     held: boolean;
@@ -104,24 +110,36 @@ export interface SetupDoc {
 
 const osBase = (p: Pipeline) => p.d.config.public_api_base.replace(/\/public\//, "/os/");
 
-function companyStepDoc(p: Pipeline): SetupDoc {
+/**
+ * The state for a session whose workspace has no Semanto company yet. There
+ * is no company step: the website is the workspace's confirmed domain on
+ * trooth.co. With one, the step is the read and the action starts it; with
+ * none, the step is the domain and the action is the trooth.co page that
+ * confirms it.
+ */
+function noCompanyDoc(p: Pipeline, answer: WorkspaceDomainsAnswer | null): SetupDoc {
   const now = iso(p.d.now());
+  const list = answer?.ok ? answer.domains : [];
+  const confirmed = confirmedDomains(list)[0] ?? null;
+  const listed = confirmed ?? list[0] ?? null;
+  const step: SetupStep = confirmed ? "read" : "prove";
+  const status: ProofDoc["status"] = confirmed ? "confirmed" : !answer?.ok ? "unavailable" : listed ? "unconfirmed" : "not_listed";
   return {
     object: "semanto.setup",
     trooth_id: null,
     org: null,
-    domain: null,
-    step: "company",
+    domain: listed?.domain ?? null,
+    step,
     basic: true,
     saved_for_later: false,
-    proof: null,
+    proof: { source: confirmed ? TROOTH_DOMAIN_CLAIM : null, status, confirmed_at: confirmed?.confirmed_at ?? null, confirm_url: CONFIRM_DOMAIN_URL, pointer: null },
     read: null,
     review: null,
     sign: null,
     install: null,
     monitoring: null,
     timings: measureSetup(now, {}),
-    next_action: nextAction("company", { osBase: osBase(p), trooth_id: null, readDone: false, confirmed: false, installPassed: false }),
+    next_action: confirmed ? { label: "Read my website", method: "POST", url: `${osBase(p)}/setup/start` } : nextAction("prove", { osBase: osBase(p), trooth_id: null, readDone: false, confirmed: false, installPassed: false }),
     checked_at: now,
   };
 }
@@ -169,24 +187,46 @@ export async function chooseTroothId(p: Pipeline, domain: string, slug: string |
 
 type ClaimOutcome = { ok: true; company: CompanyRecord; created: boolean; owner: boolean } | { ok: false; result: WorkspaceResult };
 
-/** Create or link the company for a session. The domain is fixed here and never taken from a later request. */
-export async function claimCompany(p: Pipeline, s: WorkspaceSession, body: Record<string, unknown>, requireOrg: boolean): Promise<ClaimOutcome> {
+const notConfirmed = (domain: string | null) =>
+  problem(
+    "domain_not_confirmed",
+    domain
+      ? `${domain} is not a confirmed domain of this workspace on trooth.co. Confirm it at ${CONFIRM_DOMAIN_URL}, then start again.`
+      : `This workspace has no confirmed domain on trooth.co yet. Add and confirm one at ${CONFIRM_DOMAIN_URL}, then start again.`,
+  );
+
+/** A failed read of the workspace's domains, as a problem: never treated as "no domains". */
+function domainsUnread(answer: WorkspaceDomainsAnswer): WorkspaceResult {
+  if (!answer.ok && answer.reason === "unauthorized") return problem("unauthorized", "trooth.co did not accept this session for reading the workspace's domains. Sign in again.");
+  return problem("upstream_unavailable", "The workspace's domains on trooth.co could not be read just now. Try again in a moment.");
+}
+
+/**
+ * Create or link the company for a session. The website is taken only from
+ * the workspace's confirmed domains on trooth.co: the one the body names when
+ * it is one of them, else the one the workspace has held longest. Any other
+ * domain is refused (domain_not_confirmed). The domain is fixed here and never
+ * taken from a later request.
+ */
+export async function claimCompany(p: Pipeline, s: WorkspaceSession, body: Record<string, unknown>, domains: WorkspaceDomain[]): Promise<ClaimOutcome> {
   const rawDomain = str(body.domain);
-  const domain = rawDomain ? cleanDomain(rawDomain) : null;
-  if (!domain) return { ok: false, result: problem("invalid_request", "Send the website as domain, for example acme.com.") };
-  const org = str(body.org);
-  if (requireOrg && !org) return { ok: false, result: problem("invalid_request", "Send the company name as org.") };
+  const asked = rawDomain ? cleanDomain(rawDomain) : null;
+  if (rawDomain && !asked) return { ok: false, result: problem("invalid_request", "Send the website as domain, for example acme.com.") };
+  const org = str(body.org) ?? s.company_name ?? undefined;
   if (org && org.length > 200) return { ok: false, result: problem("invalid_request", "Keep the company name under 200 characters.") };
   const mine = await p.d.store.getCompanyByOsCompany(s.os_company_id);
   if (mine) {
-    if (mine.domain !== domain) return { ok: false, result: problem("domain_fixed", `This workspace set up Semanto for ${mine.domain}. The domain was fixed then and cannot change to ${domain}.`) };
+    if (asked && mine.domain !== asked) return { ok: false, result: problem("domain_fixed", `This workspace set up Semanto for ${mine.domain}. The domain was fixed then and cannot change to ${asked}.`) };
     return { ok: true, company: mine, created: false, owner: (await p.d.store.ownerUserId(mine.trooth_id)) === s.user_id };
   }
+  const row = asked ? confirmedDomain(domains, asked) : (confirmedDomains(domains)[0] ?? null);
+  if (!row) return { ok: false, result: notConfirmed(asked) };
+  const domain = row.domain;
   const elsewhere = `${domain} is already held by another Trooth workspace. Ask to join it, or ask Trooth to review the claim.`;
   const holder = await p.d.store.getCompanyByDomain(domain);
   if (holder) {
     if (holder.os_company_id && holder.os_company_id !== s.os_company_id) return { ok: false, result: problem("domain_claimed_elsewhere", elsewhere) };
-    // A row nobody claimed yet (created before workspace links existed): the first workspace links it, and still has to prove the domain.
+    // A row nobody claimed yet (created before workspace links existed): the first workspace that confirmed the domain links it.
     await p.d.store.linkOsCompany(holder.trooth_id, s.os_company_id);
     await p.d.store.registerOwner(holder.trooth_id, s.user_id);
     const linked = (await p.d.store.getCompany(holder.trooth_id))!;
@@ -210,75 +250,71 @@ export async function claimCompany(p: Pipeline, s: WorkspaceSession, body: Recor
 /** The claim routes: GET /os/semanto/setup, POST /os/semanto/claim, POST /os/semanto/setup/start. */
 export async function setupSession(p: Pipeline, what: "claim" | "setup/start" | "setup", s: WorkspaceSession, body: Record<string, unknown>): Promise<WorkspaceResult> {
   const who = { user_id: s.user_id, email: s.email, signed_in_at: s.signed_in_at };
+  const answer: WorkspaceDomainsAnswer = s.domains ? await s.domains.list() : { ok: false, reason: "unavailable" };
   if (what === "setup") {
     const company = await p.d.store.getCompanyByOsCompany(s.os_company_id);
-    if (!company) return ok(200, companyStepDoc(p));
+    if (!company) return ok(200, noCompanyDoc(p, answer));
     await ensureSetup(p, company, who);
-    return ok(200, await setupState(p, company.trooth_id, { live: true, user_id: s.user_id }));
+    return ok(200, await setupState(p, company.trooth_id, { live: true, user_id: s.user_id, ...(s.domains ? { domains: s.domains } : {}) }));
   }
-  const outcome = await claimCompany(p, s, body, what === "setup/start");
+  const linked = await p.d.store.getCompanyByOsCompany(s.os_company_id);
+  if (!answer.ok && !linked) return domainsUnread(answer);
+  const outcome = await claimCompany(p, s, body, answer.ok ? answer.domains : []);
   if (!outcome.ok) return outcome.result;
   const { company, created } = outcome;
-  const setup = await ensureSetup(p, company, who);
+  await ensureSetup(p, company, who);
+  // The domain was confirmed on trooth.co: it is proven for Semanto from now on.
+  await syncDomainProof(p, company, s.domains);
   if (what === "claim") return ok(created ? 201 : 200, { object: "semanto.claim", trooth_id: company.trooth_id, domain: company.domain, org: company.org, created, owner: outcome.owner });
-  // Start reading at once: the public site is public, so the read runs during the proof and is held until it.
-  if (!setup.build_id) {
+  // Start reading at once. A domain not proven yet (a company linked before one signup) is read in held mode until it is.
+  const fresh = (await p.d.store.getSetup(company.trooth_id))!;
+  if (!fresh.build_id) {
     const build_id = await p.queueBuild({ trooth_id: company.trooth_id, domain: company.domain, reason: "setup", requested_at: iso(p.d.now()) });
-    const fresh = (await p.d.store.getSetup(company.trooth_id))!;
-    await p.d.store.putSetup({ ...fresh, build_id });
+    const again = (await p.d.store.getSetup(company.trooth_id))!;
+    await p.d.store.putSetup({ ...again, build_id });
   }
-  return ok(created ? 201 : 200, await setupState(p, company.trooth_id, { live: false, user_id: s.user_id }));
+  return ok(created ? 201 : 200, await setupState(p, company.trooth_id, { live: false, user_id: s.user_id, ...(s.domains ? { domains: s.domains } : {}) }));
 }
 
-// ---------------------------------------------------------------- the proof (finding 2)
+// ---------------------------------------------------------------- the proof: read from trooth.co, never run here
 
-export interface ProofCheck {
+export interface ProofSync {
   proven: boolean;
-  /** True when this call found the record and recorded the proof. */
+  /** True when this call recorded the proof. */
   justProven: boolean;
-  method: "dns_txt" | "well_known" | null;
-  challenge: string;
-  claimed_at: string;
+  doc: ProofDoc;
 }
 
 /**
- * Look the proof record up for the company's own domain and record the proof
- * when it is there. At most one lookup in 10 seconds per company unless
- * forced. Proof promotes the held read, or queues a read when none exists.
+ * The domain's state on trooth.co, and the proof recorded when it is
+ * confirmed there: source trooth_domain_claim, proven at the confirmation
+ * date. The proof promotes the held read, or queues a read when none exists.
+ * A company proven earlier stays proven. An unread list changes nothing.
  */
-export async function checkProof(p: Pipeline, company: CompanyRecord, opts: { force: boolean; background?: boolean }): Promise<ProofCheck> {
-  let setup = await ensureSetup(p, company, { user_id: "", email: null, signed_in_at: null });
-  const base = { challenge: setup.challenge, claimed_at: setup.steps.company ?? setup.started_at };
-  if (isDomainProven(company)) return { ...base, proven: true, justProven: false, method: null };
-  const now = p.d.now();
-  if (!opts.force && setup.last_check && now.getTime() - Date.parse(setup.last_check.at) < DNS_CHECK_INTERVAL_MS) return { ...base, proven: false, justProven: false, method: null };
-  const name = dnsClaimName(company.domain);
-  const resolvers = p.d.setupDns?.resolvers ?? [{ name: "dns", txt: (n: string) => p.d.domainProof.dnsTxt(n) }];
-  const answers: ResolverAnswer[] = [];
-  for (const r of resolvers) {
-    try {
-      answers.push({ resolver: r.name, found: await r.txt(name), doubled: await r.txt(`${name}.${company.domain}`) });
-    } catch {
-      answers.push({ resolver: r.name, found: [], doubled: [], error: true });
-    }
+export async function syncDomainProof(p: Pipeline, company: CompanyRecord, domains: WorkspaceDomainsPort | undefined): Promise<ProofSync> {
+  const basic = await p.d.store.getBasic(company.trooth_id);
+  if (isDomainProven(company)) {
+    return { proven: true, justProven: false, doc: { source: basic?.proof_method ?? null, status: "confirmed", confirmed_at: company.domain_proven_at ?? null, confirm_url: CONFIRM_DOMAIN_URL } };
   }
-  let wellKnown: string | null = null;
-  try {
-    wellKnown = await p.d.domainProof.fetchText(wellKnownClaimUrl(company.domain));
-  } catch {
-    wellKnown = null;
+  const answer: WorkspaceDomainsAnswer = domains ? await domains.list() : { ok: false, reason: "unavailable" };
+  if (!answer.ok) return { proven: false, justProven: false, doc: { source: null, status: "unavailable", confirmed_at: null, confirm_url: CONFIRM_DOMAIN_URL } };
+  const row = confirmedDomain(answer.domains, company.domain);
+  if (!row) {
+    const listed = answer.domains.some((d) => d.domain === company.domain);
+    return { proven: false, justProven: false, doc: { source: null, status: listed ? "unconfirmed" : "not_listed", confirmed_at: null, confirm_url: CONFIRM_DOMAIN_URL } };
   }
-  setup = { ...setup, last_check: { at: iso(now), resolvers: answers, well_known: wellKnown } };
-  await p.d.store.putSetup(setup);
-  const found = exactFound({ expected: { name, value: setup.challenge }, resolvers: answers, wellKnown });
-  if (!found.found || !found.method) return { ...base, proven: false, justProven: false, method: null };
-  await recordProof(p, company, found.method, iso(now), opts.background === true);
-  return { ...base, proven: true, justProven: true, method: found.method };
+  await recordProof(p, company, TROOTH_DOMAIN_CLAIM, row.confirmed_at!);
+  return { proven: true, justProven: true, doc: { source: TROOTH_DOMAIN_CLAIM, status: "confirmed", confirmed_at: row.confirmed_at, confirm_url: CONFIRM_DOMAIN_URL } };
 }
 
-async function recordProof(p: Pipeline, company: CompanyRecord, method: "dns_txt" | "well_known", at: string, background: boolean): Promise<void> {
+async function recordProof(p: Pipeline, company: CompanyRecord, method: ProofMethod, at: string): Promise<void> {
+  await ensureSetup(p, company, { user_id: "", email: null, signed_in_at: null });
   await p.d.store.markDomainProven(company.trooth_id, at, method);
-  await stampStep(p, company.trooth_id, "prove_domain", at);
+  // The step finished when Semanto learned of the proof; a domain confirmed before setup began costs setup no time.
+  const before = await p.d.store.getSetup(company.trooth_id);
+  const learned = iso(p.d.now());
+  const stepAt = before?.steps.company && Date.parse(at) < Date.parse(before.steps.company) ? before.steps.company : Date.parse(at) > Date.parse(learned) ? learned : at;
+  await stampStep(p, company.trooth_id, "prove_domain", stepAt);
   const basic = await p.d.store.getBasic(company.trooth_id);
   if (basic) await p.d.store.putBasic({ ...basic, state: basic.state === "claim" ? "domain_proved" : basic.state, domain_proved_at: at, proof_method: method });
   const proven = (await p.d.store.getCompany(company.trooth_id))!;
@@ -286,47 +322,13 @@ async function recordProof(p: Pipeline, company: CompanyRecord, method: "dns_txt
   const build = setup.build_id ? await p.staging.getBuild(setup.build_id) : await p.staging.latestBuild(company.trooth_id);
   if (build && build.status === "done") await p.promote(proven, build);
   else if (!build || build.status === "failed") {
-    const build_id = await p.queueBuild({ trooth_id: company.trooth_id, domain: company.domain, reason: "setup", requested_at: at });
+    const build_id = await p.queueBuild({ trooth_id: company.trooth_id, domain: company.domain, reason: "setup", requested_at: learned });
     const s = (await p.d.store.getSetup(company.trooth_id))!;
     await p.d.store.putSetup({ ...s, build_id });
-  }
-  // An owner who left the page hears that the record was found.
-  if (background && setup.owner_email && !setup.proof_emailed && p.d.monitor.email && p.d.monitor.from) {
-    const text = `Trooth found your record. You proved control of ${company.domain}. Keep the record in place: Trooth looks again every day.\n\nSee where setup stands: ${SETUP_PAGE_URL}\n`;
-    await p.d.monitor.email.send({ from: p.d.monitor.from, to: [setup.owner_email], subject: `You proved control of ${company.domain}`, text, html: `<p>${text.replace(/\n/g, "<br>")}</p>` });
-    const s = (await p.d.store.getSetup(company.trooth_id))!;
-    await p.d.store.putSetup({ ...s, proof_emailed: true });
   }
 }
 
 // ---------------------------------------------------------------- the state
-
-async function providerFor(p: Pipeline, company: CompanyRecord, setup: SetupRecord): Promise<SetupRecord["provider"]> {
-  if (setup.provider) return setup.provider;
-  let host = UNKNOWN_HOST;
-  if (p.d.setupDns) {
-    try {
-      host = hostFromNameservers(await p.d.setupDns.ns(company.domain)) ?? UNKNOWN_HOST;
-    } catch {
-      host = UNKNOWN_HOST;
-    }
-  }
-  const provider = { id: host.id, name: host.name, where: host.where, checked_at: iso(p.d.now()) };
-  await p.d.store.putSetup({ ...setup, provider });
-  return provider;
-}
-
-/** The one-click link, only for a provider that onboarded the template, and only once a key id fills the pointer record. */
-async function domainConnectUrl(p: Pipeline, company: CompanyRecord, setup: SetupRecord): Promise<string | undefined> {
-  const dc = p.d.domainConnect;
-  if (!dc || !dc.privateKeyPem) return undefined;
-  const found = await discoverDomainConnect(company.domain, dc.discovery);
-  if (!found || !found.onboarded) return undefined;
-  const key = currentKey((await p.d.store.keys(company.trooth_id)).map((k) => k.public_jwk).filter((k) => !k.exp && !k.revoked_at), p.d.now());
-  if (!key) return undefined;
-  const state = (await digest(`${company.trooth_id}\n${setup.challenge}`)).slice(7, 39);
-  return applyUrl({ urlSyncUX: found.urlSyncUX, domain: company.domain, challenge: setup.challenge, tid: company.trooth_id, fp: key.kid, redirectUri: dc.redirectUri ?? SETUP_PAGE_URL, state, privateKeyPem: dc.privateKeyPem });
-}
 
 async function changedSinceRead(p: Pipeline, trooth_id: string, file: { header: { built_at: string; pages_manifest: { url: string; source_hash: string }[] } }): Promise<string[]> {
   const state = await p.d.store.changeState(trooth_id);
@@ -338,55 +340,26 @@ async function changedSinceRead(p: Pipeline, trooth_id: string, file: { header: 
   return [...out];
 }
 
-/** opts.user_id: the signed-in person, for has_passkey (their own passkeys). */
-export async function setupState(p: Pipeline, trooth_id: string, opts: { live: boolean; user_id?: string }): Promise<SetupDoc> {
+/**
+ * opts.user_id: the signed-in person, for has_passkey (their own passkeys).
+ * opts.domains: the workspace's domains on trooth.co for this caller; with
+ * opts.live (a poll), a domain confirmed there since the last poll is recorded
+ * as proven before the state is answered.
+ */
+export async function setupState(p: Pipeline, trooth_id: string, opts: { live: boolean; user_id?: string; domains?: WorkspaceDomainsPort }): Promise<SetupDoc> {
   let company = await p.d.store.getCompany(trooth_id);
-  if (!company) return companyStepDoc(p);
+  if (!company) return noCompanyDoc(p, null);
   await ensureSetup(p, company, { user_id: "", email: null, signed_in_at: null });
-  let justProven = false;
-  if (opts.live && !isDomainProven(company)) {
-    justProven = (await checkProof(p, company, { force: false })).justProven;
-    company = (await p.d.store.getCompany(trooth_id))!;
-  }
+  const sync = await syncDomainProof(p, company, opts.domains);
+  if (sync.justProven) company = (await p.d.store.getCompany(trooth_id))!;
   let setup = (await p.d.store.getSetup(trooth_id))!;
   const now = p.d.now();
   const proven = isDomainProven(company);
 
-  // proof
-  const provider = (await providerFor(p, company, setup))!;
-  setup = (await p.d.store.getSetup(trooth_id))!;
-  const name = dnsClaimName(company.domain);
-  const diagnosis = diagnose({
-    domain: company.domain,
-    expected: { name, value: setup.challenge },
-    resolvers: setup.last_check?.resolvers ?? [],
-    wellKnown: setup.last_check?.well_known ?? null,
-    previousValues: setup.previous_challenges,
-    lookingSince: setup.looking_since,
-    provenAt: company.domain_proven_at ?? null,
-    claimedByAnotherWorkspace: false,
-    now: now.getTime(),
-  });
-  const status: NonNullable<SetupDoc["proof"]>["status"] = proven ? (justProven ? "found" : "proved") : ["wrong_value", "doubled_name", "old_value"].includes(diagnosis.state) ? "found_wrong_value" : "waiting";
-  const dcUrl = proven ? undefined : await domainConnectUrl(p, company, setup);
+  // proof: the domain's state on trooth.co; the pointer once the company has a signing key
   const keys = (await p.d.store.keys(trooth_id)).map((k) => k.public_jwk);
   const current = currentKey(keys.filter((k) => !k.exp && !k.revoked_at), now);
-  const basicRow = await p.d.store.getBasic(trooth_id);
-  const proof: SetupDoc["proof"] = {
-    record_type: "TXT",
-    record_name: name,
-    name_to_type: name.slice(0, -(company.domain.length + 1)),
-    record_value: setup.challenge,
-    status,
-    checked_at: setup.last_check?.at ?? null,
-    next_check_at: proven ? null : setup.last_check ? iso(new Date(Date.parse(setup.last_check.at) + DNS_CHECK_INTERVAL_MS)) : iso(now),
-    proven_at: company.domain_proven_at ?? null,
-    method: proven ? (basicRow?.proof_method ?? null) : null,
-    provider: { id: provider.id, name: provider.name, ...(dcUrl ? { domain_connect_url: dcUrl } : {}), manual_steps: manualSteps({ id: provider.id, name: provider.name, where: provider.where }, name, company.domain) },
-    diagnosis,
-    well_known: { url: wellKnownClaimUrl(company.domain), body: setup.challenge },
-    pointer: { record_name: pointerRecordName(company.domain), record_value: current ? pointerRecordValue(trooth_id, current.kid) : null },
-  };
+  const proof: SetupDoc["proof"] = { ...sync.doc, pointer: { record_name: pointerRecordName(company.domain), record_value: current ? pointerRecordValue(trooth_id, current.kid) : null } };
 
   // read
   const build: BuildRow | null = setup.build_id ? await p.staging.getBuild(setup.build_id) : await p.staging.latestBuild(trooth_id);
@@ -435,7 +408,7 @@ export async function setupState(p: Pipeline, trooth_id: string, opts: { live: b
 
   // install: detection on the first poll of the install step, then at most hourly
   const path = setup.path ?? (company.tier === "full" ? "full" : null);
-  const preStep = decideStep({ hasCompany: true, proven, basic: company.tier === "basic", readDone: readStatus === "done", path, confirmed: setup.confirmed !== null, signed: company.current_version !== null, installPassed: false, monitoringStarted: false });
+  const preStep = decideStep({ proven, basic: company.tier === "basic", readDone: readStatus === "done", path, confirmed: setup.confirmed !== null, signed: company.current_version !== null, installPassed: false, monitoringStarted: false });
   if (opts.live && preStep === "install" && (!setup.detection || now.getTime() - Date.parse(setup.detection.at) > DETECT_INTERVAL_MS)) {
     await p.detect(trooth_id);
     setup = (await p.d.store.getSetup(trooth_id))!;
@@ -459,7 +432,7 @@ export async function setupState(p: Pipeline, trooth_id: string, opts: { live: b
     .slice(0, 10);
   const monitoring: SetupDoc["monitoring"] = { started_at: setup.monitoring?.started_at ?? null, questions: setup.monitoring?.questions ?? [], competitors: setup.monitoring?.competitors ?? [], suggested_questions: suggested };
 
-  const step = decideStep({ hasCompany: true, proven, basic: company.tier === "basic", readDone: readStatus === "done", path, confirmed: setup.confirmed !== null, signed: company.current_version !== null, installPassed, monitoringStarted: setup.monitoring !== null });
+  const step = decideStep({ proven, basic: company.tier === "basic", readDone: readStatus === "done", path, confirmed: setup.confirmed !== null, signed: company.current_version !== null, installPassed, monitoringStarted: setup.monitoring !== null });
   return {
     object: "semanto.setup",
     trooth_id,
@@ -475,7 +448,7 @@ export async function setupState(p: Pipeline, trooth_id: string, opts: { live: b
     install,
     monitoring,
     timings: measureSetup(setup.started_at, setup.steps),
-    next_action: nextAction(step, { osBase: osBase(p), trooth_id, readDone: readStatus === "done", confirmed: setup.confirmed !== null, installPassed, custody: company.custody, hasPasskey: has_passkey, provider: { name: provider.name, ...(dcUrl ? { domain_connect_url: dcUrl } : {}) } }),
+    next_action: nextAction(step, { osBase: osBase(p), trooth_id, readDone: readStatus === "done", confirmed: setup.confirmed !== null, installPassed, custody: company.custody, hasPasskey: has_passkey }),
     checked_at: iso(now),
   };
 }
@@ -505,12 +478,14 @@ export async function setupAction(p: Pipeline, action: WorkspaceAction, ws: Work
   if (!company) return problem("conflict", "This company has no record yet. Start setup first.");
   const setup = await ensureSetup(p, company, { user_id: ws.user_id, email: ws.name.includes("@") ? ws.name : null, signed_in_at: null });
   const now = iso(p.d.now());
-  const state = async (status = 200) => ok(status, await setupState(p, trooth_id, { live: false, user_id: ws.user_id }));
+  const withDomains = ws.domains ? { domains: ws.domains } : {};
+  const state = async (status = 200) => ok(status, await setupState(p, trooth_id, { live: false, user_id: ws.user_id, ...withDomains }));
   switch (action) {
     case "setup/look-again": {
+      // Read the domain's state on trooth.co again now (the trooth.co page confirms it; Semanto has no record to look for).
       if (!mayOperate(ws)) return problem("forbidden", VIEWER_ONLY);
-      await p.d.store.putSetup({ ...setup, looking_since: now, last_check: null });
-      return ok(200, await setupState(p, trooth_id, { live: true, user_id: ws.user_id }));
+      await p.d.store.putSetup({ ...setup, looking_since: now });
+      return ok(200, await setupState(p, trooth_id, { live: true, user_id: ws.user_id, ...withDomains }));
     }
     case "setup/read-again": {
       if (!mayOperate(ws)) return problem("forbidden", VIEWER_ONLY);
@@ -523,8 +498,8 @@ export async function setupAction(p: Pipeline, action: WorkspaceAction, ws: Work
       const path = body.path === "basic" || body.path === "full" ? body.path : null;
       if (!path) return problem("invalid_request", 'Send path as "basic" or "full".');
       if (path === "full" ? !mayAdminister(ws) : !mayOperate(ws)) return problem("forbidden", path === "full" ? "Only an owner or admin can move the company to signing its own record." : VIEWER_ONLY);
-      if (!isDomainProven(company)) return problem("domain_not_proven", `Prove you control ${company.domain} first.`);
-      const doc = await setupState(p, trooth_id, { live: false, user_id: ws.user_id });
+      const doc = await setupState(p, trooth_id, { live: false, user_id: ws.user_id, ...withDomains });
+      if (!isDomainProven((await p.d.store.getCompany(trooth_id)) ?? company)) return problem("domain_not_proven", `Confirm ${company.domain} on trooth.co first: ${CONFIRM_DOMAIN_URL}`);
       if (doc.read?.status !== "done") return problem("conflict", "Wait for the read to finish, then choose.");
       if (path === "full" && company.tier !== "full") await p.d.store.putCompany({ ...company, tier: "full" });
       const fresh = (await p.d.store.getSetup(trooth_id))!;
@@ -555,7 +530,7 @@ export async function setupAction(p: Pipeline, action: WorkspaceAction, ws: Work
       const fresh = (await p.d.store.getSetup(trooth_id))!;
       const allPass = result.checks.markdown === "pass" && result.checks.signature === "pass" && result.checks.well_known === "pass";
       await p.d.store.putSetup({ ...fresh, install: result, steps: { ...fresh.steps, install: fresh.steps.install ?? now, ...(allPass ? { check: fresh.steps.check ?? now } : {}) } });
-      return ok(200, { object: "semanto.install_check", url: result.url, checks: result.checks, messages: result.messages, message: result.message, checked_at: result.checked_at, setup: await setupState(p, trooth_id, { live: false, user_id: ws.user_id }) });
+      return ok(200, { object: "semanto.install_check", url: result.url, checks: result.checks, messages: result.messages, message: result.message, checked_at: result.checked_at, setup: await setupState(p, trooth_id, { live: false, user_id: ws.user_id, ...withDomains }) });
     }
     case "setup/monitoring": {
       if (!mayAdminister(ws)) return problem("forbidden", "Only an owner or admin can start monitoring.");
@@ -626,7 +601,7 @@ export async function setupAfterBuild(p: Pipeline, build: BuildRow): Promise<voi
   if (!company || !r) return;
   const left = r.left_out.length;
   const subject = `Semanto read ${r.read} of ${r.found} pages on ${company.domain}`;
-  const text = `Semanto finished reading ${company.domain}. It read ${r.read} of the ${r.found} pages it found${left ? `, and left ${left} out, each with the reason` : ""}.\n\n${isDomainProven(company) ? "See what it read and choose what comes next" : `Prove you control ${company.domain} to finish`}: ${SETUP_PAGE_URL}\n`;
+  const text = `Semanto finished reading ${company.domain}. It read ${r.read} of the ${r.found} pages it found${left ? `, and left ${left} out, each with the reason` : ""}.\n\n${isDomainProven(company) ? "See what it read and choose what comes next" : `Confirm ${company.domain} on trooth.co to finish (${CONFIRM_DOMAIN_URL})`}: ${SETUP_PAGE_URL}\n`;
   await p.d.monitor.email.send({ from: p.d.monitor.from, to: [setup.owner_email], subject, text, html: `<p>${text.replace(/\n/g, "<br>")}</p>` });
   await p.d.store.putSetup({ ...setup, emailed_build_id: build.build_id });
 }

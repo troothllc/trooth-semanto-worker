@@ -33,6 +33,7 @@ export type ProblemCode =
   | "domain_fixed"
   | "domain_claimed_elsewhere"
   | "domain_not_proven"
+  | "domain_not_confirmed"
   | "representation_not_offered"
   | "internal_error"
   | "witness_key_missing"
@@ -226,7 +227,15 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
     retryable: true,
     terminal: false,
     what_happened: "Nothing is built for publication, signed, witnessed or served until the company proves it controls its domain.",
-    what_to_do: "Add the proof record shown in setup. Trooth finds it on its own.",
+    what_to_do: "Confirm the domain on trooth.co: https://trooth.co/dashboard/public-page?tab=domain. Semanto reads it from there.",
+  },
+  domain_not_confirmed: {
+    status: 409,
+    title: "Confirm your domain on trooth.co",
+    retryable: true,
+    terminal: false,
+    what_happened: "Semanto takes the website only from the domains this workspace has confirmed on trooth.co.",
+    what_to_do: "Add and confirm the domain at https://trooth.co/dashboard/public-page?tab=domain, then start again.",
   },
   representation_not_offered: {
     status: 404,
@@ -246,11 +255,11 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
   },
   passkey_missing: {
     status: 409,
-    title: "Add a passkey first",
+    title: "Add a signing passkey first",
     retryable: false,
     terminal: false,
-    what_happened: "Trooth keeps your company's signing key and releases it only after you use your passkey. You have no passkey on file yet.",
-    what_to_do: "Add a passkey first: ask for the options at POST /os/semanto/{trooth_id}/passkeys/options, create the passkey on your device, and send it to POST /os/semanto/{trooth_id}/passkeys. Then sign again.",
+    what_happened: "Trooth keeps your company's signing key and releases it only after you use your signing passkey. You have no signing passkey on file yet. It is separate from the passkey or code you sign in with.",
+    what_to_do: "Add a signing passkey first: ask for the options at POST /os/semanto/{trooth_id}/passkeys/options, create the passkey on your device, and send it to POST /os/semanto/{trooth_id}/passkeys. Then sign again.",
   },
   passkey_challenge_expired: {
     status: 409,

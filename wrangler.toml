@@ -13,8 +13,6 @@
 #   HOSTED_KEY_SEAL_SECRET         32+ characters: seals hosted company keys at rest
 #   RECEIPT_IP_SALT_SECRET         16+ characters: the daily salt for read-receipt address hashes
 #   RESEND_API_KEY                 optional: plain-language alerts and setup emails
-#   DOMAIN_CONNECT_PRIVATE_KEY     optional: PKCS #8 PEM for Domain Connect apply links (used once a
-#                                  DNS provider onboards the template)
 #   OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, PERPLEXITY_API_KEY   optional: gap report providers
 #
 # Founder steps before the first deploy: create the D1 database and the KV namespace and put their
@@ -66,7 +64,8 @@ max_batch_size = 1
 max_retries = 3
 dead_letter_queue = "trooth-semanto-compile-dlq"
 
-# worker-f's session check accepts workspace bearer tokens for the /os routes (src/pipeline.ts troothOsAuthorize).
+# worker-f, through this binding: the session check for the /os routes (src/pipeline.ts troothOsSession) and the workspace's domains on trooth.co
+# (src/setup/workspace-domains.ts, GET /auth/domain-claims), both with the caller's own credential.
 [[services]]
 binding = "TROOTH_OS"
 service = "trooth-os-worker-f"

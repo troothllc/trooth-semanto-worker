@@ -31,7 +31,7 @@ import type { PasskeyChallenge, PasskeyJwk, PasskeyUser, StoredPasskey } from ".
 import type { PreparedSigning } from "../identity/keys";
 import type { RevocationEntry } from "../ledger/revocation";
 import type { GapReport } from "../gap/report";
-import type { BasicCompany } from "../basic/tier";
+import type { BasicCompany, ProofMethod } from "../basic/tier";
 import type { FirstPublicationRecord } from "../basic/first-publication";
 import type { CommerceStore } from "../commerce/ports";
 import type { FeedCompany } from "../commerce/feeds";
@@ -891,6 +891,11 @@ export class D1PipelineStore implements PipelineStore {
       .run();
   }
 
+  async latestGapReport(trooth_id: string): Promise<GapReport | null> {
+    const r = await this.db.prepare(`SELECT report_json FROM semanto_gap_reports WHERE trooth_id = ?1 ORDER BY ran_at DESC LIMIT 1`).bind(trooth_id).first<{ report_json: string }>();
+    return r ? (JSON.parse(r.report_json) as GapReport) : null;
+  }
+
   async getBasic(trooth_id: string): Promise<BasicCompany | null> {
     const r = await this.db.prepare(`SELECT state_json FROM semanto_basic WHERE trooth_id = ?1`).bind(trooth_id).first<{ state_json: string }>();
     return r ? (JSON.parse(r.state_json) as BasicCompany) : null;
@@ -927,7 +932,7 @@ export class D1PipelineStore implements PipelineStore {
     await this.db.prepare(`UPDATE semanto_companies SET os_company_id = ?2, updated_at = ?3 WHERE trooth_id = ?1 AND os_company_id IS NULL`).bind(trooth_id, os_company_id, new Date().toISOString()).run();
   }
 
-  async markDomainProven(trooth_id: string, at: string, method: "dns_txt" | "well_known"): Promise<void> {
+  async markDomainProven(trooth_id: string, at: string, method: ProofMethod): Promise<void> {
     await this.db.prepare(`UPDATE semanto_companies SET domain_proven_at = ?2, domain_proof_method = ?3, updated_at = ?2 WHERE trooth_id = ?1 AND domain_proven_at IS NULL`).bind(trooth_id, at, method).run();
   }
 

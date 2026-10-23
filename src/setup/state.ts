@@ -14,8 +14,10 @@ import type { HostKind } from "../settings/delivery";
 import type { SetupStepId } from "../basic/tier";
 import type { ResolverAnswer } from "./dns-diagnosis";
 import type { InstallCheckResult } from "./install-check";
+import { CONFIRM_DOMAIN_URL } from "./workspace-domains";
 
-export type SetupStep = "company" | "prove" | "read" | "review" | "install" | "done";
+/** "prove" is the domain step: the domain is not confirmed on trooth.co yet. There is no company step: the website is the workspace's confirmed domain. */
+export type SetupStep = "prove" | "read" | "review" | "install" | "done";
 
 /** What the server keeps for one company's setup (semanto_setup.state_json). */
 export interface SetupRecord {
@@ -157,7 +159,6 @@ export function reviewSections(facts: Fact[], titles: Map<string, string>): { id
 // ---------------------------------------------------------------- the step and the next action
 
 export interface StepInputs {
-  hasCompany: boolean;
   proven: boolean;
   basic: boolean;
   readDone: boolean;
@@ -170,7 +171,6 @@ export interface StepInputs {
 
 /** The step, in the order docs/spec/setup-api.md states. */
 export function decideStep(i: StepInputs): SetupStep {
-  if (!i.hasCompany) return "company";
   if (!i.proven) return "prove";
   if (!i.readDone || i.path === null) return "read";
   if (i.basic) return "done";
@@ -186,26 +186,26 @@ export interface NextAction {
 }
 
 /**
- * The one action the wizard offers. At the sign step: hosted custody adds a
+ * The one action the wizard offers. At the domain step: the trooth.co page
+ * that confirms the domain. At the sign step: hosted custody adds a signing
  * passkey first when the person has none (POST passkeys/options), then asks
  * for the passkey request bound to the version (POST sign/options); the key is
  * released only after that assertion (src/pipeline-passkeys.ts). Customer
  * custody asks for the signing input (POST sign).
  */
-export function nextAction(step: SetupStep, ctx: { osBase: string; trooth_id: string | null; readDone: boolean; confirmed: boolean; installPassed: boolean; custody?: "hosted" | "customer"; hasPasskey?: boolean; provider?: { name: string; domain_connect_url?: string } }): NextAction | null {
+export function nextAction(step: SetupStep, ctx: { osBase: string; trooth_id: string | null; readDone: boolean; confirmed: boolean; installPassed: boolean; custody?: "hosted" | "customer"; hasPasskey?: boolean }): NextAction | null {
   const b = ctx.trooth_id ? `${ctx.osBase}/${ctx.trooth_id}` : ctx.osBase;
   switch (step) {
-    case "company":
-      return { label: "Continue", method: "POST", url: `${ctx.osBase}/setup/start` };
     case "prove":
-      if (ctx.provider?.domain_connect_url) return { label: `Add it at ${ctx.provider.name}`, method: "GET", url: ctx.provider.domain_connect_url };
-      return { label: "Add the record, then wait here", method: "GET", url: `${b}/setup` };
+      // The one proof is on trooth.co: the action is the page that confirms the domain, never a second proof screen.
+      return { label: "Confirm your domain", method: "GET", url: CONFIRM_DOMAIN_URL };
     case "read":
       return ctx.readDone ? { label: "Finish setup", method: "POST", url: `${b}/setup/choose` } : { label: "Wait for the read", method: "GET", url: `${b}/setup` };
     case "review":
       if (!ctx.confirmed) return { label: "Confirm these facts", method: "POST", url: `${b}/setup/confirm` };
       if (ctx.custody === "customer") return { label: "Sign with our own key", method: "POST", url: `${b}/sign` };
-      return ctx.hasPasskey ? { label: "Sign with my passkey", method: "POST", url: `${b}/sign/options` } : { label: "Add a passkey", method: "POST", url: `${b}/passkeys/options` };
+      // The signing passkey is Semanto's own, separate from the sign-in passkey (docs/spec/setup-api.md, Passkey routes, says why).
+      return ctx.hasPasskey ? { label: "Sign with my passkey", method: "POST", url: `${b}/sign/options` } : { label: "Add a signing passkey", method: "POST", url: `${b}/passkeys/options` };
     case "install":
       return ctx.installPassed ? { label: "Start monitoring", method: "POST", url: `${b}/setup/monitoring` } : { label: "Check my site", method: "POST", url: `${b}/setup/install-check` };
     case "done":

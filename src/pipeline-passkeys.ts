@@ -74,9 +74,9 @@ async function consume(p: Pipeline, clientDataJSON: string, kind: PasskeyChallen
 
 const EXPIRED = (nothing: string) => problem("passkey_challenge_expired", `The passkey request has expired or was already used.${nothing} Start the passkey step again; each request works once, for five minutes.`);
 
-/** The detail of the "Add a passkey first" problem, naming the route. */
+/** The detail of the "Add a signing passkey first" problem, naming the route. */
 export function addPasskeyFirst(p: Pipeline, trooth_id: string): string {
-  return `Add a passkey first. Trooth keeps your company's signing key and releases it only after you use your passkey. Ask for the options at POST ${osBase(p)}/${trooth_id}/passkeys/options, create the passkey on your device, and send it to POST ${osBase(p)}/${trooth_id}/passkeys.`;
+  return `Add a signing passkey first. Trooth keeps your company's signing key and releases it only after you use your signing passkey, which is separate from how you sign in to trooth.co. Ask for the options at POST ${osBase(p)}/${trooth_id}/passkeys/options, create the passkey on your device, and send it to POST ${osBase(p)}/${trooth_id}/passkeys.`;
 }
 
 // ---------------------------------------------------------------- 7.1: add a passkey

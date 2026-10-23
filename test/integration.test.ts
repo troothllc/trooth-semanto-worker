@@ -43,9 +43,9 @@ import { InMemoryCommerceStore } from "@/commerce/ports";
 import { verifyOffer } from "@/commerce/offers";
 import type { ProviderAdapter } from "@/gap/providers";
 import { WEEKLY_RUN } from "@/gap/report";
-import { memoryDomainProof } from "@/basic/ports";
 import { verifyFirstPublication } from "@/basic/first-publication";
-import { dnsClaimName, dnsClaimRecord, WITNESSED_NOT_SIGNED } from "@/basic/tier";
+import { WITNESSED_NOT_SIGNED } from "@/basic/tier";
+import { memoryWorkspaceDomains } from "@/setup/workspace-domains";
 
 /** An inclusion proof from the public log, checked with the ledger's own RFC 6962 code. */
 async function V_core_inclusion(p: { index: number; tree_size: number; leaf_hash: string; root_hash: string; path: string[] }): Promise<boolean> {
@@ -99,7 +99,8 @@ function fixtureSite(): SiteHttp {
 }
 
 const WORKSPACES: Record<string, WorkspaceAuth> = {
-  "Bearer owner-token": { trooth_id: "acme", role: "owner", user_id: "u-ada", name: "Ada Owner" },
+  // acme.com is confirmed on trooth.co for this workspace (its domain list, read through worker-f in the Worker).
+  "Bearer owner-token": { trooth_id: "acme", role: "owner", user_id: "u-ada", name: "Ada Owner", domains: memoryWorkspaceDomains([{ domain: "acme.com", status: "confirmed", confirmed_at: "2026-10-21T09:00:00.000Z", method: "dns" }]) },
   "Bearer admin-token": { trooth_id: "acme", role: "admin", user_id: "u-bo", name: "Bo Admin" },
   "Bearer member-token": { trooth_id: "acme", role: "member", user_id: "u-cy", name: "Cy Member" },
   "Bearer beta-token": { trooth_id: "beta", role: "owner", user_id: "u-di", name: "Di Owner" },
@@ -199,8 +200,6 @@ async function world(opts: { custody?: "hosted" | "customer"; trooth_id?: string
     site: { http: site, fetcher: { minIntervalMs: 0 } },
     monitor: { fetch: monitorFetch, store: memoryStore() },
     identity: { http: identityHttp },
-    // The proof value a zero random source gives (src/basic/tier.ts newChallenge).
-    domainProof: memoryDomainProof({ txt: { [dnsClaimName("acme.com")]: [dnsClaimRecord(`trooth-domain-challenge=${"00".repeat(24)}`)] } }),
     ...(tsa ? { tsa } : {}),
     gapAdapters: gapAnswers,
     ...(opts.queue ? { enqueue: async (job: QueueMessage) => void queued.push(job) } : {}),
@@ -514,7 +513,6 @@ describe("4. the same flow over the D1 and R2 adapters the Worker uses (SQLite a
       site: { http: fixtureSite(), fetcher: { minIntervalMs: 0 } },
       monitor: { fetch: fetchFromMap({ ...livePages, [MC_URL]: { status: 200, headers: {}, body: readFix("fixture-merchant-center.tsv") } }), store: new D1MonitorStore(db) },
       identity: { http: new IdentityHttp({}) },
-      domainProof: memoryDomainProof(),
       gapAdapters: gapAnswers,
       staging: new D1BuildStaging(db, bucket),
     });
@@ -725,18 +723,21 @@ describe("4. signing paths, keys and the workspace actions", () => {
     expect(v.file.facts.filter((f) => f.provenance === "public_record").map((f) => f.key)).toContain("identity.lei");
   });
 
-  it("Semanto Basic: claims, proves by DNS, builds the witnessed record and measures the setup", async () => {
+  it("Semanto Basic: claims, takes the proof from the domain confirmed on trooth.co, builds the witnessed record and measures the setup", async () => {
     const w = await world({ company: false, random: (n) => new Uint8Array(n) });
     await w.store.putCompany({ trooth_id: "acme", domain: "acme.com", org: "Acme Inc", tier: "basic", current_version: null, custody: "customer", domain_proven_at: null });
     const claimed = await json(await post(w, "/acme/basic/claim", { domain: "https://acme.com/" }));
-    expect(claimed.dns).toEqual({ name: "_trooth-challenge.acme.com", type: "TXT", value: `trooth-domain-challenge=${"00".repeat(24)}` });
+    // No record to publish: the one proof is the domain's confirmation on trooth.co.
+    expect(claimed.dns).toBeUndefined();
+    expect(claimed.proof).toEqual({ source: "trooth_domain_claim", status: "confirmed", confirmed_at: "2026-10-21T09:00:00.000Z", confirm_url: "https://trooth.co/dashboard/public-page?tab=domain" });
+    expect((await w.store.getCompany("acme"))!.domain_proven_at).toBe("2026-10-21T09:00:00.000Z");
     const proved = await post(w, "/acme/basic/prove", {});
     expect(proved.status).toBe(200);
     expect(proved.headers.get("trooth-record-state")).toBe("read");
     const body = await json(proved);
     expect(body.signed_by_company).toBe(false);
     expect(body.body.proved).toBe(true);
-    expect(body.body.method).toBe("dns_txt");
+    expect(body.body.method).toBe("trooth_domain_claim");
     expect(body.body.read.status).toBe("done");
     expect(body.body.read.read).toBeGreaterThan(3);
     expect(body.body.setup.steps.map((s: any) => s.id)).toEqual(["sign_in", "company", "prove_domain", "read_site", "review", "sign", "install", "check", "monitoring"]);
@@ -957,17 +958,18 @@ describe("4. /os authorization: worker-f's session check, denied by default", ()
     const req = (auth?: string) => new Request(`${OS}/acme/build`, { method: "POST", headers: auth ? { authorization: auth } : {} });
     // Without a registered owner and without an explicit workspaceRole, a vendor session is a member, never the owner.
     const noOwner = troothOsAuthorize(service, async (c) => (c === "co-ada-acme-com" ? "acme" : null));
-    expect(await noOwner(req("Bearer live-session"), "acme")).toEqual({ trooth_id: "acme", role: "member", user_id: "u-1", name: "ada@acme.com" });
+    expect(await noOwner(req("Bearer live-session"), "acme")).toMatchObject({ trooth_id: "acme", role: "member", user_id: "u-1", name: "ada@acme.com" });
     // The registered owner (semanto_companies.os_owner_user_id) is the owner; another user of the workspace is a member.
     const authorize = troothOsAuthorize(service, async (c) => (c === "co-ada-acme-com" ? "acme" : null), async () => "u-1");
-    expect(await authorize(req("Bearer live-session"), "acme")).toEqual({ trooth_id: "acme", role: "owner", user_id: "u-1", name: "ada@acme.com" });
+    expect(await authorize(req("Bearer live-session"), "acme")).toMatchObject({ trooth_id: "acme", role: "owner", user_id: "u-1", name: "ada@acme.com" });
     expect((await troothOsAuthorize(service, async () => "acme", async () => "u-someone-else")(req("Bearer live-session"), "acme"))?.role).toBe("member");
     expect(await authorize(req("Bearer buyer-session"), "acme")).toBeNull();
     expect(await troothOsAuthorize(service, async () => null)(req("Bearer live-session"), "acme")).toBeNull();
     expect(await authorize(req("Bearer stale"), "acme")).toBeNull();
     expect(await authorize(req(), "acme")).toBeNull();
     expect(await troothOsAuthorize(undefined)(req("Bearer live-session"), "acme")).toBeNull();
-    expect(calls[0]).toBe("https://trooth-os-worker-f/auth/session");
+    // The binding is addressed at the public host so trooth.co's DPoP proof for that address checks out at worker-f.
+    expect(calls[0]).toBe("https://api.trooth.co/auth/session");
     const w = await world();
     const app = createApp({ ports: { ...w.ports, jobs: w.pipeline.jobs() }, workspace: w.pipeline, authorize });
     const built = await app.request(`${OS}/acme/build`, { method: "POST", headers: { authorization: "Bearer live-session" } });

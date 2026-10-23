@@ -7,7 +7,8 @@
 // the install guide chosen by guide_id for every host the spec lists, the
 // data client (bearer auth, a deadline, RFC 9457 problems in plain words with
 // the request id), and the house rules on every new file. The browser walk is
-// a separate script: web/semanto/setup/README.md.
+// a separate script: web/semanto/setup/README.md. And the WorkspaceDomains
+// port (src/setup/workspace-domains.ts): the one domain proof is trooth.co's.
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,7 @@ import { GUIDE_IDS, guideFor, headCode, HOST_CHOICES } from "../web/semanto/setu
 import { POLL_SCHEDULE_MS, pollDelay, stateFingerprint } from "../web/semanto/setup/poll";
 import { stepsForHost } from "../web/semanto/setup/dns-guides";
 import { BANNED_WORDS, ELLIPSIS } from "./helpers/house-rules";
+import { confirmedDomain, confirmedDomains, parseWorkspaceDomains, troothOsWorkspaceDomains, TROOTH_OS_DOMAINS_URL } from "../src/setup/workspace-domains";
 
 describe("the Website field", () => {
   it("keeps the registrable host of a pasted address, as the claim does", () => {
@@ -198,5 +200,57 @@ describe("house rules on the wizard's files", () => {
       expect([f, /\bfetch\(/.test(s)]).toEqual([f, false]);
       expect([f, /#1A73E8|bg-blue|text-blue/i.test(s.replace(/focus-visible:outline-\[#1A73E8\]/g, ""))]).toEqual([f, false]);
     }
+  });
+});
+
+describe("the WorkspaceDomains port: the domains confirmed on trooth.co", () => {
+  it("reads worker-f's rows strictly: confirmed needs a date, anything that is not a plain domain is dropped", () => {
+    const rows = parseWorkspaceDomains({
+      domains: [
+        { domain: "Acme.com", status: "confirmed", confirmed_at: "2026-08-03T10:00:00Z", method: "dns" },
+        { domain: "acme.io", status: "unconfirmed", confirmed_at: null },
+        { domain: "no-date.example", status: "confirmed", confirmed_at: null },
+        { domain: "https://bad.example/x", status: "confirmed", confirmed_at: "2026-08-03T10:00:00Z" },
+        "acme.net",
+      ],
+    })!;
+    expect(rows).toEqual([
+      { domain: "acme.com", status: "confirmed", confirmed_at: "2026-08-03T10:00:00.000Z", method: "dns" },
+      { domain: "acme.io", status: "unconfirmed", confirmed_at: null, method: null },
+      { domain: "no-date.example", status: "unconfirmed", confirmed_at: null, method: null },
+    ]);
+    expect(parseWorkspaceDomains({ claims: [] })).toBeNull();
+    expect(confirmedDomain(rows, "ACME.com")?.domain).toBe("acme.com");
+    expect(confirmedDomain(rows, "acme.io")).toBeNull();
+    const two = [...rows, { domain: "older.example", status: "confirmed" as const, confirmed_at: "2026-01-01T00:00:00.000Z", method: "email" }];
+    expect(confirmedDomains(two).map((d) => d.domain)).toEqual(["older.example", "acme.com"]);
+  });
+
+  it("asks worker-f once per request with the caller's credential, and never reads a failure as no domains", async () => {
+    const calls: { url: string; auth: string | null; dpop: string | null }[] = [];
+    const answer = { status: 200, body: { domains: [{ domain: "acme.com", status: "confirmed", confirmed_at: "2026-08-03T10:00:00Z" }] } as unknown };
+    const service = {
+      fetch: async (url: Request | string, init?: RequestInit) => {
+        const h = new Headers(init?.headers);
+        calls.push({ url: String(url), auth: h.get("authorization"), dpop: h.get("dpop") });
+        return new Response(JSON.stringify(answer.body), { status: answer.status });
+      },
+    };
+    const port = troothOsWorkspaceDomains(service, { token: "tok", proof: null });
+    expect(await port.list()).toMatchObject({ ok: true, domains: [{ domain: "acme.com", status: "confirmed" }] });
+    await port.list();
+    expect(calls).toEqual([{ url: TROOTH_OS_DOMAINS_URL, auth: "Bearer tok", dpop: null }]);
+    expect(TROOTH_OS_DOMAINS_URL).toBe("https://api.trooth.co/auth/domain-claims");
+    await troothOsWorkspaceDomains(service, { token: "tok", proof: "a.b.c" }).list();
+    expect(calls[1]).toEqual({ url: TROOTH_OS_DOMAINS_URL, auth: "DPoP tok", dpop: "a.b.c" });
+    answer.status = 401;
+    expect(await troothOsWorkspaceDomains(service, { token: "tok", proof: null }).list()).toEqual({ ok: false, reason: "unauthorized" });
+    answer.status = 500;
+    expect(await troothOsWorkspaceDomains(service, { token: "tok", proof: null }).list()).toEqual({ ok: false, reason: "unavailable" });
+    answer.status = 200;
+    answer.body = { nothing: true };
+    expect(await troothOsWorkspaceDomains(service, { token: "tok", proof: null }).list()).toEqual({ ok: false, reason: "unavailable" });
+    expect(await troothOsWorkspaceDomains(undefined, { token: "tok", proof: null }).list()).toEqual({ ok: false, reason: "unavailable" });
+    expect(await troothOsWorkspaceDomains({ fetch: async () => { throw new Error("down"); } }, { token: "tok", proof: null }).list()).toEqual({ ok: false, reason: "unavailable" });
   });
 });

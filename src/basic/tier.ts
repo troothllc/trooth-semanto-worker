@@ -28,7 +28,8 @@ import type { BuiltRecord, DomainProofPort, RecordBuilderPort } from "./ports";
 
 export type BasicState = "claim" | "domain_proved" | "basic_built" | "upgraded";
 
-export type ProofMethod = "dns_txt" | "well_known";
+/** How a domain was proven. "trooth_domain_claim": confirmed on trooth.co (src/setup/workspace-domains.ts), the one proof for a trooth.co workspace; "dns_txt" and "well_known" are proofs recorded before one signup. */
+export type ProofMethod = "dns_txt" | "well_known" | "trooth_domain_claim";
 
 export interface BasicCompany {
   trooth_id: string;

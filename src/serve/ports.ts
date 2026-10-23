@@ -14,6 +14,7 @@ import type { Jwks, PrivateJwk, PublicJwk } from "../core/keys";
 import type { DeliverySettings } from "../settings/delivery";
 import type { LogLeaf, StoredTreeHead } from "../ledger/ports";
 import type { ProblemCode } from "./errors";
+import type { WorkspaceDomainsPort } from "../setup/workspace-domains";
 
 /** One company row, the subset the server reads. */
 export interface CompanyRecord {
@@ -225,6 +226,8 @@ export interface WorkspaceAuth {
   role: WorkspaceRole;
   user_id: string;
   name: string;
+  /** The workspace's domains on trooth.co, read through worker-f with this caller's credential (src/setup/workspace-domains.ts). Absent outside the TROOTH_OS path. */
+  domains?: WorkspaceDomainsPort;
 }
 
 /** The workspace actions, each served at POST /os/semanto/{trooth_id}/{action}. */
@@ -287,10 +290,14 @@ export interface WorkspaceSession {
   /** When the person signed in, when the session answer carries signedInAt. */
   signed_in_at: string | null;
   email: string | null;
+  /** worker-f's companyName for the workspace, when the session answer carries one: the name Semanto gives the company. */
+  company_name?: string | null;
+  /** The workspace's domains on trooth.co, read through worker-f with this caller's credential (src/setup/workspace-domains.ts). */
+  domains?: WorkspaceDomainsPort;
 }
 
 /** The read-only workspace routes (GET), answered by the pipeline. */
-export type WorkspaceRead = "setup" | "setup/review" | "keys" | "writeback" | "receipts" | "receipts.csv";
+export type WorkspaceRead = "setup" | "setup/review" | "keys" | "writeback" | "receipts" | "receipts.csv" | "reports";
 
 /** The pipeline behind the /os routes (src/pipeline.ts). */
 export interface WorkspaceHandlers {

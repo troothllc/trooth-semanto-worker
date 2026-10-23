@@ -866,7 +866,7 @@ export function createApp(deps: RouteDeps): ServeApp {
     });
   for (const action of WORKSPACE_ACTIONS) actionRoute(action);
 
-  // GET workspace routes: the setup state, the review, keys, write-back previews, receipts.
+  // GET workspace routes: the setup state, the review, keys, write-back previews, receipts, the newest gap report.
   const readRoute = (path: string, what: WorkspaceRead) =>
     app.get(`${osPrefix}/:trooth_id/${path}`, async (c) => {
       const trooth_id = c.req.param("trooth_id");
@@ -886,6 +886,7 @@ export function createApp(deps: RouteDeps): ServeApp {
   readRoute("writeback", "writeback");
   readRoute("receipts", "receipts");
   readRoute("receipts.csv", "receipts.csv");
+  readRoute("reports", "reports");
 
   app.post(`${osPrefix}/:trooth_id/keys/:kid/revoke`, async (c) => {
     const trooth_id = c.req.param("trooth_id");

@@ -35,7 +35,6 @@ import { CountedReceipts, MemoryRateLimiter, RateLimitDO, minuteRow, take, RATE_
 import { verifyRevocationList } from "@/ledger/revocation";
 import { fetchFromMap, guardedFetchPort, guardedGet, memoryEmail, memoryStore } from "@/monitor/ports";
 import { InMemoryCommerceStore } from "@/commerce/ports";
-import { memoryDomainProof } from "@/basic/ports";
 import { dnsClaimName, pointerRecordValue, WITNESSED_NOT_SIGNED } from "@/basic/tier";
 import { MemoryHttp as IdentityHttp } from "@/identity/ports";
 import { D1Keys } from "@/db/d1";
@@ -84,17 +83,42 @@ function fixtureSite(): SiteHttp {
 
 /** worker-f's session answers, by bearer token (GET /auth/session, read 22 Oct 2026). */
 const SESSIONS: Record<string, Record<string, unknown>> = {
-  "Bearer ada": { authenticated: true, companyId: "co-acme", userId: "u-ada", email: "ada@acme.com", role: "vendor", signedInAt: new Date(NOW.getTime() - 20_000).toISOString() },
+  "Bearer ada": { authenticated: true, companyId: "co-acme", userId: "u-ada", email: "ada@acme.com", role: "vendor", companyName: "Acme Inc", signedInAt: new Date(NOW.getTime() - 20_000).toISOString() },
   "Bearer cy": { authenticated: true, companyId: "co-acme", userId: "u-cy", email: "cy@acme.com", role: "vendor" },
   "Bearer eve": { authenticated: true, companyId: "co-evil", userId: "u-eve", email: "eve@evil.example", role: "vendor" },
   "Bearer buyer": { authenticated: true, companyId: "co-buyer", userId: "u-bea", role: "buyer" },
   "Bearer slug": { authenticated: true, companyId: "co-slug", userId: "u-sam", role: "vendor", companySlug: "acme-widgets" },
+  "Bearer nod": { authenticated: true, companyId: "co-nodomain", userId: "u-nod", email: "nod@nodomain.example", role: "vendor" },
 };
+/** When trooth.co confirmed the fixture domains: the day before NOW. */
+const CONFIRMED_AT = "2026-10-21T09:00:00.000Z";
+const confirmed = (domain: string) => ({ domain, status: "confirmed", confirmed_at: CONFIRMED_AT, method: "dns" });
+const unconfirmed = (domain: string) => ({ domain, status: "unconfirmed", confirmed_at: null, method: "dns" });
+/** worker-f's GET /auth/domain-claims answers, by companyId (the session's rows of trooth.co's domain_claims). Reset by world(). */
+const defaultDomains = (): Record<string, Record<string, unknown>[]> => ({
+  "co-acme": [confirmed("acme.com")],
+  "co-evil": [confirmed("acme.com")],
+  "co-slug": [confirmed("widgets.example")],
+  "co-nodomain": [unconfirmed("nodomain.example")],
+});
+let DOMAINS = defaultDomains();
+/** Every call through the binding, with the credential it carried. */
+const workerFCalls: { url: string; authorization: string; dpop: string | null }[] = [];
 const workerF: ServiceFetcher = {
-  fetch: async (_url, init) => {
-    const auth = new Headers(init?.headers).get("authorization") ?? "";
-    const s = SESSIONS[auth];
-    return s ? Response.json(s) : new Response(null, { status: 401 });
+  fetch: async (url, init) => {
+    const h = new Headers(init?.headers);
+    const auth = h.get("authorization") ?? "";
+    const u = typeof url === "string" ? url : url.url;
+    workerFCalls.push({ url: u, authorization: auth, dpop: h.get("dpop") });
+    // A DPoP-scheme request is the same session as its bearer twin, in this fixture.
+    const s = SESSIONS[auth.replace(/^DPoP /, "Bearer ")];
+    if (!s) return new Response(null, { status: 401 });
+    if (u === "https://api.trooth.co/auth/session") return Response.json(s);
+    if (u === "https://api.trooth.co/auth/domain-claims") {
+      const rows = DOMAINS[String(s.companyId)];
+      return rows === undefined ? new Response(null, { status: 503 }) : Response.json({ domains: rows });
+    }
+    return new Response(null, { status: 404 });
   },
 };
 
@@ -119,6 +143,8 @@ interface World {
 async function world(opts: { queue?: boolean; probe?: (url: string, headers: Record<string, string>) => Promise<{ status: number; headers: Record<string, string>; body: Uint8Array } | null>; rateLimit?: RouteDeps["rateLimit"]; companies?: { trooth_id: string; proven: boolean; os?: string }[] } = {}): Promise<World> {
   const clock = { now: new Date(NOW) };
   const now = () => new Date(clock.now);
+  DOMAINS = defaultDomains();
+  workerFCalls.length = 0;
   const w = await generateKeyPair();
   const versions = new MemoryVersionStore();
   const ports = memoryPorts(versions, w.privateJwk, { now });
@@ -145,7 +171,6 @@ async function world(opts: { queue?: boolean; probe?: (url: string, headers: Rec
     site: { http: site, fetcher: { minIntervalMs: 0 } },
     monitor: { fetch: fetchFromMap({}), store: memoryStore(), email, from: "Trooth <alerts@trooth.co>" },
     identity: { http: new IdentityHttp({}) },
-    domainProof: memoryDomainProof(),
     setupDns: dns,
     staging,
     gapAdapters: () => [],
@@ -212,15 +237,18 @@ describe("finding 1: a worker-f workspace claims its company, and then every /os
   it("claims on first contact, maps companyId to the company, registers the owner, and refuses a second workspace and a changed domain", async () => {
     const w = await world();
     expect((await call(w, "GET", "/acme/setup", "Bearer ada")).status).toBe(401);
+    // No company step and no proof step: the workspace's domain confirmed on trooth.co is the website, and the action reads it.
     const empty = await json(await call(w, "GET", "/setup", "Bearer ada"));
-    expect(empty).toMatchObject({ object: "semanto.setup", trooth_id: null, step: "company", next_action: { method: "POST", url: `${OS}/setup/start` } });
+    expect(empty).toMatchObject({ object: "semanto.setup", trooth_id: null, domain: "acme.com", step: "read", proof: { source: "trooth_domain_claim", status: "confirmed", confirmed_at: CONFIRMED_AT, confirm_url: "https://trooth.co/dashboard/public-page?tab=domain", pointer: null }, next_action: { label: "Read my website", method: "POST", url: `${OS}/setup/start` } });
     const r = await call(w, "POST", "/claim", "Bearer ada", { domain: "https://www.Acme.com/about?x=1", org: "Acme Inc" });
     expect(r.status).toBe(201);
     expect(r.headers.get("cache-control")).toBe("private, no-store");
     expect(await json(r)).toEqual({ object: "semanto.claim", trooth_id: "acme", domain: "acme.com", org: "Acme Inc", created: true, owner: true });
     const company = (await w.store.getCompany("acme"))!;
     expect(company.os_company_id).toBe("co-acme");
-    expect(company.domain_proven_at).toBeNull();
+    // Proven by the confirmation on trooth.co, at its date, with that source.
+    expect(company.domain_proven_at).toBe(CONFIRMED_AT);
+    expect((await w.store.getBasic("acme"))!.proof_method).toBe("trooth_domain_claim");
     expect(await w.store.ownerUserId("acme")).toBe("u-ada");
     // The existing authorize mapping now works: owner for the claimer, member for a colleague.
     const auth = troothOsAuthorize(workerF, async (id) => (await w.store.getCompanyByOsCompany(id))?.trooth_id ?? null, (tid) => w.store.ownerUserId(tid));
@@ -245,6 +273,50 @@ describe("finding 1: a worker-f workspace claims its company, and then every /os
     expect((await w.app.request(`${OS}/claim`, { method: "POST", body: "{}" })).status).toBe(401);
   });
 
+  it("takes the domain only from the workspace's confirmed domains on trooth.co, and points an unconfirmed one at the trooth.co page", async () => {
+    const w = await world();
+    // An unconfirmed domain: the step is the domain, and the one action is the trooth.co page that confirms it.
+    const waiting = await json(await call(w, "GET", "/setup", "Bearer nod"));
+    expect(waiting).toMatchObject({ trooth_id: null, domain: "nodomain.example", step: "prove", proof: { source: null, status: "unconfirmed", confirmed_at: null }, next_action: { label: "Confirm your domain", method: "GET", url: "https://trooth.co/dashboard/public-page?tab=domain" } });
+    // The state never carries a record to publish: there is one proof, on trooth.co.
+    expect(JSON.stringify(waiting)).not.toContain("_trooth-challenge");
+    for (const path of ["/claim", "/setup/start"]) {
+      const refused = await call(w, "POST", path, "Bearer nod", { domain: "nodomain.example" });
+      expect(refused.status).toBe(409);
+      expect(await json(refused)).toMatchObject({ code: "domain_not_confirmed", detail: "nodomain.example is not a confirmed domain of this workspace on trooth.co. Confirm it at https://trooth.co/dashboard/public-page?tab=domain, then start again." });
+    }
+    // A domain the workspace never listed is refused the same way; no domain at all names the trooth.co page too.
+    expect((await json(await call(w, "POST", "/setup/start", "Bearer ada", { domain: "elsewhere.example" }))).code).toBe("domain_not_confirmed");
+    expect((await json(await call(w, "POST", "/setup/start", "Bearer nod", {}))).detail).toBe("This workspace has no confirmed domain on trooth.co yet. Add and confirm one at https://trooth.co/dashboard/public-page?tab=domain, then start again.");
+    expect(await w.store.getCompanyByOsCompany("co-nodomain")).toBeNull();
+    // The list could not be read: a plain problem, never "no domains", and nothing is created.
+    delete DOMAINS["co-nodomain"];
+    const unread = await call(w, "POST", "/setup/start", "Bearer nod", {});
+    expect([unread.status, (await json(unread)).code]).toEqual([502, "upstream_unavailable"]);
+    expect((await json(await call(w, "GET", "/setup", "Bearer nod"))).proof).toMatchObject({ status: "unavailable" });
+    // Confirmed on trooth.co: start takes it without a domain in the body and with worker-f's company name.
+    DOMAINS["co-nodomain"] = [confirmed("nodomain.example")];
+    const started = await call(w, "POST", "/setup/start", "Bearer nod", {});
+    expect(started.status).toBe(201);
+    expect(await json(started)).toMatchObject({ trooth_id: "nodomain", domain: "nodomain.example", step: "read", proof: { source: "trooth_domain_claim", status: "confirmed" } });
+  });
+
+  it("sends trooth.co's DPoP proofs to worker-f, one per address, with the DPoP scheme", async () => {
+    const w = await world();
+    const proofA = "eyJ0eXAiOiJkcG9wK2p3dCJ9.eyJodHUiOiJzZXNzaW9uIn0.c2ln";
+    const proofB = "eyJ0eXAiOiJkcG9wK2p3dCJ9.eyJodHUiOiJkb21haW5zIn0.c2ln";
+    const r = await w.app.request(`${OS}/setup`, { headers: { authorization: "Bearer ada", "trooth-os-session-proof": proofA, "trooth-os-domains-proof": proofB } });
+    expect(r.status).toBe(200);
+    expect(workerFCalls).toEqual([
+      { url: "https://api.trooth.co/auth/session", authorization: "DPoP ada", dpop: proofA },
+      { url: "https://api.trooth.co/auth/domain-claims", authorization: "DPoP ada", dpop: proofB },
+    ]);
+    // Without proofs (a deployment where worker-f does not require them), the plain bearer; a malformed proof is not forwarded.
+    workerFCalls.length = 0;
+    await w.app.request(`${OS}/setup`, { headers: { authorization: "Bearer ada", "trooth-os-session-proof": "not a proof" } });
+    expect(workerFCalls.map((c) => [c.authorization, c.dpop])).toEqual([["Bearer ada", null], ["Bearer ada", null]]);
+  });
+
   it("takes worker-f's company slug when it is free, and never a reserved route name", async () => {
     const w = await world();
     expect(await json(await call(w, "POST", "/claim", "Bearer slug", { domain: "widgets.example", org: "Acme Widgets" }))).toMatchObject({ trooth_id: "acme-widgets" });
@@ -252,24 +324,27 @@ describe("finding 1: a worker-f workspace claims its company, and then every /os
     await w2.store.putCompany({ trooth_id: "acme", domain: "acme.io", org: "Acme IO", tier: "basic", current_version: null, custody: "hosted", os_company_id: "co-other" });
     expect(await json(await call(w2, "POST", "/claim", "Bearer ada", { domain: "acme.com", org: "Acme Inc" }))).toMatchObject({ trooth_id: "acme-com" });
     const w3 = await world();
+    DOMAINS["co-acme"] = [confirmed("setup.example")];
     expect(await json(await call(w3, "POST", "/claim", "Bearer ada", { domain: "setup.example", org: "Setup Co" }))).toMatchObject({ trooth_id: "setup-example" });
   });
 });
 
 // ------------------------------------------------------------------------ finding 2 (claimswap.mts)
 
-describe("finding 2: the domain is fixed at the claim, proven against that domain, and nothing is published before the proof", () => {
-  it("a claim for another domain is refused; a proof published for it proves nothing, and nothing is built, signed, witnessed or served", async () => {
+describe("finding 2: the domain is fixed at the claim, proven only by its confirmation on trooth.co, and nothing is published before the proof", () => {
+  it("a claim for another domain is refused; a DNS record proves nothing; nothing is built, signed, witnessed or served until trooth.co confirms the domain", async () => {
     const w = await world();
-    expect((await call(w, "POST", "/claim", "Bearer ada", { domain: "acme.com", org: "Acme Inc" })).status).toBe(201);
-    // claimswap.mts: the requester controls attacker.example and publishes the proof value there.
-    w.dns.set(dnsClaimName("attacker.example"), [ZERO_CHALLENGE]);
+    // A company linked before one signup, its domain not confirmed on trooth.co yet.
+    await w.store.putCompany({ trooth_id: "acme", domain: "acme.com", org: "Acme Inc", tier: "basic", current_version: null, custody: "hosted", domain_proven_at: null, os_company_id: "co-acme" });
+    await w.store.registerOwner("acme", "u-ada");
+    DOMAINS["co-acme"] = [unconfirmed("acme.com"), confirmed("attacker.example")];
     const swap = await call(w, "POST", "/acme/basic/claim", "Bearer ada", { domain: "attacker.example" });
     expect(swap.status).toBe(409);
     expect((await json(swap)).code).toBe("domain_fixed");
+    // Semanto runs no proof of its own: the old record, published, proves nothing.
+    w.dns.set(dnsClaimName("acme.com"), [ZERO_CHALLENGE]);
     const prove = await json(await call(w, "POST", "/acme/basic/prove", "Bearer ada", {}));
-    expect(prove.body.proved).toBe(false);
-    expect(prove.body.checked.dns_name).toBe("_trooth-challenge.acme.com");
+    expect(prove.body).toMatchObject({ proved: false, method: null, proof: { status: "unconfirmed", confirm_url: "https://trooth.co/dashboard/public-page?tab=domain" } });
     expect((await w.store.getCompany("acme"))!.domain_proven_at).toBeNull();
     for (const action of ["build", "sign", "first-publication"]) {
       const r = await call(w, "POST", `/acme/${action}`, "Bearer ada", action === "first-publication" ? { url: "https://acme.com/about" } : {});
@@ -277,10 +352,11 @@ describe("finding 2: the domain is fixed at the claim, proven against that domai
     }
     expect((await pub(w, "/acme")).status).toBe(409);
     expect(await w.ports.log.ledger.size()).toBe(0);
-    // The proof at the company's own name proves acme.com, and the record served is acme.com's.
-    w.dns.set(dnsClaimName("acme.com"), [ZERO_CHALLENGE]);
+    // Confirmed on trooth.co: the proof is recorded against acme.com, and the record served is acme.com's.
+    DOMAINS["co-acme"] = [confirmed("acme.com")];
     const ok = await json(await call(w, "POST", "/acme/basic/prove", "Bearer ada", {}));
-    expect(ok.body).toMatchObject({ proved: true, method: "dns_txt" });
+    expect(ok.body).toMatchObject({ proved: true, method: "trooth_domain_claim" });
+    expect((await w.store.getCompany("acme"))!.domain_proven_at).toBe(CONFIRMED_AT);
     const served = await pub(w, "/acme");
     expect(served.status).toBe(200);
     const file = (await json(served)) as SemantoFile & { notice: string };
@@ -293,79 +369,39 @@ describe("finding 2: the domain is fixed at the claim, proven against that domai
 // ------------------------------------------------------------------------ the setup backend (part B)
 
 describe("setup: the six-screen backend over docs/spec/setup-api.md", () => {
-  it("start claims and reads at once in held mode; the poll checks DNS itself (once in 10 seconds); the proof promotes the read; Basic finishes inside 600 seconds", async () => {
+  it("start takes the confirmed domain and reads at once, with no company or proof step; Basic finishes inside 600 seconds", async () => {
     const w = await world({ queue: true });
-    const r = await call(w, "POST", "/setup/start", "Bearer ada", { org: "Acme Inc", domain: "https://www.acme.com/" });
+    const r = await call(w, "POST", "/setup/start", "Bearer ada", {});
     expect(r.status).toBe(201);
     const s0 = await json(r);
-    expect(s0).toMatchObject({ trooth_id: "acme", domain: "acme.com", step: "prove", basic: true, read: { status: "queued", held: true } });
-    expect(s0.proof).toMatchObject({ record_type: "TXT", record_name: "_trooth-challenge.acme.com", name_to_type: "_trooth-challenge", record_value: ZERO_CHALLENGE, status: "waiting", provider: { id: "cloudflare", name: "Cloudflare" }, pointer: { record_name: "_trooth.acme.com", record_value: null } });
-    expect(s0.proof.provider.domain_connect_url).toBeUndefined();
-    expect(s0.proof.provider.manual_steps.join(" ")).toContain("_trooth-challenge");
+    expect(s0).toMatchObject({ trooth_id: "acme", org: "Acme Inc", domain: "acme.com", step: "read", basic: true, read: { status: "queued", held: false }, next_action: { label: "Wait for the read", method: "GET" } });
+    expect(s0.proof).toEqual({ source: "trooth_domain_claim", status: "confirmed", confirmed_at: CONFIRMED_AT, confirm_url: "https://trooth.co/dashboard/public-page?tab=domain", pointer: { record_name: "_trooth.acme.com", record_value: null } });
     expect(s0.timings.steps.map((x: any) => x.id)).toEqual(["sign_in", "company", "prove_domain", "read_site", "review", "sign", "install", "check", "monitoring"]);
     expect(s0.timings.steps[0].spent_seconds).toBe(0);
     expect(s0.timings.steps[1].spent_seconds).toBe(20);
+    // A domain confirmed before setup began costs setup no time.
+    expect(s0.timings.steps[2].spent_seconds).toBe(0);
+    expect(w.queued).toHaveLength(1);
+    // Start again from the same workspace: linked, not created, and no second read.
+    expect((await call(w, "POST", "/setup/start", "Bearer ada", { domain: "acme.com" })).status).toBe(200);
     expect(w.queued).toHaveLength(1);
 
-    // The read runs while the owner adds the record; a long read is emailed when it finishes.
+    // A long read is emailed when it finishes, with the link to the Semanto page on trooth.co.
     advance(w, 30_000);
     const messages = await drain(w, () => advance(w, 61_000));
     expect(messages).toBe(3);
-    const held = await json(await call(w, "GET", "/acme/setup", "Bearer ada"));
-    expect(held.read).toMatchObject({ status: "done", held: true });
-    expect(held.read.read).toBeGreaterThan(3);
-    expect(held.read.left_out).toContainEqual({ url: "https://acme.com/login", reason: "Needs a login", code: "login" });
-    expect(w.email.sent.map((m) => m.subject)).toEqual([`Semanto read ${held.read.read} of ${held.read.found} pages on acme.com`]);
+    const read = await json(await call(w, "GET", "/acme/setup", "Bearer ada"));
+    expect(read.read).toMatchObject({ status: "done", held: false });
+    expect(read.read.read).toBeGreaterThan(3);
+    expect(read.read.left_out).toContainEqual({ url: "https://acme.com/login", reason: "Needs a login", code: "login" });
+    expect(w.email.sent.map((m) => m.subject)).toEqual([`Semanto read ${read.read.read} of ${read.read.found} pages on acme.com`]);
     expect(w.email.sent[0]!.to).toEqual(["ada@acme.com"]);
-    // Held: stored, not served, not witnessed.
-    expect((await pub(w, "/acme")).status).toBe(409);
-    expect(await w.ports.log.ledger.size()).toBe(0);
-    expect(held.step).toBe("prove");
-    expect(held.proof.diagnosis.state).toBe("looking");
-    expect(held.proof.diagnosis.resolvers.map((x: any) => x.resolver)).toEqual(["cloudflare-dns.com", "dns.google"]);
-
-    // Live checking is rate limited to once in 10 seconds per company.
-    const lookups: string[] = [];
-    const counting = w.dns.resolvers.map((res) => ({ name: res.name, txt: async (n: string) => (lookups.push(n), res.txt(n)) }));
-    (w.deps as { setupDns: unknown }).setupDns = { resolvers: counting, ns: w.dns.ns };
-    advance(w, 11_000);
-    await call(w, "GET", "/acme/setup", "Bearer ada");
-    const afterFirst = lookups.length;
-    expect(afterFirst).toBe(4);
-    advance(w, 5_000);
-    const quiet = await json(await call(w, "GET", "/acme/setup", "Bearer ada"));
-    expect(lookups.length).toBe(afterFirst);
-    expect(Date.parse(quiet.proof.next_check_at)).toBe(Date.parse(quiet.proof.checked_at) + 10_000);
-
-    // A wrong value, the doubled name, then one resolver only: plain diagnoses, no proof.
-    w.dns.set(dnsClaimName("acme.com"), ["trooth-domain-challenge=ffff"]);
-    advance(w, 11_000);
-    expect((await json(await call(w, "GET", "/acme/setup", "Bearer ada"))).proof).toMatchObject({ status: "found_wrong_value", diagnosis: { state: "wrong_value" } });
-    w.dns.set(dnsClaimName("acme.com"), []);
-    w.dns.set(`${dnsClaimName("acme.com")}.acme.com`, [ZERO_CHALLENGE]);
-    advance(w, 11_000);
-    const doubled = await json(await call(w, "GET", "/acme/setup", "Bearer ada"));
-    expect(doubled.proof.diagnosis).toMatchObject({ state: "doubled_name", fix: "Edit the record and change Name to _trooth-challenge." });
-    w.dns.set(`${dnsClaimName("acme.com")}.acme.com`, []);
-    w.dns.set(dnsClaimName("acme.com"), [ZERO_CHALLENGE], "cloudflare-dns.com");
-    advance(w, 11_000);
-    const prop = await json(await call(w, "GET", "/acme/setup", "Bearer ada"));
-    expect(prop.proof.diagnosis.state).toBe("propagating");
-    expect(prop.proof.diagnosis.detail).toContain("cloudflare-dns.com already sees it");
-    expect(prop.step).toBe("prove");
-
-    // Both resolvers: the poll that finds it records the proof ("found"), promotes the held read, then "proved".
-    w.dns.set(dnsClaimName("acme.com"), [ZERO_CHALLENGE]);
-    advance(w, 11_000);
-    const found = await json(await call(w, "GET", "/acme/setup", "Bearer ada"));
-    expect(found.proof).toMatchObject({ status: "found", method: "dns_txt" });
-    expect(found.read.held).toBe(false);
-    expect(found.step).toBe("read");
-    expect(found.next_action).toEqual({ label: "Finish setup", method: "POST", url: `${OS}/acme/setup/choose` });
+    expect(w.email.sent[0]!.text).toContain("https://trooth.co/dashboard/semanto");
+    expect(read.step).toBe("read");
+    expect(read.next_action).toEqual({ label: "Finish setup", method: "POST", url: `${OS}/acme/setup/choose` });
     const served = await pub(w, "/acme");
     expect(served.status).toBe(200);
     expect(served.headers.get("trooth-semanto-state")).toBe("witnessed-not-signed");
-    expect((await json(await call(w, "GET", "/acme/setup", "Bearer ada"))).proof.status).toBe("proved");
 
     // Save for later and resume persist on the server.
     expect((await json(await call(w, "POST", "/acme/setup/save-for-later", "Bearer cy", { screen: "D" }))).saved_for_later).toBe(true);
@@ -383,11 +419,30 @@ describe("setup: the six-screen backend over docs/spec/setup-api.md", () => {
     expect(done.timings.basic.within_target).toBe(done.timings.basic.spent_seconds <= 600);
   });
 
+  it("a company whose domain is not confirmed yet waits on the trooth.co page; the poll after it is confirmed there records the proof and promotes the held read", async () => {
+    const w = await world({ queue: true });
+    await w.store.putCompany({ trooth_id: "acme", domain: "acme.com", org: "Acme Inc", tier: "basic", current_version: null, custody: "hosted", domain_proven_at: null, os_company_id: "co-acme" });
+    DOMAINS["co-acme"] = [unconfirmed("acme.com")];
+    const s0 = await json(await call(w, "POST", "/setup/start", "Bearer ada", {}));
+    expect(s0).toMatchObject({ trooth_id: "acme", step: "prove", read: { status: "queued", held: true }, proof: { source: null, status: "unconfirmed" }, next_action: { label: "Confirm your domain", method: "GET", url: "https://trooth.co/dashboard/public-page?tab=domain" } });
+    await drain(w);
+    const held = await json(await call(w, "GET", "/acme/setup", "Bearer ada"));
+    expect(held.read).toMatchObject({ status: "done", held: true });
+    expect((await pub(w, "/acme")).status).toBe(409);
+    expect(await w.ports.log.ledger.size()).toBe(0);
+    // Not on the list at all reads as not listed; the step and the action stay the same.
+    DOMAINS["co-acme"] = [];
+    expect((await json(await call(w, "GET", "/acme/setup", "Bearer ada"))).proof.status).toBe("not_listed");
+    DOMAINS["co-acme"] = [confirmed("acme.com")];
+    const found = await json(await call(w, "GET", "/acme/setup", "Bearer ada"));
+    expect(found).toMatchObject({ step: "read", read: { held: false }, proof: { source: "trooth_domain_claim", status: "confirmed", confirmed_at: CONFIRMED_AT } });
+    expect((await pub(w, "/acme")).headers.get("trooth-semanto-state")).toBe("witnessed-not-signed");
+  });
+
   it("the full path: review, confirm, sign, the install check against the site, monitoring, done", async () => {
     const w = await world();
     await call(w, "POST", "/setup/start", "Bearer ada", { org: "Acme Inc", domain: "acme.com" });
-    w.dns.set(dnsClaimName("acme.com"), [ZERO_CHALLENGE]);
-    expect((await json(await call(w, "GET", "/acme/setup", "Bearer ada"))).proof.status).toBe("found");
+    expect((await json(await call(w, "GET", "/acme/setup", "Bearer ada"))).proof).toMatchObject({ source: "trooth_domain_claim", status: "confirmed" });
     expect((await call(w, "POST", "/acme/setup/choose", "Bearer cy", { path: "full" })).status).toBe(403);
     const review = await json(await call(w, "POST", "/acme/setup/choose", "Bearer ada", { path: "full" }));
     expect(review).toMatchObject({ step: "review", basic: false, next_action: { label: "Confirm these facts", method: "POST" } });
@@ -400,11 +455,11 @@ describe("setup: the six-screen backend over docs/spec/setup-api.md", () => {
     expect((await json(wrong)).detail).toBe("This version changed while you were reviewing. Review the changes, then confirm.");
     const confirmed = await json(await call(w, "POST", "/acme/setup/confirm", "Bearer ada", { version: doc.version, root_hash: doc.root_hash }));
     // No passkey yet: the one action is to add one. Signing without a passkey assertion is refused.
-    expect(confirmed.next_action).toMatchObject({ label: "Add a passkey", url: `${OS}/acme/passkeys/options` });
+    expect(confirmed.next_action).toMatchObject({ label: "Add a signing passkey", url: `${OS}/acme/passkeys/options` });
     expect(confirmed.sign).toMatchObject({ custody: "hosted", passkey_required: true, has_passkey: false, two_officer: false });
     const bare = await call(w, "POST", "/acme/sign", "Bearer ada", {});
     expect(bare.status).toBe(409);
-    expect(await json(bare)).toMatchObject({ code: "passkey_missing", title: "Add a passkey first", detail: expect.stringContaining(`${OS}/acme/passkeys/options`) });
+    expect(await json(bare)).toMatchObject({ code: "passkey_missing", title: "Add a signing passkey first", detail: expect.stringContaining(`${OS}/acme/passkeys/options`) });
     expect((await addPasskey(poster(w), "acme", "Bearer ada", await walletOf(w).for("Bearer ada"))).status).toBe(201);
     const ready = await json(await call(w, "GET", "/acme/setup", "Bearer ada"));
     expect(ready.next_action).toMatchObject({ label: "Sign with my passkey", url: `${OS}/acme/sign/options` });
@@ -426,6 +481,17 @@ describe("setup: the six-screen backend over docs/spec/setup-api.md", () => {
     expect(started.monitoring).toMatchObject({ questions: ["Does Acme Inc ship to Canada?"], competitors: [{ name: "Beta Ltd", domain: "beta.example" }] });
     expect(started.timings.full.spent_seconds).not.toBeNull();
     expect(started.timings.not_started).toEqual([]);
+  });
+
+  it("GET reports answers the newest gap report for the Watch page, and null before the first", async () => {
+    const w = await world();
+    await call(w, "POST", "/setup/start", "Bearer ada", {});
+    const none = await json(await call(w, "GET", "/acme/reports", "Bearer cy"));
+    expect(none).toEqual({ object: "semanto.reports", trooth_id: "acme", gap: null });
+    expect((await call(w, "GET", "/acme/reports", "Bearer eve")).status).toBe(401);
+    await call(w, "POST", "/acme/gap-report", "Bearer ada", {});
+    const one = await json(await call(w, "GET", "/acme/reports", "Bearer cy"));
+    expect(one.gap).toMatchObject({ object: "semanto.gap_report", trooth_id: "acme" });
   });
 
   it("the install check names each failure and its fix", async () => {
@@ -812,8 +878,9 @@ describe("findings 10 to 18 (medium)", () => {
 
   it("finding 13: basic/prove never compiles inside the request; it records the proof and queues the read", async () => {
     const w = await world({ queue: true });
-    await call(w, "POST", "/claim", "Bearer ada", { domain: "acme.com", org: "Acme Inc" });
-    w.dns.set(dnsClaimName("acme.com"), [ZERO_CHALLENGE]);
+    await w.store.putCompany({ trooth_id: "acme", domain: "acme.com", org: "Acme Inc", tier: "basic", current_version: null, custody: "hosted", domain_proven_at: null, os_company_id: "co-acme" });
+    await w.store.registerOwner("acme", "u-ada");
+    // Confirmed on trooth.co since the company was linked: prove reads it and queues the read.
     const r = await json(await call(w, "POST", "/acme/basic/prove", "Bearer ada", {}));
     expect(r.body.proved).toBe(true);
     expect(w.site.log).toHaveLength(0);
@@ -942,6 +1009,7 @@ describe("findings 19 to 26 (low)", () => {
     expect(toml).toMatch(/^name = "trooth-semanto-worker-dev"/m);
     for (const name of ["log", "verify", "first-publication"]) {
       const w = await world();
+      DOMAINS["co-acme"] = [confirmed(`${name}.example`)];
       expect((await json(await call(w, "POST", "/claim", "Bearer ada", { domain: `${name}.example`, org: "Fixture" }))).trooth_id).toBe(`${name}-example`);
     }
   });
@@ -997,7 +1065,6 @@ describe("findings 19 to 26 (low)", () => {
     // A Basic page: witnessed, not signed. Strict fails with signature_absent; allowUnsigned passes with the reason shown.
     const w = await world();
     await call(w, "POST", "/claim", "Bearer ada", { domain: "acme.com", org: "Acme Inc" });
-    w.dns.set(dnsClaimName("acme.com"), [ZERO_CHALLENGE]);
     await call(w, "GET", "/acme/setup", "Bearer ada");
     const file = (await w.versions.getCurrent("acme"))!;
     const entry = file.header.pages_manifest[0]!;

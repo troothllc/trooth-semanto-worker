@@ -27,7 +27,6 @@ import type { WorkspaceAuth } from "@/serve/ports";
 import { MemoryHttp as IdentityHttp } from "@/identity/ports";
 import { fetchFromMap, memoryStore } from "@/monitor/ports";
 import { InMemoryCommerceStore } from "@/commerce/ports";
-import { memoryDomainProof } from "@/basic/ports";
 import { MemoryNonceStore } from "@/readers/ports";
 import { MemoryPipelineStore } from "@/pipeline-store";
 import { Pipeline, withCompanies, type PipelineDeps } from "@/pipeline";
@@ -275,7 +274,6 @@ async function world(opts: { custody?: "hosted" | "customer"; development?: bool
     site: { http: fixtureSite(), fetcher: { minIntervalMs: 0 } },
     monitor: { fetch: fetchFromMap({}), store: memoryStore() },
     identity: { http: new IdentityHttp({}) },
-    domainProof: memoryDomainProof({}),
     gapAdapters: () => [],
     nonces: new MemoryNonceStore(),
     webauthn: webauthnConfig({ development: opts.development ?? false }),
@@ -367,11 +365,11 @@ describe("hosted signing releases the key only after a passkey assertion for thi
   it("end to end: refused without a passkey, refused without an assertion, signed after a valid one, recorded in the header", async () => {
     const w = await world();
     const v = await built(w);
-    // No passkey yet: Add a passkey first, naming the options route.
+    // No signing passkey yet: Add a signing passkey first, naming the options route.
     for (const path of ["/acme/sign", "/acme/sign/options"]) {
       const r = await w.post(path, {}, OWNER);
       expect(r.status).toBe(409);
-      expect(await json(r)).toMatchObject({ code: "passkey_missing", title: "Add a passkey first", detail: expect.stringContaining(`${OS}/acme/passkeys/options`) });
+      expect(await json(r)).toMatchObject({ code: "passkey_missing", title: "Add a signing passkey first", detail: expect.stringContaining(`${OS}/acme/passkeys/options`) });
     }
     const { auth, options } = await signOptionsFor(w);
     expect(options).toMatchObject({ version: v.version, root_hash: v.root_hash, publicKey: { rpId: "trooth.co", userVerification: "required", allowCredentials: [{ type: "public-key", id: auth.id }] } });

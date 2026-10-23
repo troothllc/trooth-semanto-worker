@@ -136,28 +136,9 @@ export function wire(env: Env): Wired {
       ...(env.ALERT_FROM ? { from: env.ALERT_FROM } : {}),
     },
     identity: { http: idHttp },
-    domainProof: {
-      dnsTxt: (name) => setupDns.resolvers[0]!.txt(name),
-      // The well-known proof file on the company's domain, through the SSRF guard, capped at 4 KB.
-      fetchText: async (url) => {
-        try {
-          const r = await guardedGet(url, { accept: "text/plain" }, { resolve, maxBytes: 4096 });
-          return r.status === 200 ? new TextDecoder().decode(r.body) : null;
-        } catch {
-          return null;
-        }
-      },
-    },
     setupDns,
     siteProbe,
     staging: new D1BuildStaging(env.DB, env.STORE),
-    domainConnect: {
-      discovery: {
-        resolveTxt: (name) => setupDns.resolvers[0]!.txt(name),
-        fetchJson: async (url) => JSON.parse(new TextDecoder().decode((await guardedGet(url, { accept: "application/json" }, { resolve, maxBytes: 65536 })).body)) as unknown,
-      },
-      ...(env.DOMAIN_CONNECT_PRIVATE_KEY ? { privateKeyPem: env.DOMAIN_CONNECT_PRIVATE_KEY } : {}),
-    },
     receiptStore,
     ...(env.TSA_URL ? { tsa: { url: env.TSA_URL, fetch: platformFetch() } } : {}),
     gapAdapters: () => allAdapters(env, (url, init) => fetch(url, init)),

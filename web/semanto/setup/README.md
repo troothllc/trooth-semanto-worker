@@ -4,6 +4,8 @@
 
 # Semanto setup wizard
 
+Superseded on 22 Oct 2026 (one signup): the Semanto pages now live in trooth-web at `/dashboard/semanto` (the setup guide) and `/dashboard/semanto/read`, `/sign`, `/install` and `/monitor`, rebuilt with trooth-web's own components and fed by its server-side client of this API. Sign-in and the domain proof are trooth.co's own, so screens A (Sign in), B (Your company) and C (Prove your domain) here are no longer used; the API no longer answers the company step or a proof record (docs/spec/setup-api.md, One signup, one domain proof). These files are kept as the reference the trooth-web pages were ported from.
+
 The six screens of `docs/audit/workflow-research.md` section 5 (Sign in, Your company, Prove your domain, What Semanto read, Review and sign, Put it on your site), built against `docs/spec/setup-api.md`. React 19, TypeScript, `"use client"`, lucide-react icons and trooth-web's Tailwind token classes (`text-text-primary`, `border-hairline`, `btn-primary`, `btn-secondary`, `btn-ghost`).
 
 | File | What it is |

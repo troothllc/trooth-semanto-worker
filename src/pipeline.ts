@@ -69,8 +69,7 @@ import { questionsFor, type QuestionKind, type QuestionParams } from "./gap/prom
 import type { ProviderAdapter } from "./gap/providers";
 import { renderGapReportMarkdown, runGapReport, WEEKLY_RUN } from "./gap/report";
 import { buildCompetitorView, MAX_COMPETITORS, renderCompetitorMarkdown, runCompetitorQuestions } from "./gap/competitor";
-import { basicHeaders, basicResponse, claim, cleanDomain, dnsClaimName, dnsClaimRecord, SETUP_STEPS, wellKnownClaimUrl, type BasicCompany } from "./basic/tier";
-import type { DomainProofPort } from "./basic/ports";
+import { basicHeaders, basicResponse, cleanDomain, SETUP_STEPS, type BasicCompany } from "./basic/tier";
 import { createFirstPublication, exportDisputeStatement } from "./basic/first-publication";
 import { checkContentSignalsDrift } from "./basic/content-signals";
 import { formatMinor, parseMinor, signOffer, type Availability, type OfferInput } from "./commerce/offers";
@@ -87,8 +86,8 @@ import type { LedgerLogPort } from "./serve/ledger-port";
 import { PROBLEMS, type ProblemCode } from "./serve/errors";
 import type { PipelineStore, StoredVersion } from "./pipeline-store";
 import type { SetupDnsPort } from "./setup/ports";
-import type { DiscoveryDeps } from "./setup/domain-connect";
-import { checkProof, ensureSetup, setupAction, setupAfterBuild, setupReview, setupSession, setupState, stampStep } from "./pipeline-setup";
+import { DOMAINS_PROOF_HEADER, troothOsWorkspaceDomains } from "./setup/workspace-domains";
+import { ensureSetup, syncDomainProof, setupAction, setupAfterBuild, setupReview, setupSession, setupState, stampStep } from "./pipeline-setup";
 import { checkSigningAssertion, passkeyOptions, registerPasskey, signOptions } from "./pipeline-passkeys";
 import { webauthnConfig, type WebAuthnConfig } from "./identity/webauthn";
 export type { WebBotAuthResult };
@@ -124,7 +123,6 @@ export interface PipelineDeps {
   site: { http: SiteHttpPort; resolve?: Resolver; fetcher?: FetcherOptions };
   monitor: { fetch: MonitorFetchPort; store: MonitorStorePort; email?: EmailPort; tokens?: TokenPort; from?: string; actionUrl?: string };
   identity: { http: IdentityHttpPort };
-  domainProof: DomainProofPort;
   /** RFC 3161 time-stamp authority, when TSA_URL is set. */
   tsa?: { url: string; fetch: LedgerFetchPort };
   /** The gap report's providers (src/gap/providers.ts allAdapters with the Env keys in the Worker). */
@@ -135,12 +133,10 @@ export interface PipelineDeps {
   inlineBuilds?: boolean;
   /** Where a build is kept while it runs (D1 and R2 in the Worker). In memory when absent. */
   staging?: BuildStagingPort;
-  /** DNS over HTTPS lookups for the setup proof: two resolvers and the NS records. Without it, domainProof.dnsTxt is the one resolver. */
+  /** DNS over HTTPS lookups (host detection reads TXT records through it). Setup has no DNS proof of its own: a domain is proven on trooth.co (src/setup/workspace-domains.ts). */
   setupDns?: SetupDnsPort;
   /** One GET to the company's own site through the SSRF guard: host detection and the install check. */
   siteProbe?: (url: string, headers: Record<string, string>) => Promise<{ status: number; headers: Record<string, string>; body: Uint8Array } | null>;
-  /** Domain Connect: discovery and, once a provider has onboarded the template, the signing key for the apply link. */
-  domainConnect?: { discovery: DiscoveryDeps; privateKeyPem?: string; redirectUri?: string };
   /** Read receipts, for the digest and the CSV export. */
   receiptStore?: ReceiptStore;
   /** Random bytes, injectable for tests. */
@@ -380,7 +376,7 @@ export class Pipeline implements WorkspaceHandlers {
       const m = message as unknown as CompaniesMessage;
       if (m.job === "changes") await this.checkCompanyChanges(m.trooth_ids);
       else if (m.job === "gap") await this.gapReportsFor(m.trooth_ids);
-      else await this.checkPendingProofs(m.trooth_ids);
+      // Any other job (the retired "proof" job of a message queued before one signup) is acknowledged and dropped.
       return;
     }
     if (typeof message.trooth_id !== "string") throw new Error("compile: the message is not a CompileJob");
@@ -443,7 +439,7 @@ export class Pipeline implements WorkspaceHandlers {
           return await this.basicClaim(ws, trooth_id, body);
         case "basic/prove":
           if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
-          return await this.basicProve(trooth_id);
+          return await this.basicProve(ws, trooth_id);
         case "first-publication":
           if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
           return await this.firstPublication(trooth_id, body);
@@ -469,7 +465,7 @@ export class Pipeline implements WorkspaceHandlers {
     try {
       switch (what) {
         case "setup":
-          return ok(200, await setupState(this, trooth_id, { live: true, user_id: ws.user_id }));
+          return ok(200, await setupState(this, trooth_id, { live: true, user_id: ws.user_id, ...(ws.domains ? { domains: ws.domains } : {}) }));
         case "setup/review":
           return await setupReview(this, trooth_id);
         case "keys":
@@ -480,6 +476,8 @@ export class Pipeline implements WorkspaceHandlers {
           return await this.receiptsDigest(trooth_id, query.day);
         case "receipts.csv":
           return await this.receiptsCsvRead(trooth_id, query.from, query.to);
+        case "reports":
+          return ok(200, { object: "semanto.reports", trooth_id, gap: await this.d.store.latestGapReport(trooth_id) });
       }
     } catch (e) {
       return this.failed(what, e);
@@ -732,35 +730,27 @@ export class Pipeline implements WorkspaceHandlers {
     // The domain is the one fixed at the claim; a request never changes it.
     const asked = str(body.domain) ? cleanDomain(str(body.domain)!) : company.domain;
     if (asked !== company.domain) return problem("domain_fixed", `This company's domain is ${company.domain}, fixed when it was claimed. It cannot change to ${str(body.domain)}.`);
-    const setup = await ensureSetup(this, company, { user_id: ws.user_id, email: ws.name.includes("@") ? ws.name : null, signed_in_at: null });
-    const c = (await this.d.store.getBasic(trooth_id)) ?? claim(trooth_id, company.domain, setup.challenge, new Date(setup.challenge_issued_at));
-    await this.d.store.putBasic(c.claim_token === setup.challenge ? c : { ...c, claim_token: setup.challenge });
+    await ensureSetup(this, company, { user_id: ws.user_id, email: ws.name.includes("@") ? ws.name : null, signed_in_at: null });
     await this.d.store.registerOwner(trooth_id, ws.user_id);
-    return ok(200, {
-      object: "semanto.basic_claim",
-      trooth_id,
-      domain: company.domain,
-      state: isDomainProven(company) ? "domain_proved" : "claim",
-      dns: { name: dnsClaimName(company.domain), type: "TXT", value: dnsClaimRecord(setup.challenge) },
-      well_known: { url: wellKnownClaimUrl(company.domain), body: setup.challenge },
-      steps: SETUP_STEPS,
-    });
+    // One proof, on trooth.co: the domain's state there is the answer; there is no record to publish for Semanto.
+    const proof = await syncDomainProof(this, company, ws.domains);
+    return ok(200, { object: "semanto.basic_claim", trooth_id, domain: company.domain, state: proof.proven ? "domain_proved" : "claim", proof: proof.doc, steps: SETUP_STEPS });
   }
 
-  /** Check the proof record for the company's own domain; when found, record the proof and queue the read (or promote a finished held read). Never compiles inside the request. */
-  private async basicProve(trooth_id: string): Promise<WorkspaceResult> {
+  /** Read the domain's state on trooth.co; when it is confirmed there, record the proof and queue the read (or promote a finished held read). Never compiles inside the request. */
+  private async basicProve(ws: WorkspaceAuth, trooth_id: string): Promise<WorkspaceResult> {
     const company = await this.d.store.getCompany(trooth_id);
     if (!company) return problem("conflict", "Claim the domain first.");
-    const outcome = await checkProof(this, company, { force: true });
-    const state = await setupState(this, trooth_id, { live: false });
-    const basic: BasicCompany = { trooth_id, domain: company.domain, state: outcome.proven ? "domain_proved" : "claim", claim_token: outcome.challenge, claimed_at: outcome.claimed_at };
+    const outcome = await syncDomainProof(this, company, ws.domains);
+    const state = await setupState(this, trooth_id, { live: false, user_id: ws.user_id, ...(ws.domains ? { domains: ws.domains } : {}) });
+    const setup = (await this.d.store.getSetup(trooth_id))!;
+    const basic: BasicCompany = { trooth_id, domain: company.domain, state: outcome.proven ? "domain_proved" : "claim", claim_token: setup.challenge, claimed_at: setup.steps.company ?? setup.started_at };
     return ok(200, basicResponse(basic, {
       object: "semanto.basic_proof",
       trooth_id,
       proved: outcome.proven,
-      method: outcome.method,
-      checked: { dns_name: dnsClaimName(company.domain), well_known_url: wellKnownClaimUrl(company.domain) },
-      diagnosis: state.proof?.diagnosis ?? null,
+      method: outcome.doc.source,
+      proof: outcome.doc,
       read: state.read,
       setup: state.timings,
     }), basicHeaders());
@@ -1135,14 +1125,14 @@ export class Pipeline implements WorkspaceHandlers {
     return out;
   }
 
-  /** Hourly: queue change detection for every signed company, and a proof check for every company still proving its domain. */
+  /**
+   * Hourly: queue change detection for every signed company. There is no
+   * pending-proof sweep: a domain is proven on trooth.co, and Semanto reads
+   * that confirmation with the person's own credential when they next open
+   * setup (src/setup/workspace-domains.ts).
+   */
   async hourlyChangeDetection(): Promise<{ trooth_id: string; changed: string[] }[]> {
     const signed = (await this.d.store.listCompanies("signed")).map((c) => c.trooth_id);
-    const pending = (await this.d.store.listCompanies("all")).filter((c) => !isDomainProven(c)).map((c) => c.trooth_id);
-    await this.fanOut("proof", pending, async (ids) => {
-      await this.checkPendingProofs(ids);
-      return [];
-    });
     return this.fanOut("changes", signed, (ids) => this.checkCompanyChanges(ids));
   }
 
@@ -1188,15 +1178,6 @@ export class Pipeline implements WorkspaceHandlers {
     const n = changed.length;
     const text = `${n} page${n === 1 ? "" : "s"} on ${company.domain} changed after your last signature. Readers get the last signed copy marked behind until you sign the new version.\n\nSign it here: ${this.d.config.network_base}/${company.trooth_id}\n`;
     await this.d.monitor.email.send({ from: this.d.monitor.from, to, subject: `${n} page${n === 1 ? "" : "s"} on ${company.domain} changed: sign the new version`, text, html: `<p>${text.replace(/\n/g, "<br>")}</p>` });
-  }
-
-  /** For these companies, look for the proof record again (hourly, inside the 72-hour window), so a proof added after the owner left is still found. */
-  async checkPendingProofs(trooth_ids: string[]): Promise<void> {
-    for (const trooth_id of trooth_ids) {
-      const company = await this.d.store.getCompany(trooth_id);
-      if (!company || isDomainProven(company)) continue;
-      await checkProof(this, company, { force: true, background: true });
-    }
   }
 
   /** Nightly: sign a tree head, anchor it with an RFC 3161 timestamp, and re-sign every revocation list (each company's and everyone's). */
@@ -1437,31 +1418,58 @@ export interface ServiceFetcher {
   fetch(input: Request | string, init?: RequestInit): Promise<Response>;
 }
 
-/** The address worker-f answers a session check at; it reads the bearer token against app_sessions. */
-export const TROOTH_OS_SESSION_URL = "https://trooth-os-worker-f/auth/session";
+/**
+ * The address worker-f answers a session check at; it reads the bearer token
+ * against app_sessions. Reached through the TROOTH_OS binding, which ignores
+ * the host; the public host is kept so a DPoP proof trooth.co's server signed
+ * for this exact address (RFC 9449, htu) passes worker-f's gate.
+ */
+export const TROOTH_OS_SESSION_URL = "https://api.trooth.co/auth/session";
+
+/** The header trooth.co's server sends with the DPoP proof for TROOTH_OS_SESSION_URL. */
+export const SESSION_PROOF_HEADER = "trooth-os-session-proof";
 
 const ROLES: WorkspaceRole[] = ["owner", "admin", "member", "viewer"];
+/** A DPoP proof is a compact JWS: three base64url parts. Anything else is not forwarded. */
+const PROOF_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+const proofFrom = (req: Request, header: string): string | null => {
+  const v = req.headers.get(header)?.trim() ?? "";
+  return v.length <= 4096 && PROOF_RE.test(v) ? v : null;
+};
 
 /**
  * Read a worker-f session through the TROOTH_OS service binding (GET
  * /auth/session in worker-f app-api.ts, read 22 Oct 2026). That route answers
- * { authenticated, companyId, userId, email, role } where role is the account
- * type, "vendor" or "buyer", and, once worker-f has team seats, workspaceRole
- * (owner, admin, member, viewer); companySlug (the app_company_profile slug)
- * and signedInAt when it sends them. Null when there is no binding, no token,
- * a refused session, or a buyer account (it has no company to act for). This
- * is the claim variant of authorization: a valid session with no Semanto
- * company yet (POST /os/semanto/claim, POST /os/semanto/setup/start, GET
- * /os/semanto/setup).
+ * { authenticated, companyId, userId, email, role, companyName } where role is
+ * the account type, "vendor" or "buyer", and, once worker-f has team seats,
+ * workspaceRole (owner, admin, member, viewer); companySlug (the
+ * app_company_profile slug) and signedInAt when it sends them. Null when there
+ * is no binding, no token, a refused session, or a buyer account (it has no
+ * company to act for). This is the claim variant of authorization: a valid
+ * session with no Semanto company yet (POST /os/semanto/claim, POST
+ * /os/semanto/setup/start, GET /os/semanto/setup).
+ *
+ * worker-f accepts a session token only with a DPoP proof signed by
+ * trooth.co's server key when SESSION_DPOP_REQUIRED is on (worker-f
+ * src/dpop.ts). The bearer cannot carry a proof for another address, so
+ * trooth.co's server signs one proof for each worker-f address this Worker
+ * reads and sends them as Trooth-Os-Session-Proof and Trooth-Os-Domains-Proof;
+ * each is used once, with the DPoP scheme. Without them the plain bearer is
+ * sent, which worker-f accepts only where proofs are not required.
+ *
+ * The session also carries the WorkspaceDomains port bound to this caller
+ * (src/setup/workspace-domains.ts): the workspace's domains on trooth.co.
  */
 export function troothOsSession(service: ServiceFetcher | undefined): (req: Request) => Promise<WorkspaceSession | null> {
   return async (req) => {
     if (!service) return null;
     const auth = req.headers.get("authorization");
     if (!auth || !/^Bearer\s+\S+$/i.test(auth)) return null;
+    const token = auth.replace(/^Bearer\s+/i, "").trim();
+    const sessionProof = proofFrom(req, SESSION_PROOF_HEADER);
     let res: Response;
     try {
-      res = await service.fetch(TROOTH_OS_SESSION_URL, { method: "GET", headers: { authorization: auth, accept: "application/json" } });
+      res = await service.fetch(TROOTH_OS_SESSION_URL, { method: "GET", headers: sessionProof ? { authorization: `DPoP ${token}`, dpop: sessionProof, accept: "application/json" } : { authorization: auth, accept: "application/json" } });
     } catch {
       return null;
     }
@@ -1488,6 +1496,8 @@ export function troothOsSession(service: ServiceFetcher | undefined): (req: Requ
       company_slug: str(j.companySlug) ?? null,
       signed_in_at: signedIn && !Number.isNaN(Date.parse(signedIn)) ? new Date(signedIn).toISOString() : null,
       email,
+      company_name: str(j.companyName) ?? null,
+      domains: troothOsWorkspaceDomains(service, { token, proof: proofFrom(req, DOMAINS_PROOF_HEADER) }),
     };
   };
 }
@@ -1522,6 +1532,6 @@ export function troothOsAuthorize(
       const owner = await ownerUserIdFor(trooth_id);
       role = owner !== null && s.user_id !== "unknown" && owner === s.user_id ? "owner" : "member";
     }
-    return { trooth_id, role, user_id: s.user_id, name: s.name };
+    return { trooth_id, role, user_id: s.user_id, name: s.name, ...(s.domains ? { domains: s.domains } : {}) };
   };
 }
