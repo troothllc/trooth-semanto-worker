@@ -20,7 +20,7 @@
 #
 # Founder steps before the first deploy: create the D1 database and the KV namespace and put their
 # ids where REPLACE_WITH_ stands below; create the R2 bucket trooth-semanto and the queues
-# trooth-semanto-compile and trooth-semanto-compile-dlq; apply migrations 0001 to 0007 with
+# trooth-semanto-compile and trooth-semanto-compile-dlq; apply migrations 0001 to 0009 with
 # `wrangler d1 migrations apply trooth_semanto --env production`. Each migration from 0007 on has a down
 # file in migrations-down/ (never applied by wrangler).
 
@@ -123,7 +123,7 @@ LEDGER_URL = "https://api.trooth.co/public/semanto/log"
 [[env.production.d1_databases]]
 binding = "DB"
 database_name = "trooth_semanto"
-database_id = "REPLACE_WITH_D1_ID"
+database_id = "e4437dec-8720-4d78-8844-9598a3469ca8"
 
 [[env.production.r2_buckets]]
 binding = "STORE"
@@ -131,7 +131,7 @@ bucket_name = "trooth-semanto"
 
 [[env.production.kv_namespaces]]
 binding = "CACHE"
-id = "REPLACE_WITH_KV_ID"
+id = "df73a4ab9c1f40edac464212efca6149"
 
 [[env.production.queues.producers]]
 binding = "COMPILE_QUEUE"
