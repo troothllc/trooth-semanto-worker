@@ -127,7 +127,7 @@ export const r2Key = {
 
 /** The company columns every company read selects; custody is the newest unrevoked key's, else the row's. */
 const COMPANY_COLUMNS = `c.trooth_id, c.domain, c.org, c.tier, c.legal_name, c.lei, c.current_version, c.basic_version, c.domain_proven_at, c.os_company_id,
-              COALESCE((SELECT k.custody FROM semanto_keys k WHERE k.trooth_id = c.trooth_id AND k.revoked_at IS NULL ORDER BY k.created_at DESC LIMIT 1), c.custody) AS custody`;
+              COALESCE((SELECT k.custody FROM semanto_keys k WHERE k.trooth_id = c.trooth_id AND k.revoked_at IS NULL AND k.pending = 0 ORDER BY k.created_at DESC LIMIT 1), c.custody) AS custody`;
 
 export async function selectCompanyByOsCompany(db: D1Database, os_company_id: string): Promise<CompanyRecord | null> {
   const row = await db.prepare(`SELECT ${COMPANY_COLUMNS} FROM semanto_companies c WHERE c.os_company_id = ?1`).bind(os_company_id).first<CompanyRow>();
@@ -318,7 +318,8 @@ export async function selectKeyByKid(db: D1Database, kid: string): Promise<(Publ
 }
 
 export async function selectHostedKid(db: D1Database, trooth_id: string): Promise<string | null> {
-  const r = await db.prepare(`SELECT kid FROM semanto_keys WHERE trooth_id = ?1 AND custody = 'hosted' AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1`).bind(trooth_id).first<{ kid: string }>();
+  // A key staged as next (pending = 1) is published but never signs before its rotation is confirmed.
+  const r = await db.prepare(`SELECT kid FROM semanto_keys WHERE trooth_id = ?1 AND custody = 'hosted' AND revoked_at IS NULL AND pending = 0 ORDER BY created_at DESC LIMIT 1`).bind(trooth_id).first<{ kid: string }>();
   return r?.kid ?? null;
 }
 
@@ -831,10 +832,10 @@ export class D1PipelineStore implements PipelineStore {
   }
 
   async keys(trooth_id: string): Promise<CompanyKey[]> {
-    const { results } = await this.db.prepare(`SELECT kid, public_jwk, custody, nbf, exp, revoked_at, created_at FROM semanto_keys WHERE trooth_id = ?1 ORDER BY created_at`).bind(trooth_id).all<KeyRow & { created_at: string }>();
+    const { results } = await this.db.prepare(`SELECT kid, public_jwk, custody, nbf, exp, revoked_at, created_at, pending FROM semanto_keys WHERE trooth_id = ?1 ORDER BY created_at`).bind(trooth_id).all<KeyRow & { created_at: string; pending: number }>();
     return results.map((r) => {
       const jwk = JSON.parse(r.public_jwk) as PublicJwk;
-      return { public_jwk: { ...jwk, ...(r.nbf ? { nbf: r.nbf } : {}), ...(r.exp ? { exp: r.exp } : {}), ...(r.revoked_at ? { revoked_at: r.revoked_at } : {}) }, custody: r.custody, created_at: r.created_at };
+      return { public_jwk: { ...jwk, ...(r.nbf ? { nbf: r.nbf } : {}), ...(r.exp ? { exp: r.exp } : {}), ...(r.revoked_at ? { revoked_at: r.revoked_at } : {}) }, custody: r.custody, created_at: r.created_at, ...(r.pending ? { next: true } : {}) };
     });
   }
 
@@ -846,10 +847,10 @@ export class D1PipelineStore implements PipelineStore {
     const { nbf, exp, revoked_at, ...pub } = key.public_jwk;
     await this.db
       .prepare(
-        `INSERT INTO semanto_keys (kid, trooth_id, public_jwk, custody, nbf, exp, revoked_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(kid) DO UPDATE SET public_jwk = excluded.public_jwk, nbf = excluded.nbf, exp = excluded.exp, revoked_at = excluded.revoked_at`,
+        `INSERT INTO semanto_keys (kid, trooth_id, public_jwk, custody, nbf, exp, revoked_at, created_at, pending) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(kid) DO UPDATE SET public_jwk = excluded.public_jwk, nbf = excluded.nbf, exp = excluded.exp, revoked_at = excluded.revoked_at, pending = excluded.pending`,
       )
-      .bind(key.public_jwk.kid, trooth_id, JSON.stringify(pub), key.custody, nbf ?? null, exp ?? null, revoked_at ?? null, key.created_at)
+      .bind(key.public_jwk.kid, trooth_id, JSON.stringify(pub), key.custody, nbf ?? null, exp ?? null, revoked_at ?? null, key.created_at, key.next ? 1 : 0)
       .run();
   }
 
@@ -867,11 +868,13 @@ export class D1PipelineStore implements PipelineStore {
     await this.db.prepare(`UPDATE semanto_companies SET os_owner_user_id = ?2 WHERE trooth_id = ?1 AND os_owner_user_id IS NULL`).bind(trooth_id, user_id).run();
   }
 
-  async putConnectorKey(trooth_id: string, jwk: PublicJwk, source: string, created_at: string): Promise<void> {
-    await this.db
-      .prepare(`INSERT OR REPLACE INTO semanto_connector_keys (kid, trooth_id, public_jwk, source, created_at, revoked_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL)`)
-      .bind(jwk.kid, trooth_id, JSON.stringify(jwk), source, created_at)
-      .run();
+  /** Insert only: a kid on file (any company, revoked or not) is never replaced, so a race can neither move a key to another company nor clear its revocation. */
+  async putConnectorKey(trooth_id: string, jwk: PublicJwk, source: string, created_at: string, label: string | null = null): Promise<boolean> {
+    const r = await this.db
+      .prepare(`INSERT INTO semanto_connector_keys (kid, trooth_id, public_jwk, source, created_at, revoked_at, label) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6) ON CONFLICT(kid) DO NOTHING RETURNING kid`)
+      .bind(jwk.kid, trooth_id, JSON.stringify(jwk), source, created_at, label)
+      .first<{ kid: string }>();
+    return r !== null;
   }
 
   async revocations(trooth_id: string | null): Promise<RevocationEntry[]> {
@@ -1184,6 +1187,10 @@ export class D1CommerceStore implements CommerceStore {
       .prepare(`INSERT OR REPLACE INTO semanto_sellers (trooth_id, attestation_id, seller_domain, attestation_json, jws, not_after, withdrawn_at) VALUES (?1, ?2, ?3, ?4, '', ?5, ?6)`)
       .bind(brand_trooth_id, entry.attestation.id, entry.attestation.seller_domain, JSON.stringify(entry.attestation), entry.attestation.not_after ?? null, entry.withdrawn_at ?? null)
       .run();
+  }
+  async removeOffers(trooth_id: string, sku: string): Promise<number> {
+    const { results } = await this.db.prepare(`DELETE FROM semanto_offers WHERE trooth_id = ?1 AND sku = ?2 RETURNING offer_id`).bind(trooth_id, sku).all<{ offer_id: string }>();
+    return results.length;
   }
   async putRecall(trooth_id: string, s: SignedRecall): Promise<void> {
     await this.db

@@ -317,9 +317,9 @@ func TestStateOf(t *testing.T) {
 	}
 }
 
-// Review finding 19: the kit's registry matches src/core/jws.ts JWS_TYPES, marketplaceCatalog included.
+// Review finding 19: the kit's registry matches src/core/jws.ts JWS_TYPES, marketplaceCatalog and sellerList included.
 func TestJWSTypesIncludeEveryCoreType(t *testing.T) {
-	if JWSTypes["marketplaceCatalog"] != "https://trooth.co/types/marketplace-catalog" || len(JWSTypes) != 13 {
+	if JWSTypes["marketplaceCatalog"] != "https://trooth.co/types/marketplace-catalog" || JWSTypes["sellerList"] != "https://trooth.co/types/seller-list" || len(JWSTypes) != 14 {
 		t.Fatalf("JWSTypes: %v", JWSTypes)
 	}
 }

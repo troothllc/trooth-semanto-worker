@@ -1,0 +1,42 @@
+{
+  "name": "trooth-semanto-shopify-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Semanto by Trooth for Shopify: connects a store to its Trooth company record, keeps the signed product records current, and adds the Semanto head tag through an app embed.",
+  "type": "module",
+  "license": "LicenseRef-Trooth-Proprietary",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "react-router build",
+    "dev": "shopify app dev",
+    "deploy:app": "shopify app deploy",
+    "deploy:worker": "react-router build && wrangler deploy",
+    "typecheck": "react-router typegen && tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate": "wrangler d1 migrations apply trooth-shopify-app --remote"
+  },
+  "dependencies": {
+    "@shopify/app-bridge-react": "4.2.14",
+    "@shopify/shopify-app-react-router": "3.0.2",
+    "@shopify/shopify-app-session-storage": "7.0.1",
+    "isbot": "5.2.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router": "7.18.2"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.64.0",
+    "@cloudflare/workers-types": "5.20261019.1",
+    "@react-router/dev": "7.18.2",
+    "@shopify/polaris-types": "1.1.0",
+    "@types/node": "22.18.0",
+    "@types/react": "18.3.25",
+    "@types/react-dom": "18.3.7",
+    "typescript": "5.9.3",
+    "vite": "7.3.1",
+    "vitest": "3.2.7",
+    "wrangler": "4.152.0"
+  }
+}

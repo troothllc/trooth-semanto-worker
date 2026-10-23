@@ -6,3 +6,6 @@ dist
 coverage
 __pycache__/
 .pytest_cache/
+
+# The QA harness writes its runs, local databases and screenshots here (qa/README.md).
+qa/.run/

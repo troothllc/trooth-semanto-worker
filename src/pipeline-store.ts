@@ -43,6 +43,20 @@ export interface CompanyConfig {
   public_record_facts: Fact[];
   /** Write-back targets the company connected (GET /os/semanto/{id}/writeback previews against them). */
   writeback?: { merchant_center?: MerchantCenterTarget; business_profile_location?: string };
+  /** The surfaces the company lists on its settings screen (src/os/company.ts), beyond its own website. */
+  company_surfaces?: CompanySurface[];
+}
+
+/** A place the company's signed record is copied to or read from (docs/spec/os-api.md, company settings). */
+export interface CompanySurface {
+  kind: "website" | "merchant_center" | "business_profile" | "marketplace" | "app";
+  id: string;
+  label: string;
+  url?: string;
+  /** Merchant Center only: the API data source products are inserted into (accounts/{id}/dataSources/{id}). */
+  data_source?: string;
+  content_language?: string;
+  feed_label?: string;
 }
 
 export const DEFAULT_CONFIG: CompanyConfig = {
@@ -92,6 +106,24 @@ export interface CompanyKey {
   public_jwk: PublicJwk;
   custody: Custody;
   created_at: string;
+  /**
+   * Staged rotation (docs/spec/os-api.md): the key is published in the JWK
+   * Set so verifiers learn it, and is not used to sign until the rotation is
+   * confirmed. Signing paths skip a key with next set.
+   */
+  next?: boolean;
+}
+
+/** A connector key row as the in-memory store keeps it (semanto_connector_keys in D1). */
+export interface MemoryConnector {
+  jwk: PublicJwk;
+  source: string;
+  created_at: string;
+  label?: string | null;
+  revoked_at?: string | null;
+  last_request_at?: string | null;
+  last_result?: "ok" | "signature_failed" | null;
+  last_ok_at?: string | null;
 }
 
 export interface PipelineStore extends BodyPort {
@@ -174,7 +206,8 @@ export interface PipelineStore extends BodyPort {
   /** Insert or replace a key by kid. A hosted key's private half is stored sealed; a customer key never has one. The newest key sets the company's custody. */
   putKey(trooth_id: string, key: CompanyKey, privateJwk: PrivateJwk | null): Promise<void>;
   connectorKeys(trooth_id: string): Promise<PublicJwk[]>;
-  putConnectorKey(trooth_id: string, jwk: PublicJwk, source: string, created_at: string): Promise<void>;
+  /** Register a connector key once: false when the kid is on file already, for this company or another, revoked or not (a kid never moves or comes back). */
+  putConnectorKey(trooth_id: string, jwk: PublicJwk, source: string, created_at: string, label?: string | null): Promise<boolean>;
   /** The worker-f user registered as the company's owner (semanto_companies.os_owner_user_id), or null. */
   ownerUserId(trooth_id: string): Promise<string | null>;
   /** Register the owner when there is none yet (the first to create or claim the company). Never replaces an owner. */
@@ -212,7 +245,7 @@ export class MemoryPipelineStore implements PipelineStore {
   readonly passkeyChallenges = new Map<string, PasskeyChallenge>();
   readonly companyKeys = new Map<string, CompanyKey[]>();
   readonly privateKeys = new Map<string, PrivateJwk>();
-  readonly connectors = new Map<string, { jwk: PublicJwk; source: string; created_at: string }[]>();
+  readonly connectors = new Map<string, MemoryConnector[]>();
   readonly revocationEntries: { trooth_id: string | null; entry: RevocationEntry }[] = [];
   readonly revocationLists: { trooth_id: string | null; jws: string; issued_at: string }[] = [];
   readonly gapReports: GapReport[] = [];
@@ -455,13 +488,15 @@ export class MemoryPipelineStore implements PipelineStore {
     const c = this.versions.companies.get(trooth_id);
     if (!c) return;
     c.jwks = { keys: list.map((k) => k.public_jwk) };
-    const newest = [...list].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))[0]!;
+    // A key staged as next is published but neither signs nor sets the custody until its rotation is confirmed.
+    const settled = list.filter((k) => !k.next);
+    const newest = [...(settled.length ? settled : list)].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))[0]!;
     c.record = { ...c.record, custody: newest.custody };
-    const hosted = list.filter((k) => k.custody === "hosted" && !k.public_jwk.revoked_at && !k.public_jwk.exp).sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
+    const hosted = settled.filter((k) => k.custody === "hosted" && !k.public_jwk.revoked_at && !k.public_jwk.exp).sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
     c.hostedKey = hosted ? (this.privateKeys.get(hosted.public_jwk.kid) ?? null) : null;
   }
   async connectorKeys(trooth_id: string): Promise<PublicJwk[]> {
-    return (this.connectors.get(trooth_id) ?? []).map((c) => c.jwk);
+    return (this.connectors.get(trooth_id) ?? []).filter((c) => !c.revoked_at).map((c) => c.jwk);
   }
   readonly owners = new Map<string, string>();
   async ownerUserId(trooth_id: string): Promise<string | null> {
@@ -470,10 +505,12 @@ export class MemoryPipelineStore implements PipelineStore {
   async registerOwner(trooth_id: string, user_id: string): Promise<void> {
     if (!this.owners.has(trooth_id)) this.owners.set(trooth_id, user_id);
   }
-  async putConnectorKey(trooth_id: string, jwk: PublicJwk, source: string, created_at: string): Promise<void> {
-    const list = (this.connectors.get(trooth_id) ?? []).filter((c) => c.jwk.kid !== jwk.kid);
-    list.push({ jwk, source, created_at });
+  async putConnectorKey(trooth_id: string, jwk: PublicJwk, source: string, created_at: string, label: string | null = null): Promise<boolean> {
+    for (const l of this.connectors.values()) if (l.some((c) => c.jwk.kid === jwk.kid)) return false;
+    const list = this.connectors.get(trooth_id) ?? [];
+    list.push({ jwk, source, created_at, label, revoked_at: null, last_request_at: null, last_result: null, last_ok_at: null });
     this.connectors.set(trooth_id, list);
+    return true;
   }
 
   async revocations(trooth_id: string | null): Promise<RevocationEntry[]> {

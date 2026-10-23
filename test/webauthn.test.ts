@@ -479,7 +479,8 @@ describe("hosted signing releases the key only after a passkey assertion for thi
     const w = await world();
     const v = await built(w);
     const auth = await w.wallet.for("Bearer member-token");
-    expect((await addPasskey(w.post, "acme", "Bearer member-token", auth)).status).toBe(201);
+    // A member cannot add a signing passkey at all (QA-10), and cannot sign.
+    expect((await w.post("/acme/passkeys/options", {}, "Bearer member-token")).status).toBe(403);
     const opts = await w.post("/acme/sign/options", {}, "Bearer member-token");
     expect(opts.status).toBe(403);
     // Even an assertion made against the owner's options is refused for the member.

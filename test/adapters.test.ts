@@ -312,6 +312,19 @@ describe("adapters/shared handleRequest", () => {
   }) as typeof fetch;
   const next = async (req: Request) => new Response(`<html>${new URL(req.url).pathname}</html>`, { headers: { "Content-Type": "text/html; charset=utf-8" } });
 
+  it("answers the kid of its connector key, and only the kid, at /.well-known/trooth-semanto-connector (the dashboard's connection test)", async () => {
+    const key = await generateConnectorKey();
+    const withKey = { ...config, connectorKey: JSON.stringify(key.privateJwk) };
+    const res = await handleRequest({ request: new Request("https://acme.com/.well-known/trooth-semanto-connector"), config: withKey, manifestCache: null, fetchImpl, next });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({ kid: key.publicJwk.kid, trooth_id: config.troothId ?? null });
+    expect(text).not.toContain(key.privateJwk.d);
+    // Without a key the path is the host's.
+    const none = await handleRequest({ request: new Request("https://acme.com/.well-known/trooth-semanto-connector"), config, manifestCache: null, fetchImpl, next });
+    expect(await none.text()).toBe("<html>/.well-known/trooth-semanto-connector</html>");
+  });
+
   it("returns the API's bytes and the listed headers for a markdown request", async () => {
     const cache = createManifestCache({ config, fetchImpl });
     const res = await handleRequest({ request: new Request("https://acme.com/pricing", { headers: { Accept: "text/markdown" } }), config, manifestCache: cache, fetchImpl, next });

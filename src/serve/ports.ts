@@ -189,8 +189,8 @@ export interface JobPort {
   hourlyChangeDetection(): Promise<void>;
   nightlyCheckpoint(): Promise<void>;
   weeklyGapReports(): Promise<void>;
-  /** One queue message: a compile job, a build stage or a per-company fan-out. */
-  compile(job: unknown): Promise<void>;
+  /** One queue message: a compile job, a build stage, a per-company fan-out, or a workspace job (writeback, recall_event, credential). attempts is the queue's count, 1 on the first delivery. */
+  compile(job: unknown, attempts?: number): Promise<void>;
   /** A message that failed its last attempt (it goes to the dead letter queue next). */
   failed?(job: unknown, error: unknown): Promise<void>;
 }
@@ -266,7 +266,7 @@ export interface WorkspaceResult {
   body?: unknown;
   /** A body that is not JSON (receipts.csv), with its content type. */
   raw?: { contentType: "text/csv"; text: string };
-  problem?: { code: ProblemCode; detail: string };
+  problem?: { code: ProblemCode; detail: string; extensions?: Record<string, unknown> };
   /** Extra headers (Basic's Trooth-Record-State, say), set before the response is signed. */
   headers?: Record<string, string>;
 }

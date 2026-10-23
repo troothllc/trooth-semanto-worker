@@ -16,11 +16,15 @@
 //                     root hash being signed, and the user's passkeys
 //   sign (hosted)     checkSigningAssertion: the assertion for that version
 //                     and root hash, before the hosted key is released
+//   purposes          the same request and check bound to a staged key
+//                     rotation or a seller list draft (docs/spec/os-api.md)
 //
 // The device step runs on trooth.co (GitHub's passkey prompt: one device
 // sheet). Customer custody is not touched: the company signs with its own key.
 
 import { toBase64Url } from "./core/encoding";
+import { canonicalize } from "./core/canonical";
+import { digest } from "./core/hash";
 import { readAssertion, readClientData, readRegistration, creationOptions, requestOptions, randomChallenge, verifyAssertion, verifyRegistration, CHALLENGE_TTL_MS, type PasskeyChallenge, type PasskeyUser, type WebAuthnFailure } from "./identity/webauthn";
 import type { PasskeyApproval } from "./identity/roles";
 import { isDomainProven, type WorkspaceAuth, type WorkspaceResult } from "./serve/ports";
@@ -83,6 +87,8 @@ export function addPasskeyFirst(p: Pipeline, trooth_id: string): string {
 
 /** POST /os/semanto/{id}/passkeys/options. */
 export async function passkeyOptions(p: Pipeline, ws: WorkspaceAuth, trooth_id: string): Promise<WorkspaceResult> {
+  // A signing passkey is for the people who sign (QA-10): a member or viewer adding one wrote to the company's records.
+  if (!mayAdminister(ws)) return problem("forbidden", `A workspace ${ws.role} cannot add a signing passkey. Only an owner or admin signs.`);
   const company = await p.d.store.getCompany(trooth_id);
   if (!company) return problem("conflict", "This company has no record yet. Start setup first.");
   const user = await userFor(p, ws.user_id);
@@ -100,6 +106,7 @@ export async function passkeyOptions(p: Pipeline, ws: WorkspaceAuth, trooth_id: 
 
 /** POST /os/semanto/{id}/passkeys. */
 export async function registerPasskey(p: Pipeline, ws: WorkspaceAuth, trooth_id: string, body: Record<string, unknown>): Promise<WorkspaceResult> {
+  if (!mayAdminister(ws)) return problem("forbidden", `A workspace ${ws.role} cannot add a signing passkey. Only an owner or admin signs.`);
   const input = readRegistration(body);
   if (!input) return problem("invalid_request", "Send the credential navigator.credentials.create gave, as { \"credential\": { id, rawId, type, response: { clientDataJSON, attestationObject, transports } } }, every buffer base64url.");
   const stored = await consume(p, input.clientDataJSON, "create", trooth_id, ws.user_id);
@@ -129,11 +136,20 @@ export async function registerPasskey(p: Pipeline, ws: WorkspaceAuth, trooth_id:
 
 // ---------------------------------------------------------------- 7.2: approve one version
 
-/** POST /os/semanto/{id}/sign/options. */
+/** What a passkey approves besides a version: a staged key rotation, or a seller list the hosted key signs. */
+export type PasskeyPurpose = "key_rotation" | "seller_list" | "recall";
+
+/** The value a purpose challenge is bound to, kept in the challenge's root_hash column with version null. */
+export async function purposeBinding(purpose: PasskeyPurpose, subject: string): Promise<string> {
+  return purpose === "key_rotation" ? `rotation:${subject}` : `${purpose}:${await digest(subject)}`;
+}
+
+/** POST /os/semanto/{id}/sign/options. With { purpose: "key_rotation", rotation_id } or { purpose: "seller_list", draft } the challenge is bound to that instead of a version. */
 export async function signOptions(p: Pipeline, ws: WorkspaceAuth, trooth_id: string, body: Record<string, unknown>): Promise<WorkspaceResult> {
   if (!mayAdminister(ws)) return problem("forbidden", `A workspace ${ws.role} cannot sign. Ask an owner or admin.`);
   const company = await p.d.store.getCompany(trooth_id);
   if (!company) return problem("conflict", "This company has no record yet.");
+  if (body.purpose !== undefined) return purposeOptions(p, ws, trooth_id, body);
   if (!isDomainProven(company)) return problem("domain_not_proven", `Prove you control ${company.domain} first. Nothing is signed or witnessed before the proof.`);
   if (company.custody !== "hosted") return problem("conflict", "This company signs with its own key, so there is no passkey step. Ask for the signing input at POST sign.");
   const v = typeof body.version === "number" ? await p.d.store.getVersion(trooth_id, body.version) : await p.d.store.latestVersion(trooth_id);
@@ -154,26 +170,71 @@ export async function signOptions(p: Pipeline, ws: WorkspaceAuth, trooth_id: str
   });
 }
 
+/** A passkey request bound to a rotation or a seller list draft (docs/spec/os-api.md). */
+async function purposeOptions(p: Pipeline, ws: WorkspaceAuth, trooth_id: string, body: Record<string, unknown>): Promise<WorkspaceResult> {
+  let purpose: PasskeyPurpose;
+  let subject: string;
+  let next: string;
+  if (body.purpose === "key_rotation") {
+    if (typeof body.rotation_id !== "string" || !body.rotation_id) return problem("invalid_request", "Send the rotation_id the rotation start answered.");
+    purpose = "key_rotation";
+    subject = body.rotation_id;
+    next = `Pass publicKey to navigator.credentials.get, then send { "rotation_id": "${body.rotation_id}", "assertion": { id, clientDataJSON, authenticatorData, signature, userHandle } } to POST ${osBase(p)}/${trooth_id}/keys/rotation/confirm within five minutes.`;
+  } else if (body.purpose === "seller_list") {
+    if (typeof body.draft !== "object" || body.draft === null || Array.isArray(body.draft)) return problem("invalid_request", "Send the seller list payload as draft, exactly as you will submit it.");
+    purpose = "seller_list";
+    subject = canonicalize(body.draft);
+    next = `Pass publicKey to navigator.credentials.get, then send { "draft": <the same payload>, "assertion": { id, clientDataJSON, authenticatorData, signature, userHandle } } to POST ${osBase(p)}/${trooth_id}/sellers/lists within five minutes.`;
+  } else if (body.purpose === "recall") {
+    if (typeof body.notice !== "object" || body.notice === null || Array.isArray(body.notice)) return problem("invalid_request", "Send the recall notice as notice, exactly as you will submit it.");
+    purpose = "recall";
+    subject = canonicalize(body.notice);
+    next = `Pass publicKey to navigator.credentials.get, then send { "notice": <the same notice>, "assertion": { id, clientDataJSON, authenticatorData, signature, userHandle } } to POST ${osBase(p)}/${trooth_id}/recalls within five minutes.`;
+  } else return problem("invalid_request", 'purpose is "key_rotation", "seller_list" or "recall".');
+  const passkeys = await p.d.store.passkeys(ws.user_id);
+  if (!passkeys.length) return problem("passkey_missing", addPasskeyFirst(p, trooth_id));
+  const binding = await purposeBinding(purpose, subject);
+  const c = await newChallenge(p, { kind: "get", trooth_id, user_id: ws.user_id, version: null, root_hash: binding });
+  return ok(200, { object: "semanto.sign_options", trooth_id, purpose, binding, expires_at: c.expires_at, publicKey: requestOptions({ config: p.webauthn(), challenge: c.challenge, passkeys }), next });
+}
+
+/**
+ * A passkey assertion for a purpose (a rotation or a seller list), checked the
+ * same way as for a version: this person's challenge, bound to exactly this
+ * subject, consumed whatever the outcome.
+ */
+export async function checkPurposeAssertion(p: Pipeline, ws: WorkspaceAuth, trooth_id: string, purpose: PasskeyPurpose, subject: string, body: Record<string, unknown>): Promise<{ ok: true; approval: PasskeyApproval } | { ok: false; result: WorkspaceResult }> {
+  const binding = await purposeBinding(purpose, subject);
+  const what = purpose === "key_rotation" ? "Nothing was changed." : "Nothing was signed.";
+  return checkAssertion(p, ws, trooth_id, { version: null, root_hash: binding }, body, what, `POST ${osBase(p)}/${trooth_id}/sign/options with { "purpose": "${purpose}" }`);
+}
+
 /**
  * Hosted custody, before the key is released: the assertion in body.assertion
  * answers this person's challenge for exactly this version and root hash.
  * The challenge is consumed whatever the outcome.
  */
 export async function checkSigningAssertion(p: Pipeline, ws: WorkspaceAuth, trooth_id: string, v: { version: number; root_hash: string }, body: Record<string, unknown>): Promise<{ ok: true; approval: PasskeyApproval } | { ok: false; result: WorkspaceResult }> {
+  return checkAssertion(p, ws, trooth_id, v, body, "Nothing was signed.", `POST ${osBase(p)}/${trooth_id}/sign/options`);
+}
+
+async function checkAssertion(p: Pipeline, ws: WorkspaceAuth, trooth_id: string, v: { version: number | null; root_hash: string }, body: Record<string, unknown>, nothingDone: string, optionsRoute: string): Promise<{ ok: true; approval: PasskeyApproval } | { ok: false; result: WorkspaceResult }> {
   const no = (result: WorkspaceResult) => ({ ok: false as const, result });
+  const nothing = ` ${nothingDone}`;
   const passkeys = await p.d.store.passkeys(ws.user_id);
   if (!passkeys.length) return no(problem("passkey_missing", addPasskeyFirst(p, trooth_id)));
-  if (body.assertion === undefined || body.assertion === null) return no(problem("passkey_cancelled", `The passkey step did not finish, so the signing key was not released. Nothing was signed. Ask for a passkey request at POST ${osBase(p)}/${trooth_id}/sign/options and finish the step on your device.`));
+  if (body.assertion === undefined || body.assertion === null) return no(problem("passkey_cancelled", `The passkey step did not finish, so the signing key was not released.${nothing} Ask for a passkey request at ${optionsRoute} and finish the step on your device.`));
   const input = readAssertion(body.assertion);
   if (!input) return no(problem("invalid_request", "assertion must carry id, clientDataJSON, authenticatorData, signature and userHandle, every buffer base64url."));
   const stored = await consume(p, input.clientDataJSON, "get", trooth_id, ws.user_id);
-  if (stored === "unreadable") return no(problem("passkey_invalid", "The browser's client data could not be read. Nothing was signed."));
-  if (!stored) return no(EXPIRED(" Nothing was signed."));
+  if (stored === "unreadable") return no(problem("passkey_invalid", `The browser's client data could not be read.${nothing}`));
+  if (!stored) return no(EXPIRED(nothing));
   if (stored.version !== v.version || stored.root_hash !== v.root_hash) {
-    return no(problem("passkey_invalid", `The passkey answer was for version ${stored.version ?? "none"} with root hash ${stored.root_hash ?? "none"}, not version ${v.version} with root hash ${v.root_hash}. Nothing was signed. Start the passkey step again for this version.`));
+    if (v.version === null) return no(problem("passkey_invalid", `The passkey answer was for another request, not this one.${nothing} Start the passkey step again for this request.`));
+    return no(problem("passkey_invalid", `The passkey answer was for version ${stored.version ?? "none"} with root hash ${stored.root_hash ?? "none"}, not version ${v.version} with root hash ${v.root_hash}.${nothing} Start the passkey step again for this version.`));
   }
   const passkey = passkeys.find((k) => k.credential_id === input.id.replace(/=+$/, ""));
-  if (!passkey) return no(problem("passkey_invalid", "The passkey used is not one of yours. Nothing was signed."));
+  if (!passkey) return no(problem("passkey_invalid", `The passkey used is not one of yours.${nothing}`));
   const user = await p.d.store.passkeyUser(ws.user_id);
   if (!user) return no(problem("passkey_missing", addPasskeyFirst(p, trooth_id)));
   const r = await verifyAssertion({ input, challenge: stored.challenge, config: p.webauthn(), passkey, user });
@@ -181,7 +242,7 @@ export async function checkSigningAssertion(p: Pipeline, ws: WorkspaceAuth, troo
   const checked_at = iso(p.d.now());
   // The count moves only forward, in one conditional write: of two assertions at the same count, one wins.
   if (!(await p.d.store.touchPasskey(passkey.credential_id, r.sign_count, r.backed_up, checked_at))) {
-    return no(problem("passkey_counter", "Trooth did not use this passkey: another answer with the same counter was used first, which can mean the passkey was copied. Nothing was signed."));
+    return no(problem("passkey_counter", `Trooth did not use this passkey: another answer with the same counter was used first, which can mean the passkey was copied.${nothing}`));
   }
   return { ok: true, approval: { credential_id: passkey.credential_id, user_id: ws.user_id, user_handle: user.handle, checked_at } };
 }

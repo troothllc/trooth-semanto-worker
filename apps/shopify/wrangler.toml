@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+# Copyright (c) 2026 Trooth, LLC
+#
+# The Shopify app's Worker (shopify.trooth.co). D1 for sessions and shop state,
+# one queue for the slow work, no cron triggers. Secrets are set with
+# wrangler secret put: SHOPIFY_API_SECRET, APP_SEAL_KEY. The Shopify client id
+# is public and set as a var. submission/app-configuration.md lists every value.
+
+name = "trooth-shopify-app"
+main = "./workers/app.ts"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+routes = [{ pattern = "shopify.trooth.co", custom_domain = true }]
+
+[observability]
+enabled = true
+
+[vars]
+SHOPIFY_API_KEY = ""
+SHOPIFY_APP_URL = "https://shopify.trooth.co"
+SHOPIFY_APP_HANDLE = "semanto-by-trooth"
+SCOPES = "read_products"
+TROOTH_API_BASE = "https://api.trooth.co"
+TROOTH_DASHBOARD_URL = "https://trooth.co/dashboard/semanto"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "trooth-shopify-app"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[queues.producers]]
+binding = "SYNC_QUEUE"
+queue = "trooth-shopify-sync"
+
+[[queues.consumers]]
+queue = "trooth-shopify-sync"
+max_batch_size = 5
+max_batch_timeout = 2
+max_retries = 3
+dead_letter_queue = "trooth-shopify-sync-dlq"

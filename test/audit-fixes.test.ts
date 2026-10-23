@@ -236,7 +236,8 @@ const advance = (w: World, ms: number) => (w.clock.now = new Date(w.clock.now.ge
 describe("finding 1: a worker-f workspace claims its company, and then every /os route maps to it", () => {
   it("claims on first contact, maps companyId to the company, registers the owner, and refuses a second workspace and a changed domain", async () => {
     const w = await world();
-    expect((await call(w, "GET", "/acme/setup", "Bearer ada")).status).toBe(401);
+    // Signed in, with no Semanto company yet: refused as not this workspace's company (QA-11), not told to sign in.
+    expect((await call(w, "GET", "/acme/setup", "Bearer ada")).status).toBe(403);
     // No company step and no proof step: the workspace's domain confirmed on trooth.co is the website, and the action reads it.
     const empty = await json(await call(w, "GET", "/setup", "Bearer ada"));
     expect(empty).toMatchObject({ object: "semanto.setup", trooth_id: null, domain: "acme.com", step: "read", proof: { source: "trooth_domain_claim", status: "confirmed", confirmed_at: CONFIRMED_AT, confirm_url: "https://trooth.co/dashboard/public-page?tab=domain", pointer: null }, next_action: { label: "Read my website", method: "POST", url: `${OS}/setup/start` } });
@@ -488,7 +489,7 @@ describe("setup: the six-screen backend over docs/spec/setup-api.md", () => {
     await call(w, "POST", "/setup/start", "Bearer ada", {});
     const none = await json(await call(w, "GET", "/acme/reports", "Bearer cy"));
     expect(none).toEqual({ object: "semanto.reports", trooth_id: "acme", gap: null });
-    expect((await call(w, "GET", "/acme/reports", "Bearer eve")).status).toBe(401);
+    expect((await call(w, "GET", "/acme/reports", "Bearer eve")).status).toBe(403);
     await call(w, "POST", "/acme/gap-report", "Bearer ada", {});
     const one = await json(await call(w, "GET", "/acme/reports", "Bearer cy"));
     expect(one.gap).toMatchObject({ object: "semanto.gap_report", trooth_id: "acme" });
@@ -579,7 +580,7 @@ describe("finding 4: a build in queue messages of at most 25 pages, holding no s
 
     const w = await world({ queue: true, companies: [{ trooth_id: "acme", proven: true }] });
     (w.deps.site as { http: SiteHttp }).http = site;
-    expect((await call(w, "POST", "/acme/build", "Bearer ada", {})).status).toBe(401); // not claimed by a workspace
+    expect((await call(w, "POST", "/acme/build", "Bearer ada", {})).status).toBe(403); // not claimed by a workspace (QA-11)
     await w.store.linkOsCompany("acme", "co-acme");
     await w.store.registerOwner("acme", "u-ada");
     expect((await call(w, "POST", "/acme/build", "Bearer ada", {})).status).toBe(202);

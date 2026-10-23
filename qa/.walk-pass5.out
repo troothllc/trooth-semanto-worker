@@ -1,0 +1,28 @@
+section setup: 43s, findings so far 0
+section delivery: 11s, findings so far 0
+section keys: 16s, findings so far 0
+section receipts: 52s, findings so far 0
+section connectors: 15s, findings so far 0
+section connect: 11s, findings so far 0
+section google: 24s, findings so far 0
+section company: 28s, findings so far 0
+section writeback: 80s, findings so far 0
+section sellers: 12s, findings so far 0
+section recalls: 54s, findings so far 0
+section credentials: 6s, findings so far 1
+section keys-customer: 5s, findings so far 1
+section sellers-customer: 6s, findings so far 1
+section recalls-customer: 5s, findings so far 1
+section keys-old: 16s, findings so far 1
+section sellers-old: 5s, findings so far 1
+section roles: 12s, findings so far 1
+section outages: 36s, findings so far 1
+section security: 7s, findings so far 1
+section phone: 41s, findings so far 1
+{
+ "states": 134,
+ "findings": [
+  "credentials-view: no View credential link for a made credential"
+ ]
+}
+record: /home/claude/trooth-semanto-worker/qa/.run/walk-pass5/walk.json

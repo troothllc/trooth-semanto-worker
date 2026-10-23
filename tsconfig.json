@@ -15,5 +15,6 @@
     "baseUrl": ".",
     "paths": { "@/*": ["src/*"] }
   },
-  "include": ["src", "test", "verifier/test-vectors", "web"]
+  "include": ["src", "test", "verifier/test-vectors", "web"],
+  "exclude": ["apps/**", "node_modules"]
 }

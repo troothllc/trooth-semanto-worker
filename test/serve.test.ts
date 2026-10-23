@@ -369,9 +369,10 @@ describe("the other public routes", () => {
     const keys = await body(get(`/acme-inc/keys`));
     expect(keys.keys[0].kid).toBe(estate.companyPublic.kid);
     expect(keys.keys[0].d).toBeUndefined();
-    const wk = await body(get(`/acme-inc/.well-known/trooth.semanto`));
-    expect(wk.object).toBe("trooth.semanto");
-    expect(wk.version_id).toBe(versionId(estate.acme.file.root_hash));
+    // The hosted copy of the company's /.well-known/trooth.semanto is the Semanto file itself, byte for byte what
+    // GET /{trooth_id} serves and every adapter passes through (QA-03).
+    const wkRes = await get(`/acme-inc/.well-known/trooth.semanto`);
+    expect(new Uint8Array(await wkRes.arrayBuffer())).toEqual(new Uint8Array(await (await get(`/acme-inc`, { accept: "application/json" })).arrayBuffer()));
     const wkk = await body(get(`/acme-inc/.well-known/trooth-keys.json`));
     expect(wkk).toEqual(keys);
   });

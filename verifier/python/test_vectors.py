@@ -166,9 +166,10 @@ def test_cli_offline() -> None:
 
 
 def test_jws_types_include_every_core_type() -> None:
-    # Review finding 19: the kit's registry matches src/core/jws.ts JWS_TYPES, marketplaceCatalog included.
+    # Review finding 19: the kit's registry matches src/core/jws.ts JWS_TYPES, marketplaceCatalog and sellerList included.
     assert V.JWS_TYPES["marketplaceCatalog"] == "https://trooth.co/types/marketplace-catalog"
-    assert len(V.JWS_TYPES) == 13
+    assert V.JWS_TYPES["sellerList"] == "https://trooth.co/types/seller-list"
+    assert len(V.JWS_TYPES) == 14
 
 
 def test_web_bot_auth_refuses_a_second_label() -> None:

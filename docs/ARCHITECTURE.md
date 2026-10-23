@@ -25,7 +25,8 @@ Semanto does not make AI believe a company; it makes what the company said impos
 | `src/c2pa` | Mapping a Semanto manifest to C2PA assertions for images and PDFs | core |
 | `src/setup` | The setup backend behind the Semanto pages of the trooth.co dashboard: the setup state and step, the WorkspaceDomains port (the workspace's domains confirmed on trooth.co, the one domain proof), the install check; the retired DNS proof modules (Domain Connect, the DNS host, the diagnosis) are kept only for their own tests | core, basic, serve |
 | `src/settings` | The delivery settings model and resolver | core |
-| `src/db` | D1 access, one function per query, no SQL in handlers; hosted keys sealed at rest | |
+| `src/os` | The workspace contract of 23 October 2026 (docs/spec/os-api.md): staged key rotation, read receipts with filters, connector keys and the app connect flow, Connect Google, company settings and the audit trail, write-back runs that send, seller lists, recall events to worker-f, C2PA credential jobs; its storage port (`src/os/store.ts`) and routes (`src/serve/os-routes.ts`) | core, identity, readers, monitor, commerce, c2pa, pipeline |
+| `src/db` | D1 access, one function per query, no SQL in handlers; hosted keys and the Google refresh token sealed at rest (`src/db/os-d1.ts` for the workspace contract) | |
 | `src/pipeline.ts` | The modules wired into one flow: compile, sign, witness, log, the workspace actions, the commerce catalog, the crons, readers and authorization | every module above |
 | `adapters/` | Host adapters: Cloudflare Worker, Vercel, Netlify, Fastly, Akamai, Gcore, nginx, Apache, WordPress, head tag, commerce platforms | the public API only |
 | `verifier/` | The open verifier kit: JavaScript, Python, Go, a CLI and shared test vectors | the published formats only |
@@ -50,7 +51,7 @@ Semanto does not make AI believe a company; it makes what the company said impos
 
 ## Data model (D1)
 
-See `migrations/0001_semanto.sql` to `migrations/0006_passkeys.sql`. Page bodies, parts, feeds and log tiles live in R2 under `semanto/<trooth_id>/v<version>/`. D1 holds metadata only.
+See `migrations/0001_semanto.sql` to `migrations/0008_review_backend.sql`. From 0007 on, every up migration has a down file in `migrations-down/NNNN_name.down.sql`, outside wrangler's folder so it is never applied by accident. Page bodies, parts, feeds and log tiles live in R2 under `semanto/<trooth_id>/v<version>/`. D1 holds metadata only.
 
 ## Public routes (served by `src/serve/routes.ts`, wired in `src/index.ts`)
 
@@ -81,6 +82,12 @@ GET  /public/semanto/{trooth_id}/revocations            the company's signed rev
 GET  /public/semanto/revocations                        every company's signed revocation list
 GET  /public/semanto/.well-known/trooth-keys.json | keys/trooth.json    Trooth's witness JWK Set (the verifier CLIs' default)
 POST /public/semanto/catalogs/check                     a nested marketplace catalog, checked layer by layer
+GET  /public/semanto/{trooth_id}/credentials/{sha256}   a C2PA manifest made by the credential jobs
+POST /public/semanto/connect/sessions                   the app connect flow: open a session (rate group public_connect)
+GET  /public/semanto/connect/sessions/{session_id}      poll it with the poll token
+POST /public/semanto/connect/uninstall                  an app's signed request revokes its own connector key
+GET  /public/semanto/google/callback                    Google's OAuth redirect; always a redirect to the dashboard
+GET  /public/semanto/alerts/confirm?token=              the alert address confirmation link; a redirect to the dashboard
 OPTIONS *                                               CORS preflight (the /os routes allow https://trooth.co and https://www.trooth.co,
                                                         plus http://localhost in development, with Vary: Origin)
 
@@ -99,11 +106,25 @@ POST /os/semanto/{trooth_id}/setup/look-again | read-again | choose | confirm | 
                                                         the workspace's domains read the same way (GET /auth/domain-claims); denied by default with a 401 problem;
                                                         every answer Cache-Control: private, no-store (docs/spec/setup-api.md)
 POST /os/semanto/{trooth_id}/commerce/catalog           commerce connectors; RFC 9421 signature with tag trooth-connector against a connector key on file
+
+The workspace contract of 23 October 2026 (src/serve/os-routes.ts, docs/spec/os-api.md), every write audited and in rate group os_write:
+GET|POST /os/semanto/{trooth_id}/settings | POST settings/preview
+GET  keys | POST keys/rotation/start | keys/rotation/options | keys/rotation/confirm | keys/rotation/cancel | keys/binding/check | keys/rotate | keys/{kid}/revoke
+GET  receipts | receipts.csv                            filters, cursor, CSV with the injection guard
+GET|POST connectors | POST connectors/create | connectors/{kid}/test | connectors/{kid}/revoke
+GET  /os/semanto/connect/{session_id} | POST /os/semanto/{trooth_id}/connect/{session_id}/approve | deny
+GET  google | POST google/connect | google/disconnect
+GET  company | POST company/signing-policy | company/surfaces | company/alerts
+GET  writeback | writeback/runs | writeback/runs/{run_id} | POST writeback/send | writeback/runs/{run_id}/retry
+GET|POST sellers/lists | POST sellers/lists/options
+GET|POST recalls | POST recalls/options                 store a signed recall notice (sent on to worker-f's changes feed)
+POST passkeys | sign | withdraw                         the pipeline's handlers, audited here and in os_write
+GET  credentials
 ```
 
 Public routes pass a token bucket per client address and route group (the RateLimitDO bound as RATE; 429 problems with Retry-After). Every POST body is capped at 5 MB (a 413 problem). Nothing is served, signed or witnessed for a company whose domain is not proven. One signup: a domain is proven by its confirmation on trooth.co (`/dashboard/public-page?tab=domain`), read through worker-f; Semanto runs no domain proof of its own (docs/spec/setup-api.md, One signup, one domain proof).
 
-The pipeline behind the `/os` routes, the queue consumer and the crons is `src/pipeline.ts` (the setup flow in `src/pipeline-setup.ts`): a build is split into queue messages of at most 25 pages with a final assembly (`src/compiler/stream.ts`, queue `trooth-semanto-compile`, dead letter queue `trooth-semanto-compile-dlq`); hourly change detection (`15 * * * *`; there is no pending-proof sweep: a domain is proven on trooth.co), nightly tree head, RFC 3161 timestamp when `TSA_URL` is set and every revocation list (`30 1 * * *`), weekly gap reports (`0 6 * * 1`, the same value as `WEEKLY_RUN.cron`). The hourly and weekly crons queue one message per 25 companies.
+The workspace contract's jobs ride the same queue with no cron of their own: `writeback` (one write-back item to Google), `recall_event` (one recall event to worker-f) and `credential` (one C2PA manifest); a job that should run again is retried with `retry({ delaySeconds })` after 30, 120 and 600 seconds (src/os/jobs.ts). The pipeline behind the `/os` routes, the queue consumer and the crons is `src/pipeline.ts` (the setup flow in `src/pipeline-setup.ts`): a build is split into queue messages of at most 25 pages with a final assembly (`src/compiler/stream.ts`, queue `trooth-semanto-compile`, dead letter queue `trooth-semanto-compile-dlq`); hourly change detection (`15 * * * *`; there is no pending-proof sweep: a domain is proven on trooth.co), nightly tree head, RFC 3161 timestamp when `TSA_URL` is set and every revocation list (`30 1 * * *`), weekly gap reports (`0 6 * * 1`, the same value as `WEEKLY_RUN.cron`). The hourly and weekly crons queue one message per 25 companies.
 
 Read receipts are served to the company only, through the workspace API (`GET /os/semanto/{trooth_id}/receipts` and `/receipts.csv`); there is no public receipts route. `/.well-known/trooth-keys.json` and `/.well-known/trooth.semanto` on a company's own domain are served by the adapters from the hosted copies above.
 

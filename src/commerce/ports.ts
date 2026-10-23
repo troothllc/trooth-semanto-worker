@@ -26,6 +26,8 @@ export interface CommerceStore {
   putOffer(trooth_id: string, signed: SignedOffer): Promise<void>;
   putAttestation(brand_trooth_id: string, entry: AttestationEntry): Promise<void>;
   putRecall(trooth_id: string, signed: SignedRecall): Promise<void>;
+  /** Take every offer for a sku out (a product the connector sent as discontinued). Answers how many were removed. */
+  removeOffers(trooth_id: string, sku: string): Promise<number>;
 }
 
 interface Bucket {
@@ -90,5 +92,11 @@ export class InMemoryCommerceStore implements CommerceStore {
   }
   async putRecall(trooth_id: string, signed: SignedRecall): Promise<void> {
     this.bucket(trooth_id).recalls.set(signed.notice.id, signed);
+  }
+  async removeOffers(trooth_id: string, sku: string): Promise<number> {
+    const offers = this.bucket(trooth_id).offers;
+    let n = 0;
+    for (const [id, o] of offers) if (o.offer.sku === sku && offers.delete(id)) n++;
+    return n;
   }
 }

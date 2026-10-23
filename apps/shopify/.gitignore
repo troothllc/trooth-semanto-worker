@@ -1,0 +1,7 @@
+node_modules
+build
+.react-router
+.wrangler
+.shopify
+.dev.vars
+.env

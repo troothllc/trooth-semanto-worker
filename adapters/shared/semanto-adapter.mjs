@@ -420,6 +420,9 @@ export function clientAddress(_request, config = {}) {
   return config.clientAddress ? String(config.clientAddress).trim() : "";
 }
 
+/** Where the adapter answers the kid of its connector key, for the dashboard's connection test (docs/spec/os-api.md). */
+export const CONNECTOR_WELL_KNOWN = "/.well-known/trooth-semanto-connector";
+
 /** The connector key from config: a private JWK object, or its JSON (TROOTH_CONNECTOR_KEY). Null when absent or unreadable. */
 export function connectorKeyOf(config = {}) {
   const k = config.connectorKey;
@@ -471,6 +474,11 @@ export async function fetchSigned(decision, request, fetchImpl = globalThis.fetc
  */
 export async function handleRequest({ request, config, manifestCache, fetchImpl = globalThis.fetch, next, fetchInit = {} }) {
   const url = new URL(request.url);
+  // The connection test in the dashboard reads which connector key this adapter holds (its kid only, never the key).
+  if (url.pathname === CONNECTOR_WELL_KNOWN) {
+    const key = connectorKeyOf(config);
+    if (key) return new Response(JSON.stringify({ kid: key.kid, trooth_id: config.troothId ?? null }), { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+  }
   // Every mode reads the manifest: it maps a path to a page id, and its
   // version goes on the host's HTML. A failed fetch leaves it null and the
   // adapter still answers by path.

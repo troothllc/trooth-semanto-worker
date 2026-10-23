@@ -50,6 +50,18 @@ export interface Env {
   LOG?: DurableObjectNamespace;
   /** The WebAuthn relying party id for passkeys (src/identity/webauthn.ts); trooth.co when unset. */
   WEBAUTHN_RP_ID?: string;
+  /** Google OAuth client for Connect Google (src/os/google.ts). Without the id and secret, Connect Google answers a 409. */
+  GOOGLE_OAUTH_CLIENT_ID?: string;
+  /** Secret: the Google OAuth client secret. */
+  GOOGLE_OAUTH_CLIENT_SECRET?: string;
+  /** Var: where Google redirects after consent; https://api.trooth.co/public/semanto/google/callback when unset. */
+  GOOGLE_OAUTH_REDIRECT_URI?: string;
+  /** Secret (set on both Workers): the HMAC key of Trooth-Event-Signature on recall events sent to worker-f (src/os/recalls.ts). Without it, no recall event is sent. */
+  SEMANTO_EVENTS_SECRET?: string;
+  /** Development only (src/dev-upstream.ts): a loopback origin that stands in for the Google and Resend hosts. Ignored in production. */
+  DEV_UPSTREAM_BASE?: string;
+  /** Development only (src/dev-upstream.ts): the dashboard's loopback base for the redirects and links the Worker makes. Ignored in production. */
+  DEV_DASHBOARD_BASE?: string;
   /** "production" or "development"; production refuses to start a build without the compile queue. Development also accepts passkeys made on http://localhost. */
   ENVIRONMENT: "development" | "production";
 }
@@ -75,4 +87,29 @@ export interface CompaniesMessage {
 export type { StageMessage } from "./compiler/stream";
 import type { StageMessage } from "./compiler/stream";
 
-export type QueueMessage = CompileJob | StageMessage | CompaniesMessage;
+/** One write-back item to send to Google (src/os/writeback.ts); retried after 30, 120 and 600 seconds on 429 or 5xx. */
+export interface WritebackMessage {
+  kind: "writeback";
+  trooth_id: string;
+  run_id: string;
+  item_id: string;
+}
+
+/** One recall event to send to worker-f (src/os/recalls.ts) after a failed first send. */
+export interface RecallEventMessage {
+  kind: "recall_event";
+  trooth_id: string;
+  event_id: string;
+}
+
+/** One C2PA credential to make for an image or PDF (src/os/credentials.ts). */
+export interface CredentialMessage {
+  kind: "credential";
+  trooth_id: string;
+  asset_url: string;
+  source: "compile" | "writeback";
+  /** The version the asset was read in (compile); the current version otherwise. */
+  version?: number;
+}
+
+export type QueueMessage = CompileJob | StageMessage | CompaniesMessage | WritebackMessage | RecallEventMessage | CredentialMessage;

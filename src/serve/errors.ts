@@ -29,6 +29,7 @@ export type ProblemCode =
   | "signature_invalid"
   | "log_entry_not_found"
   | "upstream_unavailable"
+  | "session_unavailable"
   | "payload_too_large"
   | "domain_fixed"
   | "domain_claimed_elsewhere"
@@ -42,7 +43,13 @@ export type ProblemCode =
   | "passkey_origin_mismatch"
   | "passkey_cancelled"
   | "passkey_invalid"
-  | "passkey_counter";
+  | "passkey_counter"
+  | "seller_list_signature"
+  | "settings_invalid"
+  | "connect_session_not_found"
+  | "connect_session_expired"
+  | "connect_session_withdrawn"
+  | "not_registered";
 
 export interface Problem {
   type: string;
@@ -57,6 +64,8 @@ export interface Problem {
   /** True when no retry will change the answer. */
   terminal: boolean;
   retry_after?: number;
+  /** Members a route adds beside the standard ones (RFC 9457 extension members), such as issues for settings_invalid. */
+  [extension: string]: unknown;
 }
 
 interface Catalog {
@@ -197,6 +206,14 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
     what_happened: "Trooth asked an outside source (a registry or the company's site) and got no usable answer.",
     what_to_do: "Try again in a few minutes.",
   },
+  session_unavailable: {
+    status: 503,
+    title: "Trooth could not check your sign-in",
+    retryable: true,
+    terminal: false,
+    what_happened: "The service that checks workspace sign-ins did not answer. Your sign-in was not refused and nothing was changed.",
+    what_to_do: "Try again in a minute. You do not need to sign in again.",
+  },
   payload_too_large: {
     status: 413,
     title: "The request body is too large",
@@ -301,6 +318,54 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
     what_happened: "The passkey's counter did not go up, which can mean someone copied it. Trooth did not release the signing key.",
     what_to_do: "Use another passkey, or remove this one and add a new one. Contact Trooth support if you did not expect this.",
   },
+  settings_invalid: {
+    status: 422,
+    title: "These settings cannot be saved as they are",
+    retryable: false,
+    terminal: true,
+    what_happened: "One or more settings do not work together. Nothing was saved. The issues list says which, in plain words.",
+    what_to_do: "Change the settings the issues name and save again.",
+  },
+  connect_session_not_found: {
+    status: 404,
+    title: "No such connect request",
+    retryable: false,
+    terminal: true,
+    what_happened: "There is no connect request with this id.",
+    what_to_do: "Start again from the app you are connecting.",
+  },
+  connect_session_expired: {
+    status: 410,
+    title: "This connect request has expired",
+    retryable: false,
+    terminal: true,
+    what_happened: "Connect requests last 15 minutes. This one was not approved in time, so nothing was connected.",
+    what_to_do: "Start again from the app you are connecting.",
+  },
+  connect_session_withdrawn: {
+    status: 409,
+    title: "The store withdrew this request",
+    retryable: false,
+    terminal: true,
+    what_happened: "The app was removed or disconnected before the request was approved, so it took the request back. Nothing was connected.",
+    what_to_do: "Start again from the app you are connecting.",
+  },
+  not_registered: {
+    status: 404,
+    title: "This key was never registered",
+    retryable: false,
+    terminal: true,
+    what_happened: "The request is signed by a connector key Trooth has no record of, so there is nothing to revoke.",
+    what_to_do: "Nothing to do: the key never reached Trooth. If you expected it to, connect the app again.",
+  },
+  seller_list_signature: {
+    status: 422,
+    title: "The seller list signature does not check out",
+    retryable: false,
+    terminal: true,
+    what_happened: "The seller list is not signed by a key this company held when the list was issued, or the signature does not match the list. Nothing was stored.",
+    what_to_do: "Sign the exact list with your current signing key (typ seller-list) and send it again.",
+  },
   witness_key_missing: {
     status: 503,
     title: "This deployment cannot sign yet",
@@ -311,9 +376,10 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
   },
 };
 
-export function problem(code: ProblemCode, opts: { detail?: string; instance?: string; retry_after?: number } = {}): Problem {
+export function problem(code: ProblemCode, opts: { detail?: string; instance?: string; retry_after?: number; extensions?: Record<string, unknown> } = {}): Problem {
   const c = PROBLEMS[code];
   return {
+    ...(opts.extensions ?? {}),
     type: `https://trooth.co/problems/${code}`,
     title: c.title,
     status: c.status,
@@ -386,4 +452,16 @@ export function stripBehindNotice(body: Uint8Array): Uint8Array {
   const m = BEHIND_RE.exec(text);
   if (!m) return body;
   return body.slice(utf8(m[0]).length);
+}
+
+/**
+ * The session service did not answer (a network error or a 5xx). Thrown, not
+ * folded into null, so the routes answer 503 session_unavailable instead of a
+ * 401 that tells a signed-in person to sign in again (QA-12).
+ */
+export class SessionUnavailable extends Error {
+  constructor(readonly status: number | null) {
+    super(`The TROOTH_OS session service did not answer (${status ?? "network error"}).`);
+    this.name = "SessionUnavailable";
+  }
 }

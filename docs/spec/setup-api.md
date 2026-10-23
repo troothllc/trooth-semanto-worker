@@ -33,7 +33,7 @@ Each proof is forwarded once, with `Authorization: DPoP <token>` and `DPoP: <pro
 
 - `role` is the account type. Only `vendor` accounts reach Semanto; a `buyer` session is refused like no session (a 401 problem): it has no company to act for.
 - Three routes need only a valid vendor session, with no Semanto company yet: `GET /os/semanto/setup`, `POST /os/semanto/setup/start` and `POST /os/semanto/claim`. All three read the workspace's domains on trooth.co. This is the claim variant of authorization (`troothOsSession` in `src/pipeline.ts`).
-- Every other `/os` route maps worker-f's `companyId` to the company through `semanto_companies.os_company_id`, which the claim writes. No mapping is a 401 problem. A session whose company is not `{id}` is a 403 problem.
+- Every other `/os` route maps worker-f's `companyId` to the company through `semanto_companies.os_company_id`, which the claim writes. No session is a 401 problem; a valid session with no company mapped, or whose company is not `{id}`, is a 403 problem (QA-11: a 401 read as signed out). When the session service does not answer, every route answers 503 `session_unavailable`.
 - Roles: `workspaceRole` when worker-f sends it; otherwise the user who claimed the company (`os_owner_user_id`) is `owner` and every other vendor session of that company is `member`.
 
 | Role | May |
@@ -236,7 +236,7 @@ Trooth keeps a hosted company key and releases it only after a passkey assertion
 
 | Route | Body | Who | Answer |
 | --- | --- | --- | --- |
-| `POST /os/semanto/{id}/passkeys/options` | `{}` | any workspace user | `{ "object": "semanto.passkey_options", "trooth_id", "expires_at", "has_passkey", "publicKey": { "rp": { "id": "trooth.co", "name": "Trooth" }, "user": { "id": "<base64url of 32 random bytes, kept per user>", "name", "displayName" }, "challenge", "pubKeyCredParams": [ES256 -7, EdDSA -8, RS256 -257], "timeout": 300000, "excludeCredentials", "authenticatorSelection": { "residentKey": "preferred", "requireResidentKey": false, "userVerification": "required" }, "attestation": "none" }, "next" }` |
+| `POST /os/semanto/{id}/passkeys/options` | `{}` | an owner or admin (a member or viewer is a 403 before any challenge is stored) | `{ "object": "semanto.passkey_options", "trooth_id", "expires_at", "has_passkey", "publicKey": { "rp": { "id": "trooth.co", "name": "Trooth" }, "user": { "id": "<base64url of 32 random bytes, kept per user>", "name", "displayName" }, "challenge", "pubKeyCredParams": [ES256 -7, EdDSA -8, RS256 -257], "timeout": 300000, "excludeCredentials", "authenticatorSelection": { "residentKey": "preferred", "requireResidentKey": false, "userVerification": "required" }, "attestation": "none" }, "next" }` |
 | `POST /os/semanto/{id}/passkeys` | `{ "credential": <PublicKeyCredential JSON from navigator.credentials.create> }` | the same user | 201 `{ "object": "semanto.passkey", "trooth_id", "credential_id", "alg", "transports", "backed_up", "created_at" }`. Checked: type `webauthn.create`, the challenge (consumed), an allowed origin, attestation format `none` (or `packed` self attestation; any other format is refused in plain words), the rp id hash, the UP (user present) and UV (user verification) flags, the attested credential data and its algorithm. The public key is stored as a JWK with its sign count and transports. |
 | `POST /os/semanto/{id}/sign/options` | `{ "version"?: n }` | owner or admin, hosted custody | `{ "object": "semanto.sign_options", "trooth_id", "version", "root_hash", "expires_at", "publicKey": { "challenge", "rpId", "allowCredentials", "userVerification": "required", "timeout": 300000 }, "next" }`. The challenge is bound to this person, this version and this root hash. 409 `passkey_missing` when the person has no passkey yet. |
 | `POST /os/semanto/{id}/sign` | hosted: `{ "version": n, "assertion": { "id", "clientDataJSON", "authenticatorData", "signature", "userHandle" } }` | owner or admin | Checked before the key is released: the challenge is the one issued for this version and root hash (consumed), type `webauthn.get`, an allowed origin, the rp id hash, the UP (user present) and UV (user verification) flags, the signature over authenticatorData and the SHA-256 of clientDataJSON with the stored key (ES256, EdDSA or RS256), and a sign count that grows when either count is not zero, written with one conditional update (`WHERE sign_count < new` or both zero): when no row changes, another assertion at that count was used first and the answer is `passkey_counter`. Then the approval is recorded with `{ credential_id, user_id, user_handle, checked_at }` (the internal `user_id` stays in the approval record for the two-officer count), and the version's `identity.authorized_by` entry gets `{ credential_id, user_handle, checked_at }`: the random base64url WebAuthn user handle is the only person reference in the signed public header. Customer custody is unchanged: the company signs the signing input with its own key. |
@@ -267,6 +267,8 @@ Facts whose key fits none of the first three sections go under `policies`. A fac
 
 ## Workspace routes added by the audit fixes
 
+The program contract of 23 October 2026 changed several of these (keys, keys/{kid}/revoke, receipts, receipts.csv, writeback, settings, connectors) and added the rest of the workspace API; where a row below and docs/spec/os-api.md differ, os-api.md is what the Worker answers.
+
 | Route | Body | Who | Answer |
 | --- | --- | --- | --- |
 | `POST /os/semanto/{id}/withdraw` | `{ "version": 2, "reason": "plain words, required" }` | owner or admin | `{ "object": "semanto.withdrawn", "trooth_id", "version", "version_id", "revoked_at", "log_index", "revocations_url" }`. The version answers `semanto_withdrawn` (410) from then on; when it was the current signed version, the newest earlier signed version that is not withdrawn becomes current, or none. |
@@ -291,13 +293,13 @@ Facts whose key fits none of the first three sections go under `policies`. A fac
 | `GET /public/semanto/.well-known/trooth-keys.json` and `GET /public/semanto/keys/trooth.json` | Trooth's witness JWK Set: the current witness key and any earlier ones from `TROOTH_WITNESS_PREVIOUS_KEYS`, each with its `exp` or `revoked_at` when set, so a verifier judges a key at the signature's `iat`. The three verifier CLIs read this URL by default. worker-f may also serve it at `https://api.trooth.co/.well-known/trooth-keys.json` (a founder step: add that route). |
 | `GET /public/semanto/{id}/revocations` | `{ "object": "semanto.revocation_list", "trooth_id", "jws", "list" }`: the company's revocation list (typ `https://trooth.co/types/revocation-list`), signed by Trooth's witness key, valid 24 hours, re-signed on every withdrawal and key revocation and nightly. Before the first withdrawal or key revocation there is no list: a 404 `semanto_not_found` problem, "No revocation list has been signed yet." |
 | `GET /public/semanto/revocations` | the same for every company (`trooth_id` null) |
-| `GET /public/semanto/{id}/sellers?domain=&sku=` | `{ "object": "semanto.seller_authorization" }` plus the fields of `AuthorizationAnswer`, from the brand's seller attestations (`src/commerce/sellers.ts`) |
+| `GET /public/semanto/{id}/sellers?domain=&sku=` | `{ "object": "semanto.seller_authorization" }` plus the fields of `AuthorizationAnswer`, from the brand's seller attestations (`src/commerce/sellers.ts`); once the company publishes a signed seller list, the newest valid list answers instead (docs/spec/os-api.md, section 4) |
 | `POST /public/semanto/catalogs/check` | body `{ "jws": "<compact JWS of a marketplace catalog>" }`, at most 5 MB; answers `verifyCatalog` (`src/commerce/nested.ts`), each layer resolved against the Trooth keys of the companies it names |
 | `GET /public/semanto/{id}/synonyms?name=` | `{ "object": "semanto.synonyms", "name", "group", "synonyms" }` from `src/commerce/synonyms.ts` |
 
 ## Rate limits and body caps
 
-- Public routes: a token bucket per client address and route group, held in the `RateLimitDO` Durable Object bound as `RATE` (`RATE_LIMITS` in `src/readers/rate-limit.ts`): `read` (pages, files, keys, commerce) 120 requests at once and 2 a second after that; `log` (the log routes) 60 at once and 2 a second; `check` (`verify`, `first-publication/check`, `catalogs/check`) 10 at once and one every 5 seconds. Over the limit is a 429 `rate_limited` problem with `Retry-After` in whole seconds. The client address is Cloudflare's own `CF-Connecting-IP`. `/os` routes are not limited here; worker-f's session check gates them.
+- Public routes: a token bucket per client address and route group, held in the `RateLimitDO` Durable Object bound as `RATE` (`RATE_LIMITS` in `src/readers/rate-limit.ts`): `read` (pages, files, keys, commerce) 120 requests at once and 2 a second after that; `log` (the log routes) 60 at once and 2 a second; `check` (`verify`, `first-publication/check`, `catalogs/check`) 10 at once and one every 5 seconds. Over the limit is a 429 `rate_limited` problem with `Retry-After` in whole seconds. The client address is Cloudflare's own `CF-Connecting-IP`. The app connect routes (`/public/semanto/connect/*`) have their own group, `public_connect`, 10 a minute per address. `/os` routes are gated by worker-f's session check; the workspace contract's writes also pass `os_write`, 30 a minute per company and session subject (docs/spec/os-api.md).
 - Read receipts are counted per minute inside the same Durable Object class (one object per company) and written to D1 in one batch a minute: one row per company, version, page, representation, proof, agent and address hash per minute, with a `count`, never one row per request.
 - The Web Bot Auth key directory fetch is limited per directory origin and per client address.
 - Every POST body is capped at 5 MB; a larger body is a 413 `payload_too_large` problem, refused before it is read when `Content-Length` says so, and cut off at the cap otherwise.
@@ -306,8 +308,9 @@ Facts whose key fits none of the first three sections go under `policies`. A fac
 
 | code | status | Meaning |
 | --- | --- | --- |
-| `unauthorized` | 401 | no session, an ended session, a buyer account, or no company mapped to it |
-| `forbidden` | 403 | another company's session, or a role that cannot do this (a buyer account is a 401: it has no company) |
+| `unauthorized` | 401 | no session, an ended session, or a buyer account |
+| `session_unavailable` | 503 | the session service did not answer; nothing was refused or changed, try again |
+| `forbidden` | 403 | another company's session, a session with no company mapped here, or a role that cannot do this (a buyer account is a 401: it has no company) |
 | `invalid_request` | 400 | a missing or wrong field; the detail names it |
 | `domain_fixed` | 409 | the domain was fixed at the claim and cannot change |
 | `domain_claimed_elsewhere` | 409 | another Trooth workspace holds the domain |

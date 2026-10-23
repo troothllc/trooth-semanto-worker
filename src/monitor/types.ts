@@ -49,6 +49,8 @@ export interface Product {
   record_id?: string;
   /** When the signed record witnessed this product. */
   witnessed_at?: string;
+  /** The product's first image in the signed record (its media), when it has one. */
+  image_url?: string;
 }
 
 /** A fresh signed offer for one sku; it wins over the product's own price when present and in date. */

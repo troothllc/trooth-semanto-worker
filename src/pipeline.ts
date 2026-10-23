@@ -40,7 +40,7 @@ import { digest } from "./core/hash";
 import { estimateTokens } from "./core/tokens";
 import { JWS_TYPES, signObject } from "./core/jws";
 import { importPrivate, sign as rawSign, toPublic, WitnessKeyMissingError, type PrivateJwk, type PublicJwk } from "./core/keys";
-import { verifyContentDigest, verifyMessage } from "./core/httpsig";
+import { parseSignatureInput, verifyContentDigest, verifyMessage } from "./core/httpsig";
 import { factsRoot, rootHash, tierHash, versionId, type Fact, type Identity, type SemantoFile, type SemantoHeader } from "./core/semanto";
 import { Fetcher, ChangeDetector, type FetcherOptions } from "./compiler/fetch";
 import { generateJsonLd } from "./compiler/jsonld";
@@ -83,7 +83,7 @@ import { detectHost } from "./serve/detect";
 import { wellKnownSemanto } from "./serve/represent";
 import { isDomainProven, type CompanyRecord, type JobPort, type KeyPort, type ReceiptInput, type ReceiptPort, type ServeConfig, type SettingsPort, type SignedRequest, type VersionStore, type WorkspaceAction, type WorkspaceAuth, type WorkspaceHandlers, type WorkspaceRead, type WorkspaceResult, type WorkspaceRole, type WorkspaceSession } from "./serve/ports";
 import type { LedgerLogPort } from "./serve/ledger-port";
-import { PROBLEMS, type ProblemCode } from "./serve/errors";
+import { PROBLEMS, SessionUnavailable, type ProblemCode } from "./serve/errors";
 import type { PipelineStore, StoredVersion } from "./pipeline-store";
 import type { SetupDnsPort } from "./setup/ports";
 import { DOMAINS_PROOF_HEADER, troothOsWorkspaceDomains } from "./setup/workspace-domains";
@@ -147,6 +147,14 @@ export interface PipelineDeps {
   logError?: (request_id: string, action: string, error: unknown) => void;
   /** The WebAuthn relying party (src/identity/webauthn.ts webauthnConfig): rp id trooth.co and the trooth.co origins by default. */
   webauthn?: WebAuthnConfig;
+  /** The last signed request per connector kid on the catalog route (time and result), which the connection test reads (src/os/connectors.ts). */
+  connectorSeen?: (kid: string, at: string, result: "ok" | "signature_failed") => Promise<void>;
+  /** After a build is stored: the version's images and PDFs, for the credential jobs (src/os/credentials.ts). */
+  afterAssembled?: (trooth_id: string, file: SemantoFile) => Promise<void>;
+  /** A queue message of a kind the workspace contract owns (writeback, recall_event, credential); attempts is the queue's count. */
+  consumeOs?: (message: Record<string, unknown>, attempts: number) => Promise<boolean>;
+  /** The same kinds on their last failed attempt. */
+  consumeOsFailed?: (message: Record<string, unknown>, e: unknown) => Promise<boolean>;
 }
 
 export interface CompileSummary {
@@ -284,6 +292,7 @@ export class Pipeline implements WorkspaceHandlers {
     const state = { ...a.build.state!, result: { root_hash: file.root_hash, pages: file.header.pages_manifest.length, facts: file.facts.length, receipt: a.receipt } };
     await this.staging.updateBuild(a.build.build_id, { status: "done", finished_at: iso(this.d.now()), state, found: a.receipt.found, rendered: a.build.planned });
     await this.staging.clear(a.build.build_id);
+    if (this.d.afterAssembled) await this.d.afterAssembled(trooth_id, file);
     await this.afterBuild(a.build.build_id);
   }
 
@@ -361,8 +370,9 @@ export class Pipeline implements WorkspaceHandlers {
   }
 
   /** One queue message: a compile job, a build stage, or a fan-out of companies. */
-  async consume(message: unknown): Promise<void> {
+  async consume(message: unknown, attempts = 1): Promise<void> {
     if (!isRecord(message)) throw new Error("queue: the message is not an object");
+    if (this.d.consumeOs && (await this.d.consumeOs(message, attempts))) return;
     if (message.kind === "stage") {
       const next = await this.runStage(message as unknown as StageMessage);
       if (next && this.d.enqueue) await this.d.enqueue(next);
@@ -389,6 +399,7 @@ export class Pipeline implements WorkspaceHandlers {
 
   /** A message that failed its last attempt: a build stage marks its build failed. */
   async consumeFailed(message: unknown, e: unknown): Promise<void> {
+    if (isRecord(message) && this.d.consumeOsFailed && (await this.d.consumeOsFailed(message, e))) return;
     if (isRecord(message) && message.kind === "stage" && typeof message.build_id === "string") await this.failBuild(message.build_id, e);
   }
 
@@ -563,7 +574,9 @@ export class Pipeline implements WorkspaceHandlers {
     const header: SemantoHeader = { ...v.file.header, state: "signed", identity: { ...v.file.header.identity, ...(decision.authorized_by ? { authorized_by: decision.authorized_by } : {}) } };
 
     if (hosted) {
-      const key = (await this.d.keys.getCompanySigningKey(trooth_id)) ?? (await this.newHostedKey(trooth_id)).privateJwk;
+      // A key made here takes this signing's own time as its nbf: the clock moves on during the writes, and a later nbf
+      // than the statement's iat would make the first signature of every hosted company fail as key_not_yet_valid.
+      const key = (await this.d.keys.getCompanySigningKey(trooth_id)) ?? (await this.newHostedKey(trooth_id, now)).privateJwk;
       const prepared = versionSigningInput(header, key.kid, now);
       const sig = await rawSign(await importPrivate(key), utf8(prepared.signing_input));
       const jws = assembleJws(prepared, sig);
@@ -572,7 +585,8 @@ export class Pipeline implements WorkspaceHandlers {
       return this.finalize(company, v, header, jws.detached, key.kid);
     }
 
-    const customerKeys = (await this.d.store.keys(trooth_id)).filter((k) => k.custody === "customer").map((k) => k.public_jwk);
+    // A key staged as next in a rotation is published but does not sign until the rotation is confirmed.
+    const customerKeys = (await this.d.store.keys(trooth_id)).filter((k) => k.custody === "customer" && !k.next).map((k) => k.public_jwk);
     const current = currentKey(customerKeys, now);
     if (!current) return problem("conflict", "No public key is on file. Send your Ed25519 public key to keys/rotate as public_jwk first.");
     const prepared = versionSigningInput(header, current.kid, now);
@@ -640,15 +654,16 @@ export class Pipeline implements WorkspaceHandlers {
 
   // ---------------------------------------------------------------- keys
 
-  private async newHostedKey(trooth_id: string): Promise<{ privateJwk: PrivateJwk; publicJwk: PublicJwk }> {
-    const now = this.d.now();
+  private async newHostedKey(trooth_id: string, at?: Date): Promise<{ privateJwk: PrivateJwk; publicJwk: PublicJwk }> {
+    const now = at ?? this.d.now();
     const k = await createHostedKey(trooth_id, now);
     await this.d.store.putKey(trooth_id, { public_jwk: k.record.public_jwk, custody: "hosted", created_at: k.record.created_at }, k.privateJwk);
     await this.logKey(trooth_id, k.record.public_jwk);
     return { privateJwk: k.privateJwk, publicJwk: k.record.public_jwk };
   }
 
-  private async logKey(trooth_id: string, jwk: PublicJwk): Promise<void> {
+  /** Append a key leaf to the public log (every new company key, staged or not). */
+  async logKey(trooth_id: string, jwk: PublicJwk): Promise<void> {
     await this.d.log.append({ kind: "key", trooth_id, ref: jwk.kid, hash: await digest(canonicalize(jwk)), at: iso(this.d.now()) });
   }
 
@@ -657,7 +672,7 @@ export class Pipeline implements WorkspaceHandlers {
     const company = await this.d.store.getCompany(trooth_id);
     if (!company) return problem("conflict", "This company has no record yet.");
     const now = this.d.now();
-    const keys = await this.d.store.keys(trooth_id);
+    const keys = (await this.d.store.keys(trooth_id)).filter((k) => !k.next);
     const custody = body.custody === "customer" || body.public_jwk !== undefined ? "customer" : body.custody === "hosted" ? "hosted" : company.custody;
     const overlap_until = iso(new Date(now.getTime() + ROTATION_OVERLAP_MS));
 
@@ -690,7 +705,7 @@ export class Pipeline implements WorkspaceHandlers {
     const accepted = await acceptCustomerPublicKey(body.public_jwk, this.d.now());
     if (!accepted.ok) return problem("invalid_request", accepted.reason);
     const source = str(body.source) ?? "connector";
-    await this.d.store.putConnectorKey(trooth_id, accepted.jwk, source, iso(this.d.now()));
+    if (!(await this.d.store.putConnectorKey(trooth_id, accepted.jwk, source, iso(this.d.now())))) return problem("conflict", `This key is already on file (kid ${accepted.jwk.kid}). Each connector needs its own key.`);
     return ok(200, { object: "semanto.connector_key", trooth_id, kid: accepted.jwk.kid, source });
   }
 
@@ -953,7 +968,7 @@ export class Pipeline implements WorkspaceHandlers {
       const st = keyState(k.public_jwk, revocations, now);
       return { kid: k.public_jwk.kid, custody: k.custody, state: st.state, sentence: st.sentence, created_at: k.created_at, ...(k.public_jwk.nbf ? { nbf: k.public_jwk.nbf } : {}), ...(k.public_jwk.exp ? { exp: k.public_jwk.exp } : {}), ...(k.public_jwk.revoked_at ? { revoked_at: k.public_jwk.revoked_at } : {}) };
     });
-    const current = currentKey((await this.d.store.keys(trooth_id)).map((k) => k.public_jwk).filter((k) => !k.exp && !k.revoked_at), now);
+    const current = currentKey((await this.d.store.keys(trooth_id)).filter((k) => !k.next).map((k) => k.public_jwk).filter((k) => !k.exp && !k.revoked_at), now);
     const binding = current ? await bindingStatus(company.domain, current.kid, this.d.identity.http, dohDns(this.d.identity.http), now) : null;
     return ok(200, { object: "semanto.keys", trooth_id, keys, binding });
   }
@@ -981,7 +996,11 @@ export class Pipeline implements WorkspaceHandlers {
   /** The two well-known documents exactly as the Trooth-hosted routes answer them. */
   async networkCopy(company: CompanyRecord): Promise<{ semanto: Uint8Array; keys: Uint8Array }> {
     const file = await this.d.versions.getCurrent(company.trooth_id);
-    return { semanto: utf8(JSON.stringify(wellKnownSemanto(company, file, this.d.config))), keys: utf8(JSON.stringify(await this.d.keys.getCompanyJwks(company.trooth_id))) };
+    // /.well-known/trooth.semanto on the company's domain is the Semanto file itself (docs/spec/semanto-file.md): every
+    // adapter answers it from GET /public/semanto/{trooth_id} (adapters/shared/semanto-adapter.mjs API_PATHS.manifest),
+    // byte for byte as that route serves it. The short pointer document stands in only before anything is built.
+    const semanto = file ? JSON.stringify(file) : JSON.stringify(wellKnownSemanto(company, file, this.d.config));
+    return { semanto: utf8(semanto), keys: utf8(JSON.stringify(await this.d.keys.getCompanyJwks(company.trooth_id))) };
   }
 
   /** GET /os/semanto/{id}/writeback: what write-back would send, built from the signed record. Nothing is sent. */
@@ -1049,15 +1068,25 @@ export class Pipeline implements WorkspaceHandlers {
       { kind: "request", method: req.method, url: req.url, headers: req.headers },
       { resolveKey: (kid) => keys.find((k) => k.kid === kid) ?? null, required: [...CONNECTOR_COMPONENTS], tag: CONNECTOR_TAG, now: nowSec, maxAgeSeconds: CONNECTOR_MAX_AGE_SECONDS },
     );
-    if (!sig.ok) return problem("unauthorized", `The connector signature did not check out (${sig.reason}). Paste the connector's public key into the dashboard under Delivery, Connectors, and sign with tag trooth-connector.`);
+    const seen = async (kid: string | null, result: "ok" | "signature_failed") => {
+      if (kid && this.d.connectorSeen && keys.some((k) => k.kid === kid)) await this.d.connectorSeen(kid, iso(this.d.now()), result).catch(() => undefined);
+    };
+    if (!sig.ok) {
+      await seen(namedConnectorKid(req.headers), "signature_failed");
+      return problem("unauthorized", `The connector signature did not check out (${sig.reason}). Paste the connector's public key into the dashboard under Delivery, Connectors, and sign with tag trooth-connector.`);
+    }
     if (req.body.length > CATALOG_MAX_BYTES) return problem("payload_too_large", "The catalog is larger than 5 MB. Send it in parts.");
-    if (!(await verifyContentDigest(req.headers.get("content-digest"), req.body))) return problem("unauthorized", "Content-Digest does not match the body.");
+    if (!(await verifyContentDigest(req.headers.get("content-digest"), req.body))) {
+      await seen(sig.keyid, "signature_failed");
+      return problem("unauthorized", "Content-Digest does not match the body.");
+    }
     // A nonce on every catalog request, claimed once (atomically in the NonceDO), so a captured request cannot be replayed.
     if (!sig.params.nonce) return problem("unauthorized", "The connector signature carries no nonce. Update the connector; every request needs a fresh nonce.");
     if (this.d.nonces) {
       const until = (sig.params.expires ?? sig.params.created + CONNECTOR_MAX_AGE_SECONDS) * 1000;
       if (!(await this.d.nonces.claim(`${sig.keyid}:${sig.params.nonce}`, until, nowSec * 1000))) return problem("unauthorized", "This catalog request was already received (its nonce was used). Send a new request.");
     }
+    await seen(sig.keyid, "ok");
     let doc: unknown;
     try {
       doc = JSON.parse(new TextDecoder().decode(req.body));
@@ -1068,10 +1097,12 @@ export class Pipeline implements WorkspaceHandlers {
     if (doc.trooth_id !== undefined && doc.trooth_id !== trooth_id) return problem("forbidden", `This catalog names ${String(doc.trooth_id)}, not ${trooth_id}.`);
     const currency = str(doc.currency)?.toUpperCase() ?? "USD";
     const at = typeof doc.generated_at === "string" && !Number.isNaN(Date.parse(doc.generated_at)) ? new Date(doc.generated_at).toISOString() : iso(this.d.now());
-    const { records, offers, skipped } = catalogToInputs(doc.products, { company, currency, at, source: str(doc.source) ?? "connector" });
+    const { records, offers, skipped, removed } = catalogToInputs(doc.products, { company, currency, at, source: str(doc.source) ?? "connector" });
     const key = company.custody === "hosted" ? await this.d.keys.getCompanySigningKey(trooth_id) : null;
+    // A discontinued product is taken out of the offers at once: nothing is signed for it, and no key is needed to stop offering it.
+    for (const sku of removed) await this.d.commerce.removeOffers(trooth_id, sku);
     if (!key) {
-      return ok(202, { object: "semanto.catalog_receipt", trooth_id, signed: false, records: records.length, offers: offers.length, skipped, reason: "This company holds its own signing key, so Trooth cannot sign the records. Sign them from your own tools; nothing was published." });
+      return ok(202, { object: "semanto.catalog_receipt", trooth_id, signed: false, records: records.length, offers: offers.length, removed, skipped, reason: "This company holds its own signing key, so Trooth cannot sign the records. Sign them from your own tools; nothing was published." });
     }
     const policy = await this.d.commerce.offerPolicy(trooth_id);
     const signedRecords: SignedProductRecord[] = [];
@@ -1108,6 +1139,7 @@ export class Pipeline implements WorkspaceHandlers {
       connector_kid: sig.keyid,
       records: signedRecords.map((r) => ({ id: r.record.id, sku: r.record.sku })),
       offers: signedOffers.map((o) => ({ id: o.offer.id, sku: o.offer.sku, as_of: o.offer.as_of, not_after: o.offer.not_after })),
+      removed,
       skipped,
     });
   }
@@ -1240,8 +1272,8 @@ export class Pipeline implements WorkspaceHandlers {
       weeklyGapReports: async () => {
         await this.weeklyGapReports();
       },
-      compile: async (message: unknown) => {
-        await this.consume(message);
+      compile: async (message: unknown, attempts?: number) => {
+        await this.consume(message, attempts ?? 1);
       },
       failed: async (message: unknown, e: unknown) => {
         await this.consumeFailed(message, e);
@@ -1251,6 +1283,19 @@ export class Pipeline implements WorkspaceHandlers {
 }
 
 // ---------------------------------------------------------------- commerce helpers
+
+/** The keyid a request's trooth-connector signature names, read from Signature-Input without checking it, or null. */
+export function namedConnectorKid(headers: Headers): string | null {
+  const si = headers.get("signature-input");
+  if (!si) return null;
+  try {
+    const inputs = parseSignatureInput(si);
+    for (const v of Object.values(inputs)) if (v.params.tag === CONNECTOR_TAG && typeof v.params.keyid === "string") return v.params.keyid;
+  } catch {
+    return null;
+  }
+  return null;
+}
 
 function toMonitorProduct(s: SignedProductRecord): MonitorProduct {
   const r = s.record;
@@ -1266,7 +1311,13 @@ function toMonitorProduct(s: SignedProductRecord): MonitorProduct {
     ...(r.regulatory.consumer_notice ? { consumer_notice: { ...(r.regulatory.consumer_notice_type ? { type: r.regulatory.consumer_notice_type } : {}), message: r.regulatory.consumer_notice } } : {}),
     record_id: r.id,
     witnessed_at: r.evidence.witnessed_at,
+    ...(imageOf(r.media) ? { image_url: imageOf(r.media)! } : {}),
   };
+}
+
+/** The first image among a record's media, by its file extension. */
+function imageOf(media: { url: string }[]): string | null {
+  return media.find((m) => /\.(png|jpe?g|gif|webp|avif|tiff?|heic)(?:[?#]|$)/i.test(m.url))?.url ?? null;
 }
 
 function toMonitorOffer(s: SignedOffer): MonitorOffer {
@@ -1278,14 +1329,20 @@ const STOCK: Record<string, Availability> = { instock: "in_stock", in_stock: "in
 const AXES: Record<string, keyof VariantAxes> = { color: "color", colour: "color", size: "size", formulation: "formulation", edition: "edition" };
 
 /** Map the connector catalog document (adapters/wordpress-plugin/README.md) to product record and offer inputs. */
-export function catalogToInputs(products: unknown[], ctx: { company: CompanyRecord; currency: string; at: string; source: string }): { records: ProductRecordInput[]; offers: OfferInput[]; skipped: { sku: string; reason: string }[] } {
+export function catalogToInputs(products: unknown[], ctx: { company: CompanyRecord; currency: string; at: string; source: string }): { records: ProductRecordInput[]; offers: OfferInput[]; skipped: { sku: string; reason: string }[]; removed: string[] } {
   const records: ProductRecordInput[] = [];
   const offers: OfferInput[] = [];
   const skipped: { sku: string; reason: string }[] = [];
+  /** Skus sent as discontinued: a connector has no delete call, so this is how a deleted or unpublished product leaves the offers. */
+  const removed: string[] = [];
   const seller = { domain: ctx.company.domain, trooth_id: ctx.company.trooth_id };
   const one = (p: Record<string, unknown>, parent: Record<string, unknown> | null) => {
     const id = str(String(p.id ?? "")) ?? null;
     const sku = str(p.sku) ?? (id ? `${ctx.source}-${id}` : null);
+    if (String(p.stock_status ?? "").toLowerCase() === "discontinued" && sku) {
+      removed.push(sku);
+      return;
+    }
     const url = str(p.url) ?? (parent ? str(parent.url) : undefined);
     const name = str(p.name) ?? (parent ? str(parent.name) : undefined);
     if (!sku || !url || !name) {
@@ -1342,7 +1399,7 @@ export function catalogToInputs(products: unknown[], ctx: { company: CompanyReco
     if (variants.length) for (const v of variants) one(v, raw);
     else one(raw, null);
   }
-  return { records, offers, skipped };
+  return { records, offers, skipped, removed };
 }
 
 /** A commerce store whose company() is answered from the company rows, so the feeds and the UCP manifest name the company the records belong to. */
@@ -1471,8 +1528,9 @@ export function troothOsSession(service: ServiceFetcher | undefined): (req: Requ
     try {
       res = await service.fetch(TROOTH_OS_SESSION_URL, { method: "GET", headers: sessionProof ? { authorization: `DPoP ${token}`, dpop: sessionProof, accept: "application/json" } : { authorization: auth, accept: "application/json" } });
     } catch {
-      return null;
+      throw new SessionUnavailable(null);
     }
+    if (res.status >= 500) throw new SessionUnavailable(res.status);
     if (res.status !== 200) return null;
     let j: unknown;
     try {

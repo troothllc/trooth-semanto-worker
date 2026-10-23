@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+# Copyright (c) 2026 Trooth, LLC
+#
+# Semanto by Trooth, the Shopify app configuration (Shopify CLI app
+# configuration file, deployed with shopify app deploy). Managed installation:
+# the scopes below are what Shopify asks the merchant to approve at install,
+# and the app uses token exchange, so there is no OAuth redirect flow
+# (use_legacy_install_flow = false). Every webhook subscription is declared
+# here, the compliance topics included. client_id is the app's public client
+# id from the Partner Dashboard (set by shopify app config link).
+
+client_id = ""
+name = "Semanto by Trooth"
+handle = "semanto-by-trooth"
+application_url = "https://shopify.trooth.co/app"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
+include_config_on_deploy = true
+
+[access_scopes]
+# read_products: the products, variants, prices and availability the app sends to Trooth, the products/* webhooks and
+# the bulk operation that reads the whole catalog once at connect. Nothing else is needed: the app embed's state is read
+# with App Bridge (no themes scope), the embed's values live in app-owned installation metafields (no scope), and no
+# customer, order or inventory data is ever read.
+scopes = "read_products"
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = ["https://shopify.trooth.co/auth/callback"]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  topics = ["app/uninstalled"]
+  uri = "/webhooks"
+
+  [[webhooks.subscriptions]]
+  topics = ["products/create", "products/update", "products/delete"]
+  uri = "/webhooks"
+
+  [[webhooks.subscriptions]]
+  topics = ["bulk_operations/finish"]
+  uri = "/webhooks"
+
+  # Mandatory compliance topics. The app holds no customer personal data; see submission/privacy-and-data.md.
+  [[webhooks.subscriptions]]
+  compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+  uri = "/webhooks"
+
+[pos]
+embedded = false

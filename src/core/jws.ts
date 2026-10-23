@@ -192,4 +192,5 @@ export const JWS_TYPES = {
   readReceipt: "https://trooth.co/types/read-receipt",
   revocation: "https://trooth.co/types/revocation-list",
   contentSignals: "https://trooth.co/types/content-signals",
+  sellerList: "https://trooth.co/types/seller-list",
 } as const;

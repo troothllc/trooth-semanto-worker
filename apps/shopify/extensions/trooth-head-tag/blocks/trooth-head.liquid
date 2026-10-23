@@ -1,0 +1,26 @@
+{%- comment -%}
+SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+Copyright (c) 2026 Trooth, LLC
+
+Semanto by Trooth app embed. Adds the two site-wide head tags from
+adapters/head-tag/README.md before </head> on every page: the link to the
+store's signed Semanto copy and the pointer to its facts as JSON-LD. The
+Trooth ID and the API address come from the app's own installation
+metafields (app.metafields.trooth), written by the app when the store is
+connected and removed on Disconnect, so the merchant types nothing here and
+the embed adds nothing while the store is not connected.
+{%- endcomment -%}
+{%- assign trooth_id = app.metafields.trooth.trooth_id.value -%}
+{%- assign trooth_api = app.metafields.trooth.api_base.value | default: 'https://api.trooth.co' -%}
+{%- if trooth_id != blank -%}
+<link rel="https://trooth.co/rel/semanto" href="{{ trooth_api | escape }}/public/semanto/{{ trooth_id | url_encode }}">
+<script type="application/ld+json" src="{{ trooth_api | escape }}/public/semanto/{{ trooth_id | url_encode }}/facts.jsonld"></script>
+{%- endif -%}
+
+{% schema %}
+{
+  "name": "Semanto by Trooth",
+  "target": "head",
+  "settings": []
+}
+{% endschema %}

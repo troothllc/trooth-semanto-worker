@@ -29,7 +29,8 @@ import type { RouteGroup } from "../serve/routes";
 import { makeReceipt } from "./receipts";
 import { D1ReceiptStore, type ReceiptRow } from "./ports";
 
-export type LimitGroup = RouteGroup | "directory_origin" | "directory_client";
+/** os_write is keyed by company and session subject (the workspace writes of docs/spec/os-api.md); every other group by client address. */
+export type LimitGroup = RouteGroup | "directory_origin" | "directory_client" | "os_write" | "connect_poll" | "connect_uninstall";
 
 export interface Limit {
   /** Requests allowed at once. */
@@ -44,6 +45,14 @@ export const RATE_LIMITS: Record<LimitGroup, Limit> = {
   check: { burst: 10, per_second: 0.2 },
   directory_origin: { burst: 5, per_second: 1 / 60 },
   directory_client: { burst: 10, per_second: 1 / 60 },
+  /** The workspace writes: 30 a minute per session subject. */
+  os_write: { burst: 30, per_second: 30 / 60 },
+  /** Opening an app connect session: 10 a minute per client address. */
+  public_connect: { burst: 10, per_second: 10 / 60 },
+  /** Polling one connect session: 40 a minute per session id (a poll every 2 seconds fits; app servers share egress addresses). */
+  connect_poll: { burst: 40, per_second: 40 / 60 },
+  /** The signed uninstall: 10 a minute per connector key id. */
+  connect_uninstall: { burst: 10, per_second: 10 / 60 },
 };
 
 export interface Bucket {
@@ -173,6 +182,17 @@ export function durableRateLimit(ns: RateNamespace): (req: Request, group: Route
     const key = clientAddress(req);
     try {
       return (await (await call(ns, `ip:${key}`, "/take", { key, group })).json()) as { allowed: boolean; retry_after: number };
+    } catch {
+      return { allowed: true, retry_after: 0 };
+    }
+  };
+}
+
+/** A keyed limiter over RATE (RouteDeps.limit): one object per key, for the os_write group. A failing object lets the request through. */
+export function durableKeyedLimit(ns: RateNamespace): (key: string, group: LimitGroup) => Promise<{ allowed: boolean; retry_after: number }> {
+  return async (key, group) => {
+    try {
+      return (await (await call(ns, `${group}:${key}`, "/take", { key, group })).json()) as { allowed: boolean; retry_after: number };
     } catch {
       return { allowed: true, retry_after: 0 };
     }

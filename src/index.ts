@@ -29,6 +29,11 @@
 //   gap        src/gap providers with the keys in Env
 //   jobs       a build in queue messages of at most 25 pages; hourly,
 //              nightly and weekly crons fan out one message per 25 companies
+//   os         the workspace contract of 23 October 2026 (src/os/service.ts,
+//              src/serve/os-routes.ts) over D1OsStore: staged key rotation,
+//              connector keys and the connect flow, Connect Google, company
+//              settings, write-back runs, seller lists, recall events to
+//              worker-f and C2PA credentials, its jobs on the same queue
 //
 // A deployment without TROOTH_WITNESS_KEY still starts: routes that sign or
 // witness answer a 503 witness_key_missing problem and the rest keep working.
@@ -47,13 +52,19 @@ import { platformHttp as identityHttp } from "./identity/ports";
 import { webauthnConfig } from "./identity/webauthn";
 import { platformHttp as readersHttp, KvKeyCache, KvNonceStore } from "./readers/ports";
 import { DurableNonceStore, NonceDO, type NonceNamespace } from "./readers/nonce-do";
-import { CountedReceipts, durableDirectoryLimit, durableRateLimit, RateLimitDO, type RateNamespace } from "./readers/rate-limit";
+import { CountedReceipts, durableDirectoryLimit, durableKeyedLimit, durableRateLimit, RateLimitDO, type RateNamespace } from "./readers/rate-limit";
 import { LogDO, durableLogAppender, type LogNamespace } from "./ledger/log-do";
 import { dohResolver } from "./core/ssrf";
 import { guardedFetchPort, guardedGet, resendEmailPort } from "./monitor/ports";
 import { dohSetupDns } from "./setup/ports";
 import { allAdapters } from "./gap/providers";
 import { Pipeline, ReaderReceipts, forwardingFromStore, troothOsAuthorize, troothOsSession, webBotAuthReaders, withCompanies } from "./pipeline";
+import { D1OsStore } from "./db/os-d1";
+import { DEFAULT_GOOGLE_REDIRECT_URI, OsService, platformOutbound } from "./os/service";
+import { withRecallEvents } from "./os/recalls";
+import { credentialsForVersion } from "./os/credentials";
+import { consumeOs, consumeOsFailed } from "./os/jobs";
+import { devDashboardBase, devUpstreamBase, devUpstreamFetch } from "./dev-upstream";
 
 // The Durable Object classes wrangler.toml binds as NONCES, LOG and RATE.
 export { NonceDO, LogDO, RateLimitDO };
@@ -91,6 +102,9 @@ export function wire(env: Env): Wired {
     return witness;
   };
   const now = () => new Date();
+  // Development only: the fixed upstreams (Google, Resend) and the dashboard on loopback (src/dev-upstream.ts); production gets fetch itself.
+  const upstreamFetch = devUpstreamFetch(devUpstreamBase(env));
+  const dashboardBase = devDashboardBase(env);
   const config = { public_api_base: env.PUBLIC_API_BASE, network_base: env.NETWORK_BASE, ledger_url: env.LEDGER_URL };
   const versions = new D1VersionStore(env.DB, env.STORE);
   const keys = new D1Keys(env.DB, env.STORE, witness, env.HOSTED_KEY_SEAL_SECRET, previousWitnessKeys(env));
@@ -102,7 +116,11 @@ export function wire(env: Env): Wired {
   // Nonces claimed atomically in the NonceDO; the KV store is a fallback that is not atomic.
   const nonces = env.NONCES ? new DurableNonceStore(env.NONCES as unknown as NonceNamespace) : new KvNonceStore(env.CACHE);
   const store = new D1PipelineStore(env.DB, env.STORE, env.HOSTED_KEY_SEAL_SECRET);
-  const commerce = withCompanies(new D1CommerceStore(env.DB), store, env.PUBLIC_API_BASE);
+  const osStore = new D1OsStore(env.DB, env.STORE);
+  // The workspace contract's service is made after the pipeline; these hooks reach it once it exists.
+  let os: OsService | null = null;
+  // Every recall stored or changed is sent to worker-f's changes feed (src/os/recalls.ts).
+  const commerce = withCompanies(withRecallEvents(new D1CommerceStore(env.DB), () => os), store, env.PUBLIC_API_BASE);
   const idHttp = identityHttp();
   const setupDns = dohSetupDns();
   const rate = env.RATE ? (env.RATE as unknown as RateNamespace) : null;
@@ -132,7 +150,7 @@ export function wire(env: Env): Wired {
     monitor: {
       fetch: guardedFetchPort({ resolve }),
       store: new D1MonitorStore(env.DB),
-      ...(env.RESEND_API_KEY ? { email: resendEmailPort(env.RESEND_API_KEY) } : {}),
+      ...(env.RESEND_API_KEY ? { email: resendEmailPort(env.RESEND_API_KEY, upstreamFetch) } : {}),
       ...(env.ALERT_FROM ? { from: env.ALERT_FROM } : {}),
     },
     identity: { http: idHttp },
@@ -149,6 +167,24 @@ export function wire(env: Env): Wired {
     logError: (request_id, action, error) => console.error(JSON.stringify({ request_id, action, error: error instanceof Error ? error.message : String(error) })),
     // Passkeys release the hosted key: rp id trooth.co unless set; http://localhost only in development.
     webauthn: webauthnConfig({ rp_id: env.WEBAUTHN_RP_ID ?? null, development: env.ENVIRONMENT === "development" }),
+    connectorSeen: (kid, at, result) => osStore.recordConnectorRequest(kid, at, result),
+    afterAssembled: async (trooth_id, file) => void (os ? await credentialsForVersion(os, trooth_id, file) : 0),
+    consumeOs: async (message, attempts) => (os ? consumeOs(os, message, attempts) : false),
+    consumeOsFailed: async (message, e) => (os ? consumeOsFailed(os, message, e) : false),
+  });
+  os = new OsService({
+    pipeline,
+    os: osStore,
+    ...(env.GOOGLE_OAUTH_CLIENT_ID && env.GOOGLE_OAUTH_CLIENT_SECRET ? { google: { client_id: env.GOOGLE_OAUTH_CLIENT_ID, client_secret: env.GOOGLE_OAUTH_CLIENT_SECRET, redirect_uri: env.GOOGLE_OAUTH_REDIRECT_URI ?? DEFAULT_GOOGLE_REDIRECT_URI } } : {}),
+    ...(env.HOSTED_KEY_SEAL_SECRET ? { sealSecret: env.HOSTED_KEY_SEAL_SECRET } : {}),
+    http: platformOutbound(upstreamFetch),
+    ...(env.RESEND_API_KEY ? { email: resendEmailPort(env.RESEND_API_KEY, upstreamFetch) } : {}),
+    ...(dashboardBase ? { dashboardBase } : {}),
+    ...(env.ALERT_FROM ? { from: env.ALERT_FROM } : {}),
+    ...(env.TROOTH_OS ? { troothOs: env.TROOTH_OS } : {}),
+    ...(env.SEMANTO_EVENTS_SECRET ? { eventsSecret: env.SEMANTO_EVENTS_SECRET } : {}),
+    ...(env.COMPILE_QUEUE ? { enqueue: async (job: QueueMessage) => void (await env.COMPILE_QUEUE!.send(job)) } : {}),
+    assetProbe: (url) => guardedGet(url, { accept: "image/*,application/pdf" }, { resolve, maxBytes: 25 * 1024 * 1024 }),
   });
 
   const ports: Ports = { versions, log, keys, receipts, settings, jobs: pipeline.jobs(), config, now };
@@ -164,7 +200,8 @@ export function wire(env: Env): Wired {
     commerce,
     firstPublications: { get: (id) => store.getFirstPublication(id) },
     revocations: (trooth_id) => store.getRevocationList(trooth_id),
-    ...(rate ? { rateLimit: durableRateLimit(rate) } : {}),
+    ...(rate ? { rateLimit: durableRateLimit(rate), limit: durableKeyedLimit(rate) } : {}),
+    os,
     // The dashboard on trooth.co and www.trooth.co; http://localhost too in development.
     dashboardOrigins: env.ENVIRONMENT === "development" ? [...DASHBOARD_ORIGINS, DEVELOPMENT_DASHBOARD_ORIGIN] : DASHBOARD_ORIGINS,
   };
@@ -188,7 +225,7 @@ export default {
   async queue(batch: MessageBatch<QueueMessage>, env: Env): Promise<void> {
     await runQueue(
       appFor(env).ports,
-      batch.messages.map((m) => ({ body: m.body, attempts: m.attempts, ack: () => m.ack(), retry: () => m.retry() })),
+      batch.messages.map((m) => ({ body: m.body, attempts: m.attempts, ack: () => m.ack(), retry: (opts?: { delaySeconds?: number }) => m.retry(opts) })),
     );
   },
 };

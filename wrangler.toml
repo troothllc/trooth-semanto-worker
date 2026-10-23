@@ -12,13 +12,17 @@
 #   TROOTH_WITNESS_PREVIOUS_KEYS   optional: earlier witness public JWKs (JSON array), still served
 #   HOSTED_KEY_SEAL_SECRET         32+ characters: seals hosted company keys at rest
 #   RECEIPT_IP_SALT_SECRET         16+ characters: the daily salt for read-receipt address hashes
-#   RESEND_API_KEY                 optional: plain-language alerts and setup emails
+#   RESEND_API_KEY                 optional: plain-language alerts, setup emails and alert address confirmations
+#   GOOGLE_OAUTH_CLIENT_ID         optional: Connect Google (Merchant Center and Business Profile write-back)
+#   GOOGLE_OAUTH_CLIENT_SECRET     optional: the same OAuth client's secret
+#   SEMANTO_EVENTS_SECRET          optional: HMAC key for recall events sent to worker-f (set the same value on worker-f)
 #   OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, PERPLEXITY_API_KEY   optional: gap report providers
 #
 # Founder steps before the first deploy: create the D1 database and the KV namespace and put their
 # ids where REPLACE_WITH_ stands below; create the R2 bucket trooth-semanto and the queues
-# trooth-semanto-compile and trooth-semanto-compile-dlq; apply migrations 0001 to 0005 with
-# `wrangler d1 migrations apply trooth_semanto --env production`.
+# trooth-semanto-compile and trooth-semanto-compile-dlq; apply migrations 0001 to 0007 with
+# `wrangler d1 migrations apply trooth_semanto --env production`. Each migration from 0007 on has a down
+# file in migrations-down/ (never applied by wrangler).
 
 name = "trooth-semanto-worker-dev"
 main = "src/index.ts"
@@ -31,8 +35,12 @@ ENVIRONMENT = "development"
 PUBLIC_API_BASE = "https://api.trooth.co/public/semanto"
 NETWORK_BASE = "https://trooth.co/network/company"
 LEDGER_URL = "https://api.trooth.co/public/semanto/log"
-# Optional vars: TSA_URL (the RFC 3161 time-stamp authority; without it no tree head is timestamped)
-# and ALERT_FROM (the sender address for alerts and setup emails).
+# Optional vars: TSA_URL (the RFC 3161 time-stamp authority; without it no tree head is timestamped),
+# ALERT_FROM (the sender address for alerts and setup emails) and GOOGLE_OAUTH_REDIRECT_URI (where Google
+# redirects after consent; https://api.trooth.co/public/semanto/google/callback when unset).
+# Development only (src/dev-upstream.ts, ignored in production): DEV_UPSTREAM_BASE (a loopback origin that stands in for
+# the Google and Resend hosts) and DEV_DASHBOARD_BASE (the dashboard on loopback); the QA stack in qa/ sets both.
+# The compile queue also carries the workspace jobs (writeback, recall_event, credential): no new cron, no polling.
 
 # Hourly: change detection for every signed company; nightly: tree head, RFC 3161 timestamp and revocation list;
 # weekly: gap reports (src/gap/report.ts WEEKLY_RUN.cron is the same "0 6 * * 1"; src/serve/routes.ts runScheduled maps all three).

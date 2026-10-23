@@ -38,7 +38,7 @@ import { negotiateRoute } from "./negotiate-route";
 import { buildPageProof, verifyUrl } from "./proof";
 import { factsJsonLd, manifestMarkdown, pageJsonLd, wellKnownSemanto } from "./represent";
 import { isDomainProven, WitnessKeyMissingError, WORKSPACE_ACTIONS, type CompanyRecord, type Ports, type ReceiptInput, type StoredPage, type WorkspaceAction, type WorkspaceAuth, type WorkspaceHandlers, type WorkspaceRead, type WorkspaceResult, type WorkspaceSession } from "./ports";
-import { problemJson } from "./errors";
+import { problemJson, SessionUnavailable } from "./errors";
 import { isAuthorized } from "../commerce/sellers";
 import { verifyCatalog } from "../commerce/nested";
 import { lookupSubstance, synonymsOf } from "../commerce/synonyms";
@@ -46,6 +46,10 @@ import { fromBase64Url } from "../core/encoding";
 import type { CommerceStore } from "../commerce/ports";
 import { feedResponse, offerResponse, offersResponse, problemMarkdown, productResponse, productsResponse, ucpManifestResponse, type PlainResponse as CommerceResponse } from "../commerce/routes";
 import { resolve as resolveDelivery, validateSettings, withDefaults, DEFAULT_SETTINGS, type DeliverySettings } from "../settings/delivery";
+import { registerOsRoutes } from "./os-routes";
+import type { OsService } from "../os/service";
+import type { LimitGroup } from "../readers/rate-limit";
+import { newestValidSellerList, sellerListAuthorization } from "../os/sellers";
 
 type Vars = { Variables: { receipt?: ReceiptInput; requestId?: string } };
 
@@ -80,8 +84,8 @@ export function dashboardOriginFor(origin: string | null | undefined, allowed: r
 /** readJson's answer for a body over the cap. */
 const TOO_LARGE = Symbol("too_large");
 
-/** The route groups the rate limit counts separately. */
-export type RouteGroup = "read" | "log" | "check";
+/** The route groups the rate limit counts separately per client address. public_connect is the app connect flow (10 a minute). */
+export type RouteGroup = "read" | "log" | "check" | "public_connect";
 
 /** The largest body any POST route reads. */
 export const MAX_BODY_BYTES = 5 * 1024 * 1024;
@@ -126,6 +130,10 @@ export interface RouteDeps {
   revocations?: (trooth_id: string | null) => Promise<{ jws: string; issued_at: string } | null>;
   /** Origins allowed to call /os from a browser; DASHBOARD_ORIGINS by default (src/index.ts adds http://localhost in development). */
   dashboardOrigins?: readonly string[];
+  /** The workspace contract of 23 October 2026 (src/os/service.ts, routes in src/serve/os-routes.ts). */
+  os?: OsService;
+  /** A token bucket by an explicit key and group: os_write is keyed by company and session subject (src/readers/rate-limit.ts). */
+  limit?: (key: string, group: LimitGroup) => Promise<{ allowed: boolean; retry_after: number }>;
 }
 
 /** The request pieces the handlers read. Never the user agent. */
@@ -251,7 +259,7 @@ export function createApp(deps: RouteDeps): ServeApp {
   /** The trust state the llms.txt Trooth section describes. */
   const trustState = (file: SemantoFile): TrustState => (file.header.state === "signed" && file.signature && file.witness ? "signed_and_witnessed" : file.witness ? "witnessed" : "neither");
 
-  async function sendProblem(c: Context<Vars>, company: CompanyRecord | null, file: SemantoFile | null, code: ProblemCode, opts: { detail?: string; retry_after?: number } = {}): Promise<Response> {
+  async function sendProblem(c: Context<Vars>, company: CompanyRecord | null, file: SemantoFile | null, code: ProblemCode, opts: { detail?: string; retry_after?: number; extensions?: Record<string, unknown> } = {}): Promise<Response> {
     const hints = requestHints(c);
     const p: Problem = problem(code, { ...opts, instance: new URL(c.req.url).pathname });
     const { rep, body } = renderProblem(p, hints.accept);
@@ -319,8 +327,10 @@ export function createApp(deps: RouteDeps): ServeApp {
     // Malformed percent-encoding anywhere in the path: a signed 400, never a thrown 500.
     if (path.split("/").some((seg) => safeDecode(seg) === null)) return sendProblem(c, null, null, "invalid_request", { detail: "The address has a malformed percent-encoding." });
     if (c.req.method === "POST" && Number(c.req.header("content-length") ?? "0") > MAX_BODY_BYTES) return sendProblem(c, null, null, "payload_too_large", { detail: "The body is larger than 5 MB. Send it in smaller parts." });
-    if (deps.rateLimit && c.req.method !== "OPTIONS" && !path.startsWith(`${osPrefix}/`)) {
-      const group: RouteGroup = path.startsWith(`${apiPrefix}/log/`) ? "log" : path === `${apiPrefix}/verify` || path.endsWith("/check") ? "check" : "read";
+    // The connect poll and the uninstall are limited by session id and by key id in src/serve/os-routes.ts: app servers share egress addresses.
+    const keyedConnect = path.startsWith(`${apiPrefix}/connect/`) && !(c.req.method === "POST" && path === `${apiPrefix}/connect/sessions`);
+    if (deps.rateLimit && c.req.method !== "OPTIONS" && !path.startsWith(`${osPrefix}/`) && !keyedConnect) {
+      const group: RouteGroup = path === `${apiPrefix}/connect/sessions` ? "public_connect" : path.startsWith(`${apiPrefix}/log/`) ? "log" : path === `${apiPrefix}/verify` || path.endsWith("/check") ? "check" : "read";
       const r = await deps.rateLimit(c.req.raw, group);
       if (!r.allowed) return sendProblem(c, null, null, "rate_limited", { retry_after: r.retry_after });
     }
@@ -339,6 +349,28 @@ export function createApp(deps: RouteDeps): ServeApp {
     }
     await next();
   });
+
+  // ------------------------------------------------------------ the workspace contract (src/serve/os-routes.ts), before every other route
+
+  if (deps.os) {
+    registerOsRoutes(app, {
+      osPrefix,
+      apiPrefix,
+      requestIdOf,
+      workspaceFor: (c, trooth_id) => workspaceFor(c, trooth_id),
+      sessionFor: (c) => sessionFor(c),
+      readBody: async (c) => {
+        const v = await readJson(c);
+        return v === TOO_LARGE ? "too_large" : v;
+      },
+      readRaw: (c) => readCapped(c.req.raw, MAX_BODY_BYTES),
+      sendWorkspace: (c, trooth_id, result) => sendWorkspace(c, trooth_id, result),
+      sendProblem: (c, code, detail, retry_after) => sendProblem(c, null, null, code, { ...(detail ? { detail } : {}), ...(retry_after !== undefined ? { retry_after } : {}) }),
+      sendRedirect: async (c, location) => send(c, { status: 302, rep: "markdown", body: new Uint8Array(0), version_id: null, location, links: {}, signer: await witnessSigner() }),
+      sendJson: async (c, status, value) => send(c, { status, rep: "json", body: json(value), version_id: null, links: {}, signer: await witnessSigner() }),
+      ...(deps.limit ? { limit: deps.limit } : {}),
+    }, deps.os);
+  }
 
   // ------------------------------------------------------------ the public log (docs/spec/log.md), before /:trooth_id
 
@@ -463,6 +495,14 @@ export function createApp(deps: RouteDeps): ServeApp {
     if (!company || !deps.commerce) return sendProblem(c, null, null, "semanto_not_found");
     const domain = (c.req.query("domain") ?? "").toLowerCase();
     const sku = c.req.query("sku") ?? "";
+    // The newest valid signed seller list, when the company published one, is the only list read (docs/spec/os-api.md, seller lists).
+    const list = deps.os ? await newestValidSellerList(deps.os, trooth_id) : null;
+    if (list) {
+      const body = domain
+        ? { object: "semanto.seller_authorization", ...sellerListAuthorization(list.payload, domain, ports.now()), brand_trooth_id: trooth_id, seller_domain: domain, ...(sku ? { sku } : {}), checked_at: ports.now().toISOString() }
+        : { object: "semanto.seller_list", trooth_id, version: list.row.version, issued_at: list.row.issued_at, kid: list.row.kid, jws: list.row.jws, sellers: list.payload.sellers };
+      return send(c, { status: 200, rep: "json", body: json(body), version_id: null, links: links(company, null), signer: await signerFor(company) });
+    }
     if (!domain || !sku) return sendProblem(c, company, null, "invalid_request", { detail: "Send the seller's domain and the sku as domain= and sku=." });
     const answer = isAuthorized({ trooth_id, attestations: await deps.commerce.attestations(trooth_id) }, domain, sku, ports.now());
     return send(c, { status: 200, rep: "json", body: json({ object: "semanto.seller_authorization", ...answer }), version_id: null, links: links(company, null), signer: await signerFor(company) });
@@ -714,7 +754,10 @@ export function createApp(deps: RouteDeps): ServeApp {
     const company = await ports.versions.getCompany(trooth_id);
     if (!company) return sendProblem(c, null, null, "semanto_not_found");
     const file = await ports.versions.getCurrent(trooth_id);
-    return send(c, { status: 200, rep: "json", body: json(wellKnownSemanto(company, file, ports.config)), version_id: file ? versionId(file.root_hash) : null, links: links(company, file), signer: await signerFor(company) });
+    // The same bytes the company's own /.well-known/trooth.semanto carries through every adapter: the Semanto file
+    // itself (docs/spec/semanto-file.md, docs/spec/delivery.md), as GET /{trooth_id} serves it (QA-03); the short
+    // pointer document only before anything is built.
+    return send(c, { status: 200, rep: "json", body: json(file ?? wellKnownSemanto(company, file, ports.config)), version_id: file ? versionId(file.root_hash) : null, links: links(company, file), signer: await signerFor(company) });
   });
 
   // ------------------------------------------------------------ a page by its path on the company's domain (adapters' API_PATHS.byPath)
@@ -767,19 +810,35 @@ export function createApp(deps: RouteDeps): ServeApp {
   /** Deny by default: no hook, no session or a refused session is a 401 problem; a session for another company is a 403 problem. */
   async function workspaceFor(c: Context<Vars>, trooth_id: string): Promise<WorkspaceAuth | Response> {
     if (!deps.authorize) return sendProblem(c, null, null, "unauthorized");
-    const answer = await deps.authorize(c.req.raw, trooth_id);
-    if (!answer) return sendProblem(c, null, null, "unauthorized");
-    if (answer === true) return { trooth_id, role: "admin", user_id: "workspace", name: "Workspace" };
-    if (answer.trooth_id !== trooth_id) return sendProblem(c, null, null, "forbidden", { detail: `This session belongs to ${answer.trooth_id}, not ${trooth_id}.` });
-    return answer;
+    try {
+      const answer = await deps.authorize(c.req.raw, trooth_id);
+      if (!answer) {
+        // A signed-in person whose workspace has no Semanto company is refused as not this company's, not told to sign in
+        // (QA-11: a 401 here read as signed out to the dashboard and to API clients).
+        if (deps.session && (await deps.session(c.req.raw))) return sendProblem(c, null, null, "forbidden", { detail: "This address belongs to another company's workspace. Your workspace has no Semanto record here." });
+        return sendProblem(c, null, null, "unauthorized");
+      }
+      if (answer === true) return { trooth_id, role: "admin", user_id: "workspace", name: "Workspace" };
+      if (answer.trooth_id !== trooth_id) return sendProblem(c, null, null, "forbidden", { detail: `This session belongs to ${answer.trooth_id}, not ${trooth_id}.` });
+      return answer;
+    } catch (e) {
+      // QA-12: the session service down is a 503 to try again, never a 401 that signs the person out.
+      if (e instanceof SessionUnavailable) return sendProblem(c, null, null, "session_unavailable");
+      throw e;
+    }
   }
 
   // The claim routes: a worker-f session with no Semanto company yet (docs/spec/setup-api.md).
   async function sessionFor(c: Context<Vars>): Promise<WorkspaceSession | Response> {
     if (!deps.session) return sendProblem(c, null, null, "unauthorized");
-    const s = await deps.session(c.req.raw);
-    if (!s) return sendProblem(c, null, null, "unauthorized");
-    return s;
+    try {
+      const s = await deps.session(c.req.raw);
+      if (!s) return sendProblem(c, null, null, "unauthorized");
+      return s;
+    } catch (e) {
+      if (e instanceof SessionUnavailable) return sendProblem(c, null, null, "session_unavailable");
+      throw e;
+    }
   }
   const sessionRoute = (method: "get" | "post", path: string, what: "claim" | "setup/start" | "setup") =>
     app[method](`${osPrefix}/${path}`, async (c) => {
@@ -834,7 +893,7 @@ export function createApp(deps: RouteDeps): ServeApp {
   async function sendWorkspace(c: Context<Vars>, trooth_id: string, result: WorkspaceResult): Promise<Response> {
     const company = await ports.versions.getCompany(trooth_id);
     const file = company ? await ports.versions.getCurrent(trooth_id) : null;
-    if (result.problem) return sendProblem(c, company, file, result.problem.code, { detail: result.problem.detail });
+    if (result.problem) return sendProblem(c, company, file, result.problem.code, { detail: result.problem.detail, ...(result.problem.extensions ? { extensions: result.problem.extensions } : {}), ...(result.headers?.["Retry-After"] ? { retry_after: Number(result.headers["Retry-After"]) } : {}) });
     if (result.raw) return send(c, { status: result.status, rep: "csv", body: utf8(result.raw.text), version_id: file ? versionId(file.root_hash) : null, signer: await signerFor(company), ...(result.headers ? { extra: result.headers } : {}) });
     return send(c, { status: result.status, rep: "json", body: json(result.body ?? null), version_id: file ? versionId(file.root_hash) : null, links: company ? links(company, file) : {}, signer: await signerFor(company), ...(result.headers ? { extra: result.headers } : {}) });
   }
@@ -1008,17 +1067,26 @@ export async function runScheduled(ports: Ports, cron: string): Promise<void> {
 }
 
 /** Attempts a message gets (wrangler.toml max_retries 3, so four in all) before it goes to the dead letter queue. */
-export const QUEUE_ATTEMPTS = 4;
+export { QUEUE_ATTEMPTS } from "../os/common";
+import { QUEUE_ATTEMPTS } from "../os/common";
 
-export async function runQueue(ports: Ports, messages: { body: unknown; attempts?: number; ack(): void; retry(): void }[]): Promise<void> {
+/** A job that asks to run again later (src/os/common.ts RetryLater): the queue waits delaySeconds before the next attempt. */
+interface DelayedRetry {
+  delaySeconds: number;
+}
+const delayOf = (e: unknown): number | null => (e && typeof e === "object" && "delaySeconds" in e && typeof (e as DelayedRetry).delaySeconds === "number" ? (e as DelayedRetry).delaySeconds : null);
+
+export async function runQueue(ports: Ports, messages: { body: unknown; attempts?: number; ack(): void; retry(opts?: { delaySeconds?: number }): void }[]): Promise<void> {
   for (const m of messages) {
     try {
-      await ports.jobs.compile(m.body);
+      await ports.jobs.compile(m.body, m.attempts ?? 1);
       m.ack();
     } catch (e) {
-      // On the last attempt the build is marked failed in plain words before the message moves to the dead letter queue.
+      // On the last attempt the build (or the write-back item) is marked failed in plain words before the message moves to the dead letter queue.
       if ((m.attempts ?? 1) >= QUEUE_ATTEMPTS && ports.jobs.failed) await ports.jobs.failed(m.body, e).catch(() => undefined);
-      m.retry();
+      const delay = delayOf(e);
+      if (delay !== null) m.retry({ delaySeconds: delay });
+      else m.retry();
     }
   }
 }

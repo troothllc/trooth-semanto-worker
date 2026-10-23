@@ -1,0 +1,130 @@
+section setup: 42s, findings so far 1
+section delivery: 12s, findings so far 1
+section keys: 16s, findings so far 1
+section receipts: 45s, findings so far 3
+section connectors: 25s, findings so far 5
+section connect: 92s, findings so far 12
+section google: 120s, findings so far 22
+section company: 55s, findings so far 31
+section writeback: 138s, findings so far 38
+section sellers: 71s, findings so far 46
+section recalls: 37s, findings so far 49
+section credentials: 21s, findings so far 52
+section keys-customer: 5s, findings so far 53
+section sellers-customer: 26s, findings so far 55
+section recalls-customer: 53s, findings so far 58
+section keys-old: 16s, findings so far 59
+section sellers-old: 44s, findings so far 61
+section roles: 32s, findings so far 94
+section outages: 100s, findings so far 100
+section security: 5s, findings so far 103
+section phone: 41s, findings so far 103
+{
+ "states": 105,
+ "findings": [
+  "monitoring: no New question field once checks passed",
+  "receipts: expected to see Unsigned reader",
+  "receipts: the walk stopped: locator.fill: Error: strict mode violation: getByLabel('To') resolved to 4 elements:\n    1) <div role=\"group\" class=\"_30h0ja_actions\" aria-label=\"Workspace tools\">…</div> aka getByRole('group', { name: 'Workspace tools' })\n    2) <nav class=\"lrTFja_nav\" aria-label=\"Semanto settings\">…</nav> aka getByRole('navigation', { name: 'Semanto settings' })\n    3) <input type=\"date\" id=\"_r_7_-to\" value=\"2026-10-23\" class=\"lrTFja_input\" aria-describedby=\"_r_7_-range\"/> aka getByRole('textbox', { name: 'To' })\n    4) <section class=\"lrTFja_box\" aria-labelledby=\"receipts-totals\">…</section> aka getByRole('",
+  "connectors-paste-invalid: expected to see /Keep the name to 100 characters or fewer/",
+  "connectors-test: a catalog request signed with the pasted key answered 202: {\"object\":\"semanto.catalog_receipt\",\"trooth_id\":\"acme-goods\",\"signed\":true,\"kid\":\"9R24B1Jqj39aWkLQeAIbTaDQmBygpFr6Y1SM9z3Opbo\",\"connector_kid\":\"qpj1TQEXOkV3wWVUX6nMZcqNDAFdP8NQansehuerFvE\",\"records\":[",
+  "connectors-revoke: the Shopify app did not start: er; // Unhandled 'error' event\n      ^\n\nError: listen EADDRINUSE: address already in use 127.0.0.1:47105\n    at Server.setupListenHandle [as _listen2] (node:net:1940:16)\n    at listenInCluster (node:net:1997:12)\n    at node:net:2206:7\n    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)\nEmitted 'error' event on Server instance at:\n    at emitErrorNT (node:net:1976:8)\n    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {\n  code: 'EADDRINUSE',\n  errno: -98,\n  syscall: 'listen',\n  address: '127.0.0.1',\n  port: 47105\n}\n\nNode.js v22.22.0\n",
+  "connect-request: 404 on GET /api/semanto/connect/cs_B27hzVYdEdP8Rp7OlIpyBg",
+  "connect-request: console error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+  "connect-request: expected to see Shopify wants to send your catalog to Trooth",
+  "connect-request: expected to see qa-kettles.myshopify.com",
+  "connect-request: expected to see Store key",
+  "connect: the walk stopped: locator.dblclick: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: 'Approve' })\u001b[22m\n\n    at connectShopify (/home/claude/trooth-semanto-worker/qa/walk/connect.mjs:47:57)\n    at async file:///home/claude/trooth-semanto-worker/qa/walk/walk.mjs:49:5",
+  "google-partial: expected to see Google is connected.",
+  "google-partial: expected to see Not granted",
+  "google-connect: expected to see Google is connected.",
+  "google-connect: expected to see merchant@acmegoods-qa.com",
+  "google-connect: expected to see Merchant Center account 123456",
+  "google-connect: expected to see Acme Goods, Main Street",
+  "google-connect: the Worker's Google view after the full connect: {\"object\":\"semanto.google\",\"trooth_id\":\"acme-goods\",\"state\":\"not_connected\",\"account_email\":null,\"scopes\":[{\"scope\":\"https://www.googleapis.com/auth/content\",\"purpose\":\"Send your signed product details to Merchant Center.\",\"granted\":false},{\"scope\":\"https://www.googleapis.com/auth/business.manage\",\"",
+  "google-callback-reused: no token exchange reached the Google stand-in",
+  "google-callback-reused: a failed callback changed the existing connection",
+  "google: the walk stopped: locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: 'Disconnect' })\u001b[22m\n\n    at google (/home/claude/trooth-semanto-worker/qa/walk/google.mjs:94:58)\n    at async file:///home/claude/trooth-semanto-worker/qa/walk/walk.mjs:49:5",
+  "company-surface-merchant: expected to see Use a two-letter language code, like en.",
+  "company-alert-add: 502 on POST /api/semanto/acme-goods/company/alerts",
+  "company-alert-add: console error: Failed to load resource: the server responded with a status of 502 (Bad Gateway)",
+  "company-alert-add: expected to see Trooth emailed alerts@acmegoods-qa.com a link to confirm it.",
+  "company-alert-add: adding one address sent 0 emails",
+  "company-alert-add: expected to see Pending",
+  "company-alert-add: expected to see /Resend at/",
+  "company-alert-add: no confirmation link in the email: ",
+  "company: the walk stopped: page.goto: url: expected string, got undefined\n    at companySettings (/home/claude/trooth-semanto-worker/qa/walk/company.mjs:128:14)\n    at async file:///home/claude/trooth-semanto-worker/qa/walk/walk.mjs:49:5",
+  "writeback-send: 409 on POST /api/semanto/acme-goods/writeback/send",
+  "writeback-send: console error: Failed to load resource: the server responded with a status of 409 (Conflict)",
+  "writeback-send: expected to see /being sent to Google/",
+  "writeback-send: the first run did not settle as sent: undefined",
+  "writeback-send: expected to see /2 sent, 0 failed, 0 waiting/",
+  "writeback-send: Google received 0 writes for the first run",
+  "writeback: the walk stopped: locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: 'Back to proposed changes' })\u001b[22m\n\n    at writeback (/home/claude/trooth-semanto-worker/qa/walk/writeback.mjs:74:72)\n    at async file:///home/claude/trooth-semanto-worker/qa/walk/walk.mjs:49:5",
+  "sellers-paste: expected to see The first line names a column Trooth does not take.",
+  "sellers-sign: expected to see Version 1 of your seller list is published.",
+  "sellers-sign: a double click on Sign and publish sent 0 lists",
+  "sellers-sign: the public seller list answers {\"type\":\"https://trooth.co/problems/invalid_request\",\"title\":\"The request is not in the right shape\",\"status\":400,\"detail\":\"Send the seller's domain and the sku as domain= and sku=.\",\"instance\":\"/publ",
+  "sellers-sign: the seller check for a listed domain answers undefined",
+  "sellers-sign: the seller check for an unlisted domain answers undefined",
+  "sellers-v2: expected to see New version 2",
+  "sellers: the walk stopped: locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: /^Sign and publish version 2$/ })\u001b[22m\n\n    at sellersHosted (/home/claude/trooth-semanto-worker/qa/walk/sellers.mjs:81:76)\n    at async file:///home/claude/trooth-semanto-worker/qa/walk/walk.mjs:49:5",
+  "sellers-v2: GET /v1/facts/changes answered {\"error\":\"insufficient_permission\",\"resource\":\"evidence\",\"needed\":\"read\",\"message\":\"This restricted key does not have read access to evidence.\"}",
+  "sellers-v2: trooth_company_changes answered {\"status\":\"not_found\",\"provenance\":\"honest_absence\",\"subject\":\"acmegoods-qa.com\",\"summary\":\"No published record for \\\"acmegoods-qa.com\\\" on the Trooth Network, so no change is published here. An honest absence, not a judgment about the company.\",\"answered_at\":\"2026-10-23T15:47:00.867Z\",\"source\":{\"na",
+  "recalls: the walk stopped: locator.dblclick: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: /^Publish/ }).last()\u001b[22m\n\n    at recallsHosted (/home/claude/trooth-semanto-worker/qa/walk/recalls.mjs:92:63)\n    at async file:///home/claude/trooth-semanto-worker/qa/walk/walk.mjs:49:5",
+  "recalls-publish: no credential was made for the site's image and PDF: []",
+  "credentials: no credentials table",
+  "credentials-view: no View credential link for a made credential",
+  "keys-customer: request failed: GET /favicon.ico?v=9 net::ERR_ABORTED",
+  "sellers-upload-invalid: expected to see The file is empty.",
+  "sellers-upload-invalid: expected to see This is version 2, and version 2 is already on file.",
+  "recalls-upload-invalid: expected to see The notice is dated in the future.",
+  "recalls-upload-good: expected to see /reads as a recall notice signed with key/",
+  "recalls-customer: the walk stopped: locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: 'Review', exact: true })\u001b[22m\n\u001b[2m    - locator resolved to <button disabled type=\"button\" class=\"lrTFja_btn lrTFja_btnPrimary\">Review</button>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m      - element is not enabled\u001b[22m\n\u001b[2m    - retrying click action\u001b[22m\n\u001b[2m    - waiting 20ms\u001b[22m\n\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m      - element is not enabled\u001b[22m\n\u001b[2m    - retrying click act",
+  "keys-expired: a retiring key past its overlap reads retiring",
+  "sellers-expired-key: expected to see The signature did not check out against your company's key",
+  "sellers-old: the walk stopped: locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: /^Publish (this list|version 4)$/ })\u001b[22m\n\u001b[2m    - locator resolved to <button disabled type=\"button\" class=\"lrTFja_btn lrTFja_btnPrimary\">…</button>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m      - element is not enabled\u001b[22m\n\u001b[2m    - retrying click action\u001b[22m\n\u001b[2m    - waiting 20ms\u001b[22m\n\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m      - element is not enabled\u001b[22m\n\u001b[2m    - retrying cl",
+  "roles-member: member POST keys/binding/check answered 200 {\"dns_name\":\"_trooth-keys.acmegoods-qa.com\",\"dns_value\":\"v=trooth1; kid=zMLoeT0PaX8s8VPG54UT2YphX8RNpLt1GF8W8aHsAqE\",\"found\":false,\"checked_at\":\"2026-10-23T15:5",
+  "roles-member: member POST passkeys/options answered 200 {\"object\":\"semanto.passkey_options\",\"trooth_id\":\"acme-goods\",\"expires_at\":\"2026-10-23T15:55:24.340Z\",\"has_passkey\":false,\"publicKey\":{\"rp\":{\"id\":\"localhost\",\"na",
+  "roles-viewer: viewer POST passkeys/options answered 200 {\"object\":\"semanto.passkey_options\",\"trooth_id\":\"acme-goods\",\"expires_at\":\"2026-10-23T15:55:24.668Z\",\"has_passkey\":false,\"publicKey\":{\"rp\":{\"id\":\"localhost\",\"na",
+  "roles-norole: norole POST keys/binding/check answered 200 {\"dns_name\":\"_trooth-keys.acmegoods-qa.com\",\"dns_value\":\"v=trooth1; kid=zMLoeT0PaX8s8VPG54UT2YphX8RNpLt1GF8W8aHsAqE\",\"found\":false,\"checked_at\":\"2026-10-23T15:5",
+  "roles-norole: norole POST passkeys/options answered 200 {\"object\":\"semanto.passkey_options\",\"trooth_id\":\"acme-goods\",\"expires_at\":\"2026-10-23T15:55:25.051Z\",\"has_passkey\":false,\"publicKey\":{\"rp\":{\"id\":\"localhost\",\"na",
+  "roles-globex: globex POST settings answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST keys/rotation/start answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST keys/rotation/cancel answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST keys/binding/check answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST connectors answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST connectors/create answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST google/connect answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST google/disconnect answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST company/signing-policy answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST company/surfaces answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST company/alerts answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST writeback/send answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST sellers/lists/options answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST recalls/options answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST passkeys/options answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-globex: globex POST sign/options answered 401 {\"type\":\"https://trooth.co/problems/unauthorized\",\"title\":\"Sign in first\",\"status\":401,\"detail\":\"This address is for a company's own workspace. The request carr",
+  "roles-reads: another company's owner GET settings answered 401",
+  "roles-reads: another company's owner GET keys answered 401",
+  "roles-reads: another company's owner GET receipts answered 401",
+  "roles-reads: another company's owner GET connectors answered 401",
+  "roles-reads: another company's owner GET google answered 401",
+  "roles-reads: another company's owner GET company answered 401",
+  "roles-reads: another company's owner GET writeback/runs answered 401",
+  "roles-reads: another company's owner GET sellers/lists answered 401",
+  "roles-reads: another company's owner GET credentials answered 401",
+  "roles-reads: another company's owner GET recalls answered 401",
+  "roles-member-keys: expected to see /member cannot/i",
+  "roles-viewer-company: expected to see /viewer cannot/i",
+  "outage-worker-down-read: expected to see Trooth could not be reached",
+  "outage-worker-down-read: a Worker outage reads as Semanto not switched on",
+  "outage-worker-down-read: no Try again while the Worker was down",
+  "outage-worker-down-read: expected to see Your signing key signs each version of your record",
+  "outage-worker-down-write: expected to see Trooth could not be reached",
+  "outages: the walk stopped: locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: 'Save changes' })\u001b[22m\n\n    at outages (/home/claude/trooth-semanto-worker/qa/walk/outages.mjs:41:60)\n    at async file:///home/claude/trooth-semanto-worker/qa/walk/walk.mjs:49:5",
+  "security-proxy: the proxy answered 200 to GET acme-goods/../setup (expected 404)",
+  "security-proxy: the proxy answered 200 to GET acme-goods/%2e%2e/setup (expected 404)",
+  "security-proxy: the proxy answered 200 to POST setup/start (expected 403)"
+ ]
+}
+record: /home/claude/trooth-semanto-worker/qa/.run/walk-pass1/walk.json

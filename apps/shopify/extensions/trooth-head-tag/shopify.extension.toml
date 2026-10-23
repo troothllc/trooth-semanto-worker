@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+# Copyright (c) 2026 Trooth, LLC
+#
+# The theme app extension: one app embed block (blocks/trooth-head.liquid) that
+# adds the Semanto head tags (adapters/head-tag/README.md) to every page. A
+# merchant turns it on through the activation deep link; uninstalling the app
+# removes it, so no theme file is ever edited.
+
+name = "Semanto head tags"
+type = "theme"
+handle = "trooth-head-tag"

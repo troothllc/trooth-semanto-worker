@@ -55,6 +55,8 @@ export interface MerchantCenterTarget {
   contentLanguage: string;
   targetCountry: string;
   channel?: "online" | "local";
+  /** The Merchant API data source the send inserts into (accounts/{id}/dataSources/{id}); sending needs it, the preview does not. */
+  dataSource?: string;
 }
 
 interface SignedProductView {
@@ -455,6 +457,73 @@ export function ucpCatalogPayload(record: SignedRecord, at: string): WritebackPa
     needs: "file_upload",
     carries: { items: items.length },
   };
+}
+
+// ------------------------------------------------- Merchant API (sending)
+
+/** Merchant API v1 (merchantapi.googleapis.com), the Content API for Shopping's successor. */
+export const MERCHANT_API_BASE = "https://merchantapi.googleapis.com/products/v1";
+
+const MERCHANT_AVAILABILITY: Record<string, string> = { in_stock: "IN_STOCK", out_of_stock: "OUT_OF_STOCK", preorder: "PREORDER", backorder: "BACKORDER" };
+
+/** "19.99" to "19990000": a decimal amount to micros as a string, without floating point. */
+export function amountMicros(amount: string): string | null {
+  const m = /^(\d{1,15})(?:\.(\d{1,6}))?$/.exec(amount.trim());
+  if (!m) return null;
+  const micros = BigInt(m[1]!) * 1_000_000n + BigInt((m[2] ?? "").padEnd(6, "0"));
+  return micros.toString();
+}
+
+export interface MerchantProductInput {
+  offerId: string;
+  /** The ProductInput body for accounts.productInputs.insert (Merchant API v1, Products sub-API). */
+  body: Record<string, unknown>;
+  image_links: string[];
+  carries: Record<string, unknown>;
+  summary: string;
+}
+
+/**
+ * One ProductInput per signed product, in the Merchant API v1 shape Google
+ * documents for accounts.productInputs.insert: offerId, contentLanguage,
+ * feedLabel, productAttributes (title, description, link, imageLink,
+ * availability, price in amountMicros and currencyCode, gtins, brand,
+ * itemGroupId) and customAttributes. An insert with the same offerId,
+ * contentLanguage and data source replaces the earlier input, so a resend is
+ * safe.
+ */
+export function merchantProductInputs(record: SignedRecord, target: MerchantCenterTarget, at: string): MerchantProductInput[] {
+  return productViews(record, at).map((v) => {
+    const p = v.product;
+    const notice = noticeOf(p.consumer_notice);
+    const attrs: Record<string, unknown> = { title: p.name, link: p.url, availability: MERCHANT_AVAILABILITY[mcAvailability(v.availability)] ?? "IN_STOCK" };
+    if (p.description) attrs.description = p.description;
+    if (p.image_url) attrs.imageLink = p.image_url;
+    const micros = v.price ? amountMicros(v.price.amount) : null;
+    if (v.price && micros) attrs.price = { amountMicros: micros, currencyCode: v.price.currency };
+    if (p.gtin) attrs.gtins = [p.gtin];
+    if (p.brand) attrs.brand = p.brand;
+    if (p.variant_id) attrs.itemGroupId = p.product_id;
+    const custom = [
+      { name: "native_commerce", value: "true" },
+      { name: "merchant_item_id", value: p.product_id },
+      { name: "semanto_record", value: `https://trooth.co/network/company/${record.trooth_id}` },
+      ...(notice ? [{ name: "consumer_notice", value: `${notice.type ?? "legal_disclaimer"}:${notice.message}` }] : []),
+    ];
+    return {
+      offerId: v.key,
+      body: { offerId: v.key, contentLanguage: target.contentLanguage, feedLabel: target.targetCountry, productAttributes: attrs, customAttributes: custom },
+      image_links: p.image_url ? [p.image_url] : [],
+      carries: { price: v.price, availability: attrs.availability, gtin: p.gtin ?? null },
+      summary: `${p.name}: ${v.price ? `${v.price.amount} ${v.price.currency}, ` : ""}${String(attrs.availability).toLowerCase().replace(/_/g, " ")}`,
+    };
+  });
+}
+
+/** The insert address for one account and data source. */
+export function merchantInsertUrl(target: MerchantCenterTarget): string | null {
+  if (!target.dataSource) return null;
+  return `${MERCHANT_API_BASE}/accounts/${encodeURIComponent(target.merchantId)}/productInputs:insert?dataSource=${encodeURIComponent(target.dataSource)}`;
 }
 
 // ------------------------------------------------------------ all at once
