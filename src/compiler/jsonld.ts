@@ -104,6 +104,8 @@ const AVAILABILITY: Record<string, string> = {
   limited: "https://schema.org/LimitedAvailability", sold_out: "https://schema.org/SoldOut",
 };
 
+const ROLE_MAILBOX_RE = /^(?:security|privacy|legal|billing|compliance|abuse|dmca|copyright|press|media|careers|jobs|hr|noreply|no-reply|donotreply|postmaster|webmaster|dpo|gdpr|subscribe[a-z-]*|unsubscribe|developers?|api|status)$/i;
+
 export function generateJsonLd(file: SemantoFile, opts: JsonLdOptions = {}): JsonLdOutput {
   const facts = new Map(file.facts.map((f) => [f.id, f] as const));
   const keys = byKey(file.facts);
@@ -134,7 +136,10 @@ export function generateJsonLd(file: SemantoFile, opts: JsonLdOptions = {}): Jso
   if (file.header.identity.lei) t.set(org, orgPath, "leiCode", file.header.identity.lei, "header:identity.lei");
   const tel = first(keys, "contact.phone");
   if (tel) t.set(org, orgPath, "telephone", str(tel), tel.id);
-  const email = first(keys, "contact.email");
+  // The organization's own address, not a mailbox for one job: a security@, privacy@ or legal@ address the read found on
+  // a policy page is a contact for that matter, and naming it as the company's email misleads (trooth.co, 2026-10-23:
+  // security@trooth.co from the Trust Center became Organization.email). With only such addresses, none is named here.
+  const email = (keys.get("contact.email") ?? []).find((f) => !ROLE_MAILBOX_RE.test((str(f) ?? "").split("@")[0] ?? ""));
   if (email) t.set(org, orgPath, "email", str(email), email.id);
 
   // address: structured parts first, else the one-line form
@@ -160,8 +165,12 @@ export function generateJsonLd(file: SemantoFile, opts: JsonLdOptions = {}): Jso
   const contactPoints: Obj[] = [];
   const cpKeys = [...keys.keys()].filter((k) => /^contact\.[a-z0-9_]+\.(telephone|email|contact_type)$/.test(k) || k === "contact.support_email");
   const cpGroups = new Map<string, Obj>();
-  for (const k of cpKeys.sort()) {
+  // The support address the text named goes last, and only when no contact point already carries it: the same address
+  // read from structured data and from a sentence is one contact point, not two.
+  const ordered = cpKeys.sort().sort((a, b) => Number(a === "contact.support_email") - Number(b === "contact.support_email"));
+  for (const k of ordered) {
     const f = first(keys, k)!;
+    if (k === "contact.support_email" && contactPoints.some((cp) => cp["email"] === str(f))) continue;
     const group = k === "contact.support_email" ? "support" : k.split(".")[1]!;
     let cp = cpGroups.get(group);
     if (!cp) {

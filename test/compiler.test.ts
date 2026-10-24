@@ -12,7 +12,7 @@ import { Fetcher, ChangeDetector, checkUrl, classifyAddress, USER_AGENT } from "
 import { discover, parseRobots, robotsAllows, parseSitemap, exclusionReason, extractLinks } from "@/compiler/discover";
 import { extract, pageBlocks, detectChrome, sentencesOf, parseFrontMatter, splitBlocks } from "@/compiler/extract";
 import { parseHtml, textOf, decodeEntities } from "@/compiler/html";
-import { factCandidates, extractFacts } from "@/compiler/facts";
+import { factCandidates, extractFacts, sinceIsAboutTheCompany } from "@/compiler/facts";
 import { generateJsonLd, jsonLdScriptTag, markdownLinkTag, headTagsFor } from "@/compiler/jsonld";
 import { buildLlmsTxt, buildLlmsFull, buildSitemapMd } from "@/compiler/llms";
 import { buildVersion, type BuildInput, type FetchedPage } from "@/compiler/build";
@@ -451,6 +451,17 @@ describe("facts", () => {
     expect(keys).toContain("contact.address.street_address");
   });
 
+  it("reads 'since 1970' as a time base, not a founding year, when a clock counts from it (trooth.co, 2026-10-23)", () => {
+    const body = "created is the time of the attempt in milliseconds since 1970. Serving Tucson since 1987, Acme Inc fixes bikes. The timestamp counts seconds since 1970-01-01 UTC. Family owned since 1952.";
+    const facts = factCandidates({ url: "https://acme.com/docs/webhooks", witnessed_at: WITNESSED, html: `<html><body><p>${body}</p></body></html>`, body });
+    const years = facts.filter((c) => c.key === "identity.founding_date").map((c) => c.value);
+    expect(years).not.toContain("1970");
+    expect(years).toEqual(expect.arrayContaining(["1987", "1952"]));
+    expect(sinceIsAboutTheCompany("the time in milliseconds since 1970", "the time in milliseconds ".length)).toBe(false);
+    expect(sinceIsAboutTheCompany("Unix time counts from since 1970", 22)).toBe(false);
+    expect(sinceIsAboutTheCompany("Trusted by families since 1970", "Trusted by families ".length)).toBe(true);
+  });
+
   it("finds text patterns with the exact sentence as anchor and never a placeholder", () => {
     const contact = factCandidates({ url: "https://acme.com/contact", witnessed_at: WITNESSED, html: html["https://acme.com/contact"]!, body: bodyOf("https://acme.com/contact") });
     const find = (key: string, value: string) => contact.find((c) => c.key === key && c.value === value);
@@ -597,6 +608,15 @@ describe("build", () => {
     expect(head).toContain('<script type="application/ld+json">');
     expect(jsonLdScriptTag({ a: "</script><b>" })).not.toContain("</script><b>");
     expect(markdownLinkTag("https://acme.com/about.md")).toBe('<link rel="alternate" type="text/markdown" href="https://acme.com/about.md">');
+    // A mailbox for one job is not the company's email, and one address is one contact point (trooth.co, 2026-10-23).
+    const base = file.facts.find((f) => f.key === "identity.legal_name")!;
+    const mk = (key: string, value: string, id: string) => ({ ...base, id, key, value, statement: `${key} ${value}` });
+    const mail = generateJsonLd({ ...file, facts: [...file.facts.filter((f) => !f.key.startsWith("contact.")), mk("contact.email", "security@acme.com", "f_sec"), mk("contact.email", "hello@acme.com", "f_hello"), mk("contact.desk.email", "help@acme.com", "f_desk"), mk("contact.support_email", "help@acme.com", "f_sup")] });
+    const mailOrg = (mail.graph["@graph"] as Record<string, unknown>[])[0]!;
+    expect(mailOrg["email"]).toBe("hello@acme.com");
+    expect((mailOrg["contactPoint"] as Record<string, unknown>[]).filter((c) => c["email"] === "help@acme.com").length).toBe(1);
+    const roleOnly = generateJsonLd({ ...file, facts: [...file.facts.filter((f) => !f.key.startsWith("contact.")), mk("contact.email", "privacy@acme.com", "f_priv")] });
+    expect((roleOnly.graph["@graph"] as Record<string, unknown>[])[0]!["email"]).toBeUndefined();
     // Nothing invented: a file without facts writes only the header-backed values.
     const empty = generateJsonLd({ ...file, facts: [], products: [], question_map: [] });
     const emptyOrg = (empty.graph["@graph"] as Record<string, unknown>[])[0]!;

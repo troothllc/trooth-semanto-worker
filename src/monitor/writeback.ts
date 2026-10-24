@@ -318,6 +318,18 @@ function flatten(v: unknown, prefix: string, into: Map<string, string>): void {
   into.set(prefix, canonicalize(v));
 }
 
+/** A path with list positions of single-item lists dropped, so [x] and x compare as one. */
+function loosePath(path: string): string {
+  return path.replace(/\[0\]/g, "");
+}
+
+function sameValue(a: string | undefined, b: string | undefined): boolean {
+  if (a === undefined || b === undefined) return false;
+  if (a === b) return true;
+  const bare = (x: string) => x.replace(/^"|"$/g, "").replace(/^(https?:\/\/[^/?#]+)\/$/i, "$1");
+  return bare(a) === bare(b);
+}
+
 function findById(blocks: unknown[], id: string): Record<string, unknown> | null {
   let found: Record<string, unknown> | null = null;
   const visit = (v: unknown) => {
@@ -348,10 +360,20 @@ export function jsonLdDiff(currentBlocks: unknown[], generated: Record<string, u
   if (!existing) {
     for (const k of want.keys()) differing.push(k);
   } else {
+    // Nodes that share an @id merge, so what counts is whether the page already says each value the record says. A
+    // property only the page has stays on the page and is not a difference (2026-10-23: counting those would have told
+    // trooth.co to drop its description, alternate names and site search). The same value in another JSON-LD form is
+    // the same value: an IRI and {"@id": IRI}, one object and a list of one, a bare origin with or without its slash.
     const have = new Map<string, string>();
     flatten(existing, "", have);
-    for (const [k, v] of want) if (have.get(k) !== v) differing.push(k);
-    for (const k of have.keys()) if (!want.has(k)) differing.push(k);
+    const haveLoose = new Map<string, string>();
+    for (const [k, v] of have) haveLoose.set(loosePath(k), v);
+    for (const [k, v] of want) {
+      const lk = loosePath(k);
+      const h = have.get(k) ?? haveLoose.get(lk);
+      const hid = have.get(`${k}.@id`) ?? haveLoose.get(`${lk}.@id`);
+      if (!sameValue(v, h) && !sameValue(v, hid)) differing.push(k);
+    }
   }
   const type = String(generated["@type"] ?? "");
   const conflicting: string[] = [];
@@ -370,10 +392,85 @@ export function jsonLdDiff(currentBlocks: unknown[], generated: Record<string, u
   return { present: Boolean(existing), differing_paths: differing.sort(), conflicting_types: conflicting };
 }
 
-export function siteJsonLdPayload(pageUrl: string, currentBlocks: unknown[], generated: Record<string, unknown>): WritebackPayload & { diff: JsonLdDiff } {
-  const diff = jsonLdDiff(currentBlocks, generated);
+/** Every node with an @type on the page, top level or inside an @graph. */
+function pageNodes(blocks: unknown[]): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  const visit = (v: unknown) => {
+    if (Array.isArray(v)) return v.forEach(visit);
+    if (v && typeof v === "object") {
+      const o = v as Record<string, unknown>;
+      if (o["@type"] !== undefined) out.push(o);
+      if (Array.isArray(o["@graph"])) visit(o["@graph"]);
+    }
+  };
+  blocks.forEach(visit);
+  return out;
+}
+
+const typeOf = (o: Record<string, unknown>) => (Array.isArray(o["@type"]) ? (o["@type"] as unknown[]).map(String).sort().join(",") : String(o["@type"] ?? ""));
+
+/**
+ * ONE ENTITY, NOT TWO (2026-10-23, read on trooth.co). The compiler names its
+ * nodes {site}#organization and {site}#website; a site that already describes
+ * itself usually uses its own @id ("#org" on trooth.co). Matching by @id alone
+ * reported "no block with this @id; add the whole block", and following that
+ * would have put a second Organization for the same company on the page,
+ * which search engines and AI readers take as two entities. A generated node
+ * now takes the page's @id when the page has no node with the generated @id
+ * and exactly one node of the same @type, and every reference to the old @id
+ * in the block follows it. With none, or more than one, of that type, the
+ * generated @id is kept and the page is left to say which one it means.
+ */
+export function alignToPage(currentBlocks: unknown[], generated: Record<string, unknown>): { generated: Record<string, unknown>; adopted: { from: string; to: string }[] } {
+  const nodes = pageNodes(currentBlocks);
+  const ids = new Set(nodes.map((n) => n["@id"]).filter((x): x is string => typeof x === "string"));
+  const graph = Array.isArray(generated["@graph"]) ? (generated["@graph"] as Record<string, unknown>[]) : [generated];
+  const renames = new Map<string, string>();
+  for (const g of graph) {
+    const id = typeof g["@id"] === "string" ? g["@id"] : null;
+    if (!id || ids.has(id)) continue;
+    const same = nodes.filter((n) => typeOf(n) === typeOf(g) && typeof n["@id"] === "string");
+    if (same.length === 1) renames.set(id, same[0]!["@id"] as string);
+  }
+  if (!renames.size) return { generated, adopted: [] };
+  const rewrite = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(rewrite);
+    if (v && typeof v === "object") {
+      const o: Record<string, unknown> = {};
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) o[k] = k === "@id" && typeof x === "string" && renames.has(x) ? renames.get(x) : rewrite(x);
+      return o;
+    }
+    return v;
+  };
+  return { generated: rewrite(generated) as Record<string, unknown>, adopted: [...renames].map(([from, to]) => ({ from, to })) };
+}
+
+/** jsonLdDiff for a generated @graph: each node by its @id, paths prefixed with the node's @type. */
+export function jsonLdGraphDiff(currentBlocks: unknown[], generated: Record<string, unknown>): JsonLdDiff {
+  if (!Array.isArray(generated["@graph"])) return jsonLdDiff(currentBlocks, generated);
+  let present = true;
+  const differing: string[] = [];
+  const conflicting: string[] = [];
+  for (const node of generated["@graph"] as Record<string, unknown>[]) {
+    const d = jsonLdDiff(currentBlocks, node);
+    present = present && d.present;
+    const label = typeOf(node) || "node";
+    for (const p of d.differing_paths) if (p !== "@type") differing.push(`${label}.${p}`);
+    conflicting.push(...d.conflicting_types);
+  }
+  return { present, differing_paths: differing.sort(), conflicting_types: [...new Set(conflicting)] };
+}
+
+export function siteJsonLdPayload(pageUrl: string, currentBlocks: unknown[], generatedIn: Record<string, unknown>): WritebackPayload & { diff: JsonLdDiff; adopted: { from: string; to: string }[] } {
+  const { generated, adopted } = alignToPage(currentBlocks, generatedIn);
+  const diff = jsonLdGraphDiff(currentBlocks, generated);
   const script = `<script type="application/ld+json">\n${JSON.stringify(generated, null, 2)}\n</script>`;
-  const what = !diff.present ? "The page has no block with this @id; add the whole block." : diff.differing_paths.length ? `${diff.differing_paths.length} value(s) differ: ${diff.differing_paths.slice(0, 8).join(", ")}.` : "The page already carries this block unchanged.";
+  const kept = adopted.length ? ` It uses the page's own @id (${adopted.map((a) => a.to).join(", ")}), so it updates what the page already describes instead of adding a second entity.` : "";
+  const what = !diff.present
+    ? "The page has no block with this @id; add the whole block."
+    : diff.differing_paths.length
+      ? `${diff.differing_paths.length} value(s) differ: ${diff.differing_paths.slice(0, 8).join(", ")}.`
+      : "The page already carries this block unchanged.";
   return Object.assign(
     {
       connector: "site_jsonld" as const,
@@ -382,11 +479,11 @@ export function siteJsonLdPayload(pageUrl: string, currentBlocks: unknown[], gen
       url: pageUrl,
       content_type: "text/html",
       body: script,
-      dry_run: `Would place one JSON-LD block in the head of ${pageUrl}. ${what}`,
+      dry_run: `Would place one JSON-LD block in the head of ${pageUrl}. ${what}${kept}`,
       needs: "site_deploy" as const,
       carries: { "@id": generated["@id"] ?? null, "@type": generated["@type"] ?? null },
     },
-    { diff },
+    { diff, adopted },
   );
 }
 

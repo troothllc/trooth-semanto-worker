@@ -333,6 +333,24 @@ const HOURS_RE = new RegExp(`\\b(${DAY}(?:\\s*(?:-|\\u2013|to|through|thru)\\s*$
 const FOUNDED_RE = /\b(?:founded|established|started|incorporated|in business|operating|serving [A-Za-z ]+)\s+(?:in\s+)?((?:18|19|20)\d{2})\b|\b(?:since|est\.?)\s+((?:18|19|20)\d{2})\b/gi;
 const NUMBER_CLAIM_RE = /(?:[$\u20ac\u00a3\u00a5]\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:k|m|bn|million|billion))?|\b\d[\d,]*(?:\.\d+)?\s?(?:%|percent|\+|k\b|x\b|million|billion|thousand|customers|clients|users|members|countries|cities|locations|offices|employees|people|staff|teams|years|months|weeks|days|hours|minutes|seconds|uptime|reviews|downloads|projects|products|orders|stores|partners|languages|awards|patents|seats|tons|kg|lbs|miles|km|sq ft|square feet|GB|TB|MB|ms))/g;
 
+/**
+ * "Since 1970" is a founding year only when the sentence is about the company.
+ * Read on trooth.co (2026-10-23): "created is the time of the attempt in
+ * milliseconds since 1970" became "The page says the company dates from 1970".
+ * A year counted from by a clock (milliseconds, seconds, minutes, hours, days
+ * since a date) or named as an epoch, a timestamp or Unix time is a time base,
+ * not a company's start, so "since" and "est." are refused there. The words
+ * that name a founding outright (founded, established, incorporated) are not
+ * affected.
+ */
+const TIME_UNIT_BEFORE_RE = /\b(?:nano|micro|milli)?seconds?\s+$|\b(?:ms|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|ticks?)\s+$/i;
+const TIME_BASE_RE = /\b(?:epoch|unix|posix|timestamps?|utc|gmt|iso\s*8601|rfc\s*3339)\b/i;
+export function sinceIsAboutTheCompany(sentence: string, at: number): boolean {
+  if (TIME_UNIT_BEFORE_RE.test(sentence.slice(Math.max(0, at - 40), at))) return false;
+  if (TIME_BASE_RE.test(sentence)) return false;
+  return true;
+}
+
 function textFacts(ctx: { url: string; witnessed_at: string; body: string }): FactCandidate[] {
   const out: FactCandidate[] = [];
   const seen = new Set<string>();
@@ -382,6 +400,7 @@ function textFacts(ctx: { url: string; witnessed_at: string; body: string }): Fa
     FOUNDED_RE.lastIndex = 0;
     while ((m = FOUNDED_RE.exec(s)) !== null) {
       const year = m[1] ?? m[2];
+      if (year && m[2] && !sinceIsAboutTheCompany(s, m.index)) continue;
       if (year) push("identity.founding_date", `The page says the company dates from ${year}`, year, s, { type: "Organization", property: "foundingDate" });
     }
   });

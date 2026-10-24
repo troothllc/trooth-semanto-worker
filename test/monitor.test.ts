@@ -29,7 +29,7 @@ import {
 import { compareSurface, compareLivePage, compareAll, buildRun, runToRow, runFromRow, severityFor, surfaceCovers } from "@/monitor/consistency";
 import { normalizePhone, normalizeAddress, equivalent, normalizeHours, parsePrice, whatDiffers, displayPhone } from "@/monitor/normalize";
 import { indexabilityReport, robotsAllows, pageIndexability } from "@/monitor/indexability";
-import { merchantCenterPayload, merchantCenterSupplementalFeed, businessProfilePayload, jsonLdDiff, siteJsonLdPayload, acpFeedPayload, ucpCatalogPayload, allPayloads, sendPayload, splitAddress } from "@/monitor/writeback";
+import { merchantCenterPayload, merchantCenterSupplementalFeed, businessProfilePayload, jsonLdDiff, siteJsonLdPayload, alignToPage, jsonLdGraphDiff, acpFeedPayload, ucpCatalogPayload, allPayloads, sendPayload, splitAddress } from "@/monitor/writeback";
 import { alertsFrom, dedupeAlerts, applyDailyCap, buildEmail, toDashboard, messageForMismatch, dayWords, alertToRow, alertFromRow, resolvedAlerts } from "@/monitor/alerts";
 import { runMonitor } from "@/monitor/run";
 import { fetchFromMap, fixedClock, memoryStore, memoryEmail, memoryTokens, type FetchResult } from "@/monitor/ports";
@@ -439,6 +439,34 @@ describe("write-back", () => {
     const payload = siteJsonLdPayload("https://acme.com/", page.jsonld, generated);
     expect(payload.body.startsWith('<script type="application/ld+json">')).toBe(true);
     expect(payload.needs).toBe("site_deploy");
+  });
+
+  it("updates the page's own Organization instead of adding a second one (trooth.co, 2026-10-23)", () => {
+    const page = [{ "@context": "https://schema.org", "@graph": [
+      { "@type": "Organization", "@id": "https://trooth.co/#org", name: "Trooth", legalName: "Trooth, LLC", url: "https://trooth.co" },
+      { "@type": "WebSite", "@id": "https://trooth.co/#website", url: "https://trooth.co/", name: "Trooth", publisher: { "@id": "https://trooth.co/#org" } },
+    ] }];
+    const generated = { "@context": "https://schema.org", "@graph": [
+      { "@type": "Organization", "@id": "https://trooth.co/#organization", name: "Trooth", legalName: "Trooth, LLC", url: "https://trooth.co", foundingDate: "2025-12-16" },
+      { "@type": "WebSite", "@id": "https://trooth.co/#website", url: "https://trooth.co/", name: "Trooth", publisher: { "@id": "https://trooth.co/#organization" } },
+    ] };
+    const { generated: aligned, adopted } = alignToPage(page, generated);
+    expect(adopted).toEqual([{ from: "https://trooth.co/#organization", to: "https://trooth.co/#org" }]);
+    const graph = aligned["@graph"] as Record<string, unknown>[];
+    expect(graph[0]!["@id"]).toBe("https://trooth.co/#org");
+    expect((graph[1]!["publisher"] as Record<string, unknown>)["@id"]).toBe("https://trooth.co/#org");
+    const d = jsonLdGraphDiff(page, aligned);
+    expect(d.present).toBe(true);
+    expect(d.differing_paths).toEqual(["Organization.foundingDate"]);
+    const payload = siteJsonLdPayload("https://trooth.co/", page, generated);
+    expect(payload.dry_run).toContain("1 value(s) differ: Organization.foundingDate.");
+    expect(payload.dry_run).toContain("uses the page's own @id (https://trooth.co/#org)");
+    expect(payload.body).not.toContain("#organization");
+    // Two organizations on the page: nothing is guessed, the generated @id stays.
+    const two = [...page, { "@type": "Organization", "@id": "https://trooth.co/#other", name: "Other" }];
+    expect(alignToPage(two, generated).adopted).toEqual([]);
+    // Nothing on the page: the whole block, as before.
+    expect(siteJsonLdPayload("https://trooth.co/", [], generated).dry_run).toContain("add the whole block");
   });
 
   it("writes the ACP feed and UCP catalog from the same record, and every payload at once", () => {

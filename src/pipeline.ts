@@ -62,6 +62,7 @@ import { proveReader, type ForwardingContext, type ReaderProof } from "./readers
 import { dashboardRows, dayBounds, receiptsCsv, recordRead, signDailyDigest, utcDay } from "./readers/receipts";
 import type { NonceStore, ReceiptStore } from "./readers/ports";
 import { runMonitor, type AvailableSurfaces } from "./monitor/run";
+import { jsonLdBlocks } from "./monitor/html";
 import type { ClockPort, EmailPort, FetchPort as MonitorFetchPort, StorePort as MonitorStorePort, TokenPort } from "./monitor/ports";
 import type { Offer as MonitorOffer, Product as MonitorProduct, SignedRecord } from "./monitor/types";
 import { allPayloads, type WritebackContext } from "./monitor/writeback";
@@ -1010,11 +1011,21 @@ export class Pipeline implements WorkspaceHandlers {
     const config = await this.d.store.getConfig(trooth_id);
     const file = (await this.d.versions.getCurrent(trooth_id))!;
     const generated = generateJsonLd(file, { troothProfileUrl: `${this.d.config.network_base}/${trooth_id}` });
+    // The homepage as it is now, read on demand when the preview is opened (2026-10-23: the preview compared against an
+    // empty page, so every company was told to add the whole block). A page that does not answer is compared as empty.
+    const home = `https://${record.domain}/`;
+    let current: unknown[] = [];
+    try {
+      const page = await this.fetcher().fetch(home);
+      if (page.ok && page.status === 200) current = jsonLdBlocks(page.text).blocks;
+    } catch {
+      current = [];
+    }
     const ctx: WritebackContext = {
       at: iso(this.d.now()),
       ...(config.writeback?.merchant_center ? { merchantCenter: config.writeback.merchant_center } : {}),
       ...(config.writeback?.business_profile_location ? { businessProfileLocation: config.writeback.business_profile_location } : {}),
-      pages: [{ url: `https://${record.domain}/`, current: [], generated: generated.graph }],
+      pages: [{ url: home, current, generated: generated.graph }],
     };
     const { payloads, skipped } = allPayloads(record, ctx);
     return ok(200, { object: "semanto.writeback_preview", trooth_id, payloads, skipped });
