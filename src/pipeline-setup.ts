@@ -26,6 +26,7 @@
 // The server, not the browser, decides what is done (Stripe hosted
 // onboarding), and every state survives the owner leaving (save for later).
 
+import { versionId } from "./core/semanto";
 import { isTroothId } from "./core/ids";
 import { registrableDomain } from "./compiler/url";
 import type { BuildRow } from "./compiler/stream";
@@ -597,6 +598,7 @@ export async function installCheck(p: Pipeline, company: CompanyRecord): Promise
       domain: company.domain,
       homePageHash: home?.hash ?? null,
       pageHashes: file?.header.pages_manifest.map((x) => x.hash) ?? [],
+      ...(file ? { currentVersionId: versionId(file.root_hash) } : {}),
       networkCopy: await p.networkCopy(company),
       resolveKey: (kid) => companyJwks.keys.find((k) => k.kid === kid) ?? trooth.keys.find((k) => k.kid === kid) ?? null,
       now: p.d.now(),

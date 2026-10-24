@@ -227,25 +227,39 @@ export async function runDiscover(build_id: string, deps: StreamDeps): Promise<S
   return batches;
 }
 
-/** Messages 2 to n: render or reuse at most PAGES_PER_MESSAGE pages, one at a time. */
+const RENDER_CONCURRENCY = 5;
+
+/** Runs fn over items with at most `limit` running at once; rejects with the first error. */
+async function eachLimited<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const lane = async () => {
+    while (next < items.length) await fn(items[next++]!);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+}
+
+/** Messages 2 to n: render or reuse at most PAGES_PER_MESSAGE pages, five at a time. */
 export async function runRender(msg: Extract<StageMessage, { stage: "render" }>, deps: StreamDeps): Promise<StageMessage | null> {
   if (msg.to - msg.from > PAGES_PER_MESSAGE) throw new Error(`stream: a render message holds at most ${PAGES_PER_MESSAGE} pages`);
   const build = await deps.staging.getBuild(msg.build_id);
   if (!build || !build.state) throw new Error(`stream: no planned build ${msg.build_id}`);
   const job = build.job;
+  const robots = build.state.robots;
   const chromeKeys = new Set(build.state.chrome_keys);
   const previous = job.previous_version !== null ? await deps.previousFile(job.trooth_id, job.previous_version) : null;
   const prev = prevIndex(previous);
   const items = await deps.staging.itemsSlice(msg.build_id, msg.from, msg.to);
-  for (const item of items) {
+  // Five pages of the batch at a time: each page is a few storage reads and writes around a short render, and the
+  // rows are keyed by seq, so the order they finish in does not matter.
+  await eachLimited(items, RENDER_CONCURRENCY, async (item) => {
     if (item.action === "render") {
       const f = await deps.staging.getFetched(msg.build_id, item.url);
       const raw = f ? await deps.staging.getRaw(f.raw_key) : null;
       if (!f || !raw) throw new Error(`stream: page ${item.url} was not staged`);
-      const r = await renderPage({ url: f.url, status: f.status, html: fromUtf8(raw), source_hash: f.source_hash, witnessed_at: f.witnessed_at, headers: f.headers, truncated: f.truncated }, { robots: build.state.robots, chromeKeys });
+      const r = await renderPage({ url: f.url, status: f.status, html: fromUtf8(raw), source_hash: f.source_hash, witnessed_at: f.witnessed_at, headers: f.headers, truncated: f.truncated }, { robots, chromeKeys });
       for (const e of r.entries) await deps.bodies.putBody(job.trooth_id, job.version, e.entry.id, e.bytes);
       await deps.staging.putRendered(msg.build_id, { seq: item.seq, url: item.url, entries: r.entries.map((e) => ({ entry: e.entry, description: e.description })), facts: r.facts });
-      continue;
+      return;
     }
     const entries: StagedRender["entries"] = [];
     for (const e of prev.byUrl.get(item.url) ?? []) {
@@ -255,7 +269,7 @@ export async function runRender(msg: Extract<StageMessage, { stage: "render" }>,
       entries.push({ entry: e, description: describePage(fromUtf8(body)) });
     }
     await deps.staging.putRendered(msg.build_id, { seq: item.seq, url: item.url, entries, facts: prev.factsByUrl.get(item.url) ?? [] });
-  }
+  });
   // The batches finish in any order. Each counts the items that have a rendered row (one row per item, so a retried
   // batch does not count twice); the batch that sees every item done queues assembly. Two that see it at once both
   // queue it, and runAssemble's claim lets one through.
@@ -299,11 +313,12 @@ async function assembleClaimed(build_id: string, build: BuildRow & { state: NonN
   const totalBytes = manifest.reduce((n, m) => n + m.entry.bytes, 0);
   let llmsFull: string | null = null;
   if (totalBytes <= LLMS_FULL_MAX_BYTES) {
-    const pages: { entry: PageEntry; markdown: string }[] = [];
-    for (const m of manifest) {
+    // The bodies read ten at a time, kept in manifest order.
+    const pages: { entry: PageEntry; markdown: string }[] = manifest.map((m) => ({ entry: m.entry, markdown: "" }));
+    await eachLimited(manifest.map((m, i) => ({ m, i })), 10, async ({ m, i }) => {
       const b = await deps.bodies.getBody(job.trooth_id, job.version, m.entry.id);
-      pages.push({ entry: m.entry, markdown: b ? fromUtf8(b) : "" });
-    }
+      pages[i] = { entry: m.entry, markdown: b ? fromUtf8(b) : "" };
+    });
     llmsFull = buildLlmsFull(job.org, pages);
   }
   const out = await assembleVersion({

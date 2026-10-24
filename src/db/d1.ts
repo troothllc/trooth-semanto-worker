@@ -26,7 +26,7 @@ import type { DetectionResult } from "../serve/detect";
 import { openPrivateJwk, sealPrivateJwk } from "./key-seal";
 import { fromBase64Url } from "../core/encoding";
 import type { SemantoHeader } from "../core/semanto";
-import { DEFAULT_CONFIG, type ChangeRow, type CompanyConfig, type CompanyKey, type PendingSigning, type PipelineStore, type StoredVersion, type VersionFiles } from "../pipeline-store";
+import { DEFAULT_CONFIG, type ChangeRow, type CompanyConfig, type CompanyKey, type PendingSigning, type PipelineStore, type StoredVersion, type VersionFiles, type VersionHead } from "../pipeline-store";
 import type { Authorization } from "../identity/roles";
 import type { PasskeyChallenge, PasskeyJwk, PasskeyUser, StoredPasskey } from "../identity/webauthn";
 import type { PreparedSigning } from "../identity/keys";
@@ -609,22 +609,21 @@ export class D1PipelineStore implements PipelineStore {
       .run();
   }
 
-  private async readStored(trooth_id: string, row: VersionRow): Promise<StoredVersion | null> {
-    const b = await r2Bytes(this.store, r2Key.file(trooth_id, row.version));
+  // The file and the token counts, read together; never the page bodies, which this used to read one at a time
+  // (135 sequential R2 reads made each passkey request and each signing take five to eight seconds, 2026-10-24).
+  private async readStored(trooth_id: string, row: VersionRow): Promise<VersionHead | null> {
+    const [b, { results }] = await Promise.all([
+      r2Bytes(this.store, r2Key.file(trooth_id, row.version)),
+      this.db.prepare(`SELECT page_id, original_tokens FROM semanto_pages WHERE trooth_id = ?1 AND version = ?2`).bind(trooth_id, row.version).all<{ page_id: string; original_tokens: number }>(),
+    ]);
     if (!b) return null;
     const file = JSON.parse(new TextDecoder().decode(b)) as SemantoFile;
-    const { results } = await this.db.prepare(`SELECT page_id, original_tokens FROM semanto_pages WHERE trooth_id = ?1 AND version = ?2`).bind(trooth_id, row.version).all<{ page_id: string; original_tokens: number }>();
     const original_tokens: Record<string, number> = {};
     for (const r of results) original_tokens[r.page_id] = r.original_tokens;
-    const bodies: Record<string, Uint8Array> = {};
-    for (const p of file.header.pages_manifest) {
-      const body = await r2Bytes(this.store, r2Key.page(trooth_id, row.version, p.id));
-      if (body) bodies[p.id] = body;
-    }
-    return { file, bodies, original_tokens, signed_at: row.signed_at };
+    return { file, original_tokens, signed_at: row.signed_at };
   }
 
-  async latestVersion(trooth_id: string): Promise<StoredVersion | null> {
+  async latestVersion(trooth_id: string): Promise<VersionHead | null> {
     const row = await this.db
       .prepare(`SELECT trooth_id, version, state, built_at, signed_at, withdrawn_at, root_hash, page_count, fact_count, ledger_index FROM semanto_versions WHERE trooth_id = ?1 ORDER BY version DESC LIMIT 1`)
       .bind(trooth_id)
@@ -632,7 +631,7 @@ export class D1PipelineStore implements PipelineStore {
     return row ? this.readStored(trooth_id, row) : null;
   }
 
-  async getVersion(trooth_id: string, version: number): Promise<StoredVersion | null> {
+  async getVersion(trooth_id: string, version: number): Promise<VersionHead | null> {
     const row = await selectVersion(this.db, trooth_id, version);
     return row ? this.readStored(trooth_id, row) : null;
   }
@@ -659,11 +658,13 @@ export class D1PipelineStore implements PipelineStore {
   private async writeVersion(trooth_id: string, f: SemantoFile, files: VersionFiles, original_tokens: Record<string, number>): Promise<void> {
     const h = f.header;
     const n = h.version;
-    await r2Put(this.store, r2Key.file(trooth_id, n), JSON.stringify(f), "application/json");
-    await r2Put(this.store, r2Key.llms(trooth_id, n), files.llms.llmsTxt, "text/markdown; charset=utf-8");
-    if (files.llms.llmsFull !== null) await r2Put(this.store, r2Key.llmsFull(trooth_id, n), files.llms.llmsFull, "text/markdown; charset=utf-8");
-    await r2Put(this.store, r2Key.sitemap(trooth_id, n), files.llms.sitemapMd, "text/markdown; charset=utf-8");
-    await r2Put(this.store, r2Key.jsonld(trooth_id, n), files.jsonld, "application/ld+json");
+    await Promise.all([
+      r2Put(this.store, r2Key.file(trooth_id, n), JSON.stringify(f), "application/json"),
+      r2Put(this.store, r2Key.llms(trooth_id, n), files.llms.llmsTxt, "text/markdown; charset=utf-8"),
+      files.llms.llmsFull !== null ? r2Put(this.store, r2Key.llmsFull(trooth_id, n), files.llms.llmsFull, "text/markdown; charset=utf-8") : Promise.resolve(),
+      r2Put(this.store, r2Key.sitemap(trooth_id, n), files.llms.sitemapMd, "text/markdown; charset=utf-8"),
+      r2Put(this.store, r2Key.jsonld(trooth_id, n), files.jsonld, "application/ld+json"),
+    ]);
     const statements: D1PreparedStatement[] = [
       this.db
         .prepare(
@@ -728,14 +729,20 @@ export class D1PipelineStore implements PipelineStore {
     return out;
   }
 
-  async putChangeState(trooth_id: string, url: string, row: ChangeRow): Promise<void> {
-    await this.db
+  private changeStateStatement(trooth_id: string, url: string, row: ChangeRow): D1PreparedStatement {
+    return this.db
       .prepare(
         `INSERT INTO semanto_change_state (trooth_id, url, etag, last_modified, raw_hash, lastmod, checked_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(trooth_id, url) DO UPDATE SET etag = excluded.etag, last_modified = excluded.last_modified, raw_hash = excluded.raw_hash, lastmod = excluded.lastmod, checked_at = excluded.checked_at`,
       )
-      .bind(trooth_id, url, row.etag, row.last_modified, row.raw_hash, row.lastmod ?? null, row.checked_at)
-      .run();
+      .bind(trooth_id, url, row.etag, row.last_modified, row.raw_hash, row.lastmod ?? null, row.checked_at);
+  }
+  async putChangeState(trooth_id: string, url: string, row: ChangeRow): Promise<void> {
+    await this.changeStateStatement(trooth_id, url, row).run();
+  }
+  /** Every page's row after a build, 100 statements to a batch instead of one round trip each. */
+  async putChangeStates(trooth_id: string, rows: (ChangeRow & { url: string })[]): Promise<void> {
+    for (let i = 0; i < rows.length; i += 100) await this.db.batch(rows.slice(i, i + 100).map((r) => this.changeStateStatement(trooth_id, r.url, r)));
   }
 
   async authorizations(trooth_id: string, root_hash: string): Promise<Authorization[]> {

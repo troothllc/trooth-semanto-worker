@@ -362,19 +362,26 @@ export async function discover(domain: string, fetcher: Fetcher, opts: DiscoverO
   let checked = 0;
   const sleep = (ms: number) => (opts.sleep ? opts.sleep(ms) : new Promise<void>((r) => setTimeout(r, ms)));
   const throttled = (r: FetchOutcome) => r.ok && (r.status === 429 || r.status === 503);
-  while (queue.length) {
-    const batch: string[] = [];
-    while (queue.length && batch.length < concurrency) {
+  // A rolling window: up to `concurrency` requests in flight at all times, each answer handled in queue order (so
+  // what is found, and in what order, is the same as one at a time), and a new request started as each one is
+  // handled, so one slow page holds up only its own place. The caller's staging of each page runs alongside, up to
+  // 2 x concurrency at once, and is awaited before discovery returns.
+  const inflight: { url: string; p: Promise<FetchOutcome> }[] = [];
+  const staging: Promise<void>[] = [];
+  const fill = () => {
+    while (queue.length && inflight.length < concurrency) {
       const url = queue.shift()!;
       const entry = entries.get(url);
       if (!entry || entry.excluded) continue;
-      batch.push(url);
+      inflight.push({ url, p: fetcher.fetch(url) });
     }
-    if (!batch.length) continue;
-    const results = await Promise.all(batch.map((u) => fetcher.fetch(u)));
-    for (let i = 0; i < batch.length; i++) {
-      const url = batch[i]!;
-      let res: FetchOutcome = results[i]!;
+  };
+  fill();
+  while (inflight.length) {
+    // do { } while (false): a `continue` below ends this answer's handling and still reaches the progress and fill.
+    do {
+      const { url, p } = inflight.shift()!;
+      let res: FetchOutcome = await p;
       if (throttled(res)) {
         concurrency = 1;
         fetcher.setMinInterval(Math.max(fetcher.minInterval, 1000));
@@ -404,7 +411,10 @@ export async function discover(domain: string, fetcher: Fetcher, opts: DiscoverO
       }
       if (keep) fetched[url] = res;
       fetchedCount++;
-      if (opts.onFetched) await opts.onFetched(res);
+      if (opts.onFetched) {
+        staging.push(opts.onFetched(res));
+        if (staging.length >= concurrency * 2) await Promise.all(staging.splice(0));
+      }
       const { links, canonical } = extractLinks(res.text, res.finalUrl);
       if (canonical && canonical !== url && sameRegistrableDomain(hostOf(canonical), hostOf(home))) {
         const c = add(canonical, "canonical");
@@ -426,9 +436,11 @@ export async function discover(domain: string, fetcher: Fetcher, opts: DiscoverO
           queue.push(link);
         }
       }
-    }
+    } while (false);
     if (opts.onProgress) await opts.onProgress(entries.size, fetchedCount, checked);
+    fill();
   }
+  await Promise.all(staging);
 
   const urls = [home, ...order.filter((u) => u !== home)].map((u) => entries.get(u)).filter((e): e is DiscoveredUrl => Boolean(e));
   return { domain: hostOf(home), urls, robots, fetched, llmsTxt };

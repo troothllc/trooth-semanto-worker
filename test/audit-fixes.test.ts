@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { utf8, toBase64 } from "@/core/encoding";
 import { generateKeyPair, WitnessKeyMissingError, type Jwks, type PrivateJwk, type PublicJwk } from "@/core/keys";
+import { versionId } from "@/core/semanto";
 import { signMessage } from "@/core/httpsig";
 import type { SemantoFile } from "@/core/semanto";
 import { MemoryHttp as SiteHttp, WebFetchHttp } from "@/compiler/ports";
@@ -476,6 +477,13 @@ describe("setup: the six-screen backend over docs/spec/setup-api.md", () => {
     const check = await json(await call(w, "POST", "/acme/setup/install-check", "Bearer cy", {}));
     expect(check).toMatchObject({ object: "semanto.install_check", url: "https://acme.com/", checks: { markdown: "pass", signature: "pass", well_known: "pass" }, message: INSTALL_OK });
     expect(w.probes).toEqual(expect.arrayContaining(["https://acme.com/", "https://acme.com/.well-known/trooth.semanto", "https://acme.com/.well-known/trooth-keys.json"]));
+    // A site whose cache still holds the previously signed copy is told so, not told a page changed.
+    const keys = (await (await pub(w, "/acme/keys.json")).json()) as { keys: PublicJwk[] };
+    const servedLike = { domain: "acme.com", homePageHash: `sha256:${"b".repeat(64)}`, pageHashes: [], networkCopy: await w.pipeline.networkCopy((await w.store.getCompany("acme"))!), resolveKey: (kid: string) => keys.keys.find((k) => k.kid === kid) ?? null, now: NOW };
+    const probe = { fetch: (url: string, headers: Record<string, string>) => w.deps.siteProbe!(url, headers) };
+    expect((await runInstallCheck({ ...servedLike, currentVersionId: "smv_newerversionaaaaaaaaaaaaaaaaa" }, probe)).messages.signature).toBe(INSTALL_MESSAGES.earlierVersion);
+    const servedId = (await w.versions.getCurrent("acme"))!;
+    expect((await runInstallCheck({ ...servedLike, currentVersionId: versionId(servedId.root_hash) }, probe)).messages.signature).toBe(INSTALL_MESSAGES.mismatch);
     expect(check.setup.next_action).toMatchObject({ label: "Start monitoring" });
     const started = await json(await call(w, "POST", "/acme/setup/monitoring", "Bearer ada", { questions: ["Does Acme Inc ship to Canada?"], competitors: [{ name: "Beta Ltd", domain: "beta.example" }] }));
     expect(started.step).toBe("done");

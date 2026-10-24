@@ -68,6 +68,9 @@ export const DEFAULT_CONFIG: CompanyConfig = {
   public_record_facts: [],
 };
 
+/** A stored version without its page bodies: what signing, review and settings read. */
+export type VersionHead = Omit<StoredVersion, "bodies">;
+
 export interface StoredVersion {
   file: SemantoFile;
   /** Markdown bytes by page id, exactly as hashed. */
@@ -158,8 +161,9 @@ export interface PipelineStore extends BodyPort {
   putConfig(trooth_id: string, config: CompanyConfig): Promise<void>;
 
   /** The newest version in any state, with its bodies. */
-  latestVersion(trooth_id: string): Promise<StoredVersion | null>;
-  getVersion(trooth_id: string, version: number): Promise<StoredVersion | null>;
+  /** A version's file and row, without its page bodies (those are read one by one where served). */
+  latestVersion(trooth_id: string): Promise<VersionHead | null>;
+  getVersion(trooth_id: string, version: number): Promise<VersionHead | null>;
   /** Store a freshly built version (state read) with its bodies and derived files. */
   saveBuilt(trooth_id: string, v: StoredVersion, files: VersionFiles): Promise<void>;
   /** Replace the version with its signed form and make it the company's current version. */
@@ -169,6 +173,8 @@ export interface PipelineStore extends BodyPort {
 
   changeState(trooth_id: string): Promise<Record<string, ChangeRow>>;
   putChangeState(trooth_id: string, url: string, row: ChangeRow): Promise<void>;
+  /** Many rows at once (the rows a finished build writes). */
+  putChangeStates(trooth_id: string, rows: (ChangeRow & { url: string })[]): Promise<void>;
 
   authorizations(trooth_id: string, root_hash: string): Promise<Authorization[]>;
   addAuthorization(trooth_id: string, a: Authorization): Promise<void>;
@@ -402,6 +408,9 @@ export class MemoryPipelineStore implements PipelineStore {
 
   async changeState(trooth_id: string): Promise<Record<string, ChangeRow>> {
     return { ...(this.change.get(trooth_id) ?? {}) };
+  }
+  async putChangeStates(trooth_id: string, rows: (ChangeRow & { url: string })[]): Promise<void> {
+    for (const { url, ...row } of rows) await this.putChangeState(trooth_id, url, row);
   }
   async putChangeState(trooth_id: string, url: string, row: ChangeRow): Promise<void> {
     const m = this.change.get(trooth_id) ?? {};

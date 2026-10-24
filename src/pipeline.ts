@@ -85,7 +85,7 @@ import { wellKnownSemanto } from "./serve/represent";
 import { isDomainProven, type CompanyRecord, type JobPort, type KeyPort, type ReceiptInput, type ReceiptPort, type ServeConfig, type SettingsPort, type SignedRequest, type VersionStore, type WorkspaceAction, type WorkspaceAuth, type WorkspaceHandlers, type WorkspaceRead, type WorkspaceResult, type WorkspaceRole, type WorkspaceSession } from "./serve/ports";
 import type { LedgerLogPort } from "./serve/ledger-port";
 import { PROBLEMS, SessionUnavailable, type ProblemCode } from "./serve/errors";
-import type { PipelineStore, StoredVersion } from "./pipeline-store";
+import type { PipelineStore, VersionHead } from "./pipeline-store";
 import type { SetupDnsPort } from "./setup/ports";
 import { DOMAINS_PROOF_HEADER, troothOsWorkspaceDomains } from "./setup/workspace-domains";
 import { ensureSetup, syncDomainProof, setupAction, setupAfterBuild, setupReview, setupSession, setupState, stampStep } from "./pipeline-setup";
@@ -299,7 +299,7 @@ export class Pipeline implements WorkspaceHandlers {
     }
     const jsonld = generateJsonLd(file, { troothProfileUrl: a.build.job.profile });
     await this.d.store.saveAssembled(trooth_id, file, { llms: a.llms, jsonld: utf8(JSON.stringify(jsonld.graph)) });
-    for (const r of a.changeRows) await this.d.store.putChangeState(trooth_id, r.url, { etag: r.etag, last_modified: r.last_modified, raw_hash: r.raw_hash, lastmod: r.lastmod, checked_at: r.checked_at });
+    await this.d.store.putChangeStates(trooth_id, a.changeRows.map((r) => ({ url: r.url, etag: r.etag, last_modified: r.last_modified, raw_hash: r.raw_hash, lastmod: r.lastmod, checked_at: r.checked_at })));
     const state = { ...a.build.state!, result: { root_hash: file.root_hash, pages: file.header.pages_manifest.length, facts: file.facts.length, receipt: a.receipt } };
     await this.staging.updateBuild(a.build.build_id, { status: "done", finished_at: iso(this.d.now()), state, found: a.receipt.found, rendered: a.build.planned });
     await this.staging.clear(a.build.build_id);
@@ -611,7 +611,7 @@ export class Pipeline implements WorkspaceHandlers {
   }
 
   /** Witness, log, timestamp, and store the signed version. */
-  private async finalize(company: CompanyRecord, v: StoredVersion, header: SemantoHeader, detached: string, kid: string): Promise<WorkspaceResult> {
+  private async finalize(company: CompanyRecord, v: VersionHead, header: SemantoHeader, detached: string, kid: string): Promise<WorkspaceResult> {
     const now = this.d.now();
     const witness = await this.d.keys.getWitnessKey();
     const root = await rootHash(header);
@@ -778,7 +778,7 @@ export class Pipeline implements WorkspaceHandlers {
   }
 
   /** Semanto Basic: witness a built version without a company signature, and log the witness statement. */
-  async witnessOnly(trooth_id: string, v: StoredVersion): Promise<{ witnessed_at: string; log_index: number; tree_size: number } | null> {
+  async witnessOnly(trooth_id: string, v: VersionHead): Promise<{ witnessed_at: string; log_index: number; tree_size: number } | null> {
     if (v.file.header.state !== "read") return null;
     // Nothing is witnessed before the domain is proven.
     if (!isDomainProven(await this.d.store.getCompany(trooth_id))) return null;
@@ -1185,6 +1185,9 @@ export class Pipeline implements WorkspaceHandlers {
   }
 
   /** For these companies, check each signed page cheaply (sitemap lastmod, conditional GET, raw hash) and queue a rebuild of what changed. */
+  /** The shortest time between two builds that change detection starts (23 hours, so the daily one lands on the same hour). */
+  static readonly CHANGE_REBUILD_INTERVAL_MS = 23 * 3600_000;
+
   async checkCompanyChanges(trooth_ids: string[]): Promise<{ trooth_id: string; changed: string[] }[]> {
     const out: { trooth_id: string; changed: string[] }[] = [];
     const detector = new ChangeDetector(this.fetcher());
@@ -1200,7 +1203,10 @@ export class Pipeline implements WorkspaceHandlers {
         continue;
       }
       const state = await this.d.store.changeState(trooth_id);
+      // The newest build, signed or not: rows written after it are the changes it does not hold yet.
+      const since = (await this.d.store.latestFile(trooth_id))?.file.header.built_at ?? file.header.built_at;
       const changed: string[] = [];
+      const pending: string[] = [];
       const seen = new Set<string>();
       for (const page of file.header.pages_manifest) {
         if (seen.has(page.url)) continue;
@@ -1216,14 +1222,20 @@ export class Pipeline implements WorkspaceHandlers {
             ? { etag: r.fetch.etag, last_modified: r.fetch.lastModified, raw_hash: await contentHash(r.fetch.text), lastmod: prev?.lastmod ?? null, checked_at: r.fetch.fetchedAt }
             : { etag: r.fetch.etag, last_modified: r.fetch.lastModified, raw_hash: prev?.raw_hash ?? (await contentHash(r.fetch.text)), lastmod: prev?.lastmod ?? null, checked_at: prev?.checked_at ?? file.header.built_at };
           await this.d.store.putChangeState(trooth_id, page.url, row);
-        }
+          if (row.checked_at > since) pending.push(page.url);
+        } else if (prev && prev.checked_at > since) pending.push(page.url);
         if (r.changed) changed.push(page.url);
       }
-      if (changed.length) {
-        const job: CompileJob = { trooth_id, domain: company.domain, reason: "change_detected", changed_urls: changed, requested_at: iso(this.d.now()) };
+      // Every change is recorded within the hour (readers get the signed copy marked behind), but a new version is
+      // built at most once a day: a status page or a live count changes every hour, and a version to sign each hour
+      // helps no one. The rebuild carries every page changed since the newest build (2026-10-24).
+      const lastBuild = running ? Date.parse(running.requested_at) : 0;
+      const due = this.d.now().getTime() - lastBuild >= Pipeline.CHANGE_REBUILD_INTERVAL_MS;
+      if (pending.length && due) {
+        const job: CompileJob = { trooth_id, domain: company.domain, reason: "change_detected", changed_urls: pending, requested_at: iso(this.d.now()) };
         if (this.d.enqueue) await this.d.enqueue(job);
         else await this.compile(job);
-        await this.promptToSign(company, changed);
+        await this.promptToSign(company, pending);
       }
       out.push({ trooth_id, changed });
     }

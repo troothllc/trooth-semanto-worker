@@ -47,6 +47,8 @@ export interface InstallCheckInput {
   homePageHash: string | null;
   /** Every page hash in the current version, so a site whose root is another signed page still matches. */
   pageHashes: string[];
+  /** The current version's id (an smv_ id), so a copy of an earlier signed version is told apart from a changed page. */
+  currentVersionId?: string;
   /** The Network copy of the two well-known documents. */
   networkCopy: { semanto: Uint8Array; keys: Uint8Array };
   /** Resolves a response signature's keyid: the company's keys and Trooth's witness keys. */
@@ -73,6 +75,7 @@ export const INSTALL_MESSAGES = {
   noSignature: "Your site's markdown carries no Semanto signature. The app or code is not serving Semanto's answer; check the install steps for your host.",
   badSignature: "The signature on what your site sends does not check out. Make sure the app or code passes Semanto's answer through unchanged, then check again.",
   mismatch: "Your site sent a copy that does not match what you signed. A page changed after signing. Sign the new version, or keep serving the signed one.",
+  earlierVersion: "Your site is still sending the version you signed before this one. Its cache refreshes within two minutes; check again then.",
   signatureOk: "The signature on what your site sends matches what you signed.",
   wellKnownMissing: "Your site does not serve /.well-known/trooth.semanto and /.well-known/trooth-keys.json yet. The app or code serves both; check that it is live.",
   wellKnownDiffers: "Your site's /.well-known files differ from the copy on the Trooth Network. Make sure the app or code passes them through unchanged.",
@@ -121,7 +124,10 @@ export async function runInstallCheck(input: InstallCheckInput, ports: InstallCh
     const signedHash = md.headers["trooth-signed-page-hash"] ?? headerHash;
     const known = new Set([...(input.homePageHash ? [input.homePageHash] : []), ...input.pageHashes]);
     if (!v.ok || !digestOk || bodyHash !== headerHash) signatureMsg = INSTALL_MESSAGES.badSignature;
-    else if (!known.has(signedHash)) signatureMsg = INSTALL_MESSAGES.mismatch;
+    else if (!known.has(signedHash)) {
+      const served = md.headers["trooth-semanto-version"];
+      signatureMsg = input.currentVersionId && served && served !== input.currentVersionId ? INSTALL_MESSAGES.earlierVersion : INSTALL_MESSAGES.mismatch;
+    }
     else {
       signature = "pass";
       signatureMsg = INSTALL_MESSAGES.signatureOk;

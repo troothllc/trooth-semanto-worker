@@ -532,6 +532,13 @@ describe("4. the same flow over the D1 and R2 adapters the Worker uses (SQLite a
     expect((await store.getCompany("acme"))?.domain_proven_at).toBe(NOW.toISOString());
     expect((await app.request(`${API}/acme`)).status).toBe(409);
     expect((await osPost("/acme/build", {})).status).toBe(200);
+    // The passkey request reads the version's file, never its page bodies one by one (2026-10-24: 135 reads took 8 s).
+    const realGet = r2.get.bind(r2);
+    const reads: string[] = [];
+    r2.get = async (key: string) => (reads.push(key), realGet(key));
+    expect((await store.getVersion("acme", 1))?.file.header.version).toBe(1);
+    expect(reads.filter((k) => k.includes("/pages/") || k.endsWith(".md"))).toEqual([]);
+    r2.get = realGet;
     const signedRes = await passkeySign((path, b, t) => app.request(`${OS}${path}`, { method: "POST", headers: { authorization: t, "content-type": "application/json" }, body: JSON.stringify(b) }), "acme", "Bearer owner-token", new PasskeyWallet());
     expect(signedRes.status).toBe(200);
     const signed = await json(signedRes);
@@ -859,14 +866,20 @@ describe("4. scheduled work", () => {
     w.queued.length = 0;
     const result = await w.pipeline.checkCompanyChanges(["acme"]);
     expect(result).toEqual([{ trooth_id: "acme", changed: ["https://acme.com/about"] }]);
-    expect(w.queued[0]).toMatchObject({ trooth_id: "acme", reason: "change_detected", changed_urls: ["https://acme.com/about"] });
+    // Recorded within the hour, served as behind, and no version built yet: the build an hour ago was the last one.
+    expect(w.queued).toEqual([]);
     const file = (await w.versions.getCurrent("acme"))!;
     const entry = file.header.pages_manifest.find((p) => p.url === "https://acme.com/about")!;
     const page = await get(w, `/acme/pages/${entry.id}`, { accept: "text/markdown" });
     expect(page.headers.get("trooth-semanto-state")).toBe("behind");
-    // The next hour, the same new bytes are not a new change.
-    w.queued.length = 0;
+    // The next hour, the same new bytes are not a new change, and still no build.
+    w.clock.now = new Date(NOW.getTime() + 2 * 3_600_000);
     expect((await w.pipeline.checkCompanyChanges(["acme"]))[0]!.changed).toEqual([]);
+    expect(w.queued).toEqual([]);
+    // A day after the build, the check builds once, with every page changed since it.
+    w.clock.now = new Date(NOW.getTime() + 24 * 3_600_000);
+    expect((await w.pipeline.checkCompanyChanges(["acme"]))[0]!.changed).toEqual([]);
+    expect(w.queued).toEqual([expect.objectContaining({ trooth_id: "acme", reason: "change_detected", changed_urls: ["https://acme.com/about"] })]);
     // The rebuild keeps unchanged pages and re-renders the changed one.
     const summary = await w.pipeline.compile({ trooth_id: "acme", domain: "acme.com", reason: "change_detected", changed_urls: ["https://acme.com/about"], requested_at: NOW.toISOString() });
     expect(summary.version).toBe(2);
