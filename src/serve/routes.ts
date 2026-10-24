@@ -921,7 +921,15 @@ export function createApp(deps: RouteDeps): ServeApp {
       const input = await readJson(c);
       if (input === TOO_LARGE) return sendProblem(c, null, null, "payload_too_large", { detail: "The body is larger than 5 MB." });
       if (input === undefined) return sendProblem(c, null, null, "invalid_request", { detail: "The body is not JSON." });
-      return sendWorkspace(c, trooth_id, await deps.workspace.handle(action, ws, trooth_id, input));
+      // A write finishes even when the browser stops waiting: signing appends to the log, then records the version as
+      // signed, and a request cancelled between the two would leave log entries for a version still shown unsigned.
+      const work = deps.workspace.handle(action, ws, trooth_id, input);
+      try {
+        c.executionCtx.waitUntil(work.catch(() => undefined));
+      } catch {
+        // No execution context (tests, Node): the promise runs on its own.
+      }
+      return sendWorkspace(c, trooth_id, await work);
     });
   for (const action of WORKSPACE_ACTIONS) actionRoute(action);
 

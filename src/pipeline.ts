@@ -42,7 +42,7 @@ import { JWS_TYPES, signObject } from "./core/jws";
 import { importPrivate, sign as rawSign, toPublic, WitnessKeyMissingError, type PrivateJwk, type PublicJwk } from "./core/keys";
 import { parseSignatureInput, verifyContentDigest, verifyMessage } from "./core/httpsig";
 import { factsRoot, rootHash, tierHash, versionId, type Fact, type Identity, type SemantoFile, type SemantoHeader } from "./core/semanto";
-import { Fetcher, ChangeDetector, type FetcherOptions } from "./compiler/fetch";
+import { Fetcher, ChangeDetector, contentHash, type FetcherOptions } from "./compiler/fetch";
 import { generateJsonLd } from "./compiler/jsonld";
 import { extract } from "./compiler/extract";
 import { registrableDomain } from "./compiler/url";
@@ -256,20 +256,30 @@ export class Pipeline implements WorkspaceHandlers {
     return build_id;
   }
 
-  /** Run one build stage. Answers the next message, or null after assembly. */
-  async runStage(msg: StageMessage): Promise<StageMessage | null> {
+  /** Run one build stage. Answers the messages that follow it: every render batch after discovery, assembly after the batch that completes the set, none after assembly. */
+  async runStage(msg: StageMessage): Promise<StageMessage[]> {
     this.staging.beginInvocation?.();
     try {
       if (msg.stage === "discover") return await runDiscover(msg.build_id, this.streamDeps());
-      if (msg.stage === "render") return await runRender(msg, this.streamDeps());
-      await this.finishBuild(await runAssemble(msg.build_id, this.streamDeps()));
-      return null;
+      if (msg.stage === "render") {
+        const next = await runRender(msg, this.streamDeps());
+        return next ? [next] : [];
+      }
+      const assembled = await runAssemble(msg.build_id, this.streamDeps());
+      if (assembled) await this.finishBuild(assembled);
+      return [];
     } catch (e) {
       if (this.inlineStage) await this.failBuild(msg.build_id, e);
       throw e;
     }
   }
   private inlineStage = false;
+
+  /** Every stage of a build in this invocation, in order (tests, development, and a deployment without a queue). */
+  private async runChain(first: StageMessage): Promise<void> {
+    const pending: StageMessage[] = [first];
+    while (pending.length) pending.push(...(await this.runStage(pending.shift()!)));
+  }
 
   /** Mark a build failed with plain words; the setup screen shows them. */
   async failBuild(build_id: string, e: unknown): Promise<void> {
@@ -324,10 +334,9 @@ export class Pipeline implements WorkspaceHandlers {
   /** Inline: every stage in this invocation, for tests and development without a queue. */
   async compile(job: CompileJob): Promise<CompileSummary> {
     const build_id = await this.startBuild(job);
-    let msg: StageMessage | null = { kind: "stage", stage: "discover", build_id };
     this.inlineStage = true;
     try {
-      while (msg) msg = await this.runStage(msg);
+      await this.runChain({ kind: "stage", stage: "discover", build_id });
     } finally {
       this.inlineStage = false;
     }
@@ -358,10 +367,9 @@ export class Pipeline implements WorkspaceHandlers {
     }
     if (this.d.inlineBuilds === false) throw new Error("No compile queue is bound in this deployment.");
     const build_id = await this.startBuild(job);
-    let msg: StageMessage | null = { kind: "stage", stage: "discover", build_id };
     this.inlineStage = true;
     try {
-      while (msg) msg = await this.runStage(msg);
+      await this.runChain({ kind: "stage", stage: "discover", build_id });
     } catch {
       // failBuild has recorded the failure; the setup state shows it.
     } finally {
@@ -376,11 +384,8 @@ export class Pipeline implements WorkspaceHandlers {
     if (this.d.consumeOs && (await this.d.consumeOs(message, attempts))) return;
     if (message.kind === "stage") {
       const next = await this.runStage(message as unknown as StageMessage);
-      if (next && this.d.enqueue) await this.d.enqueue(next);
-      else if (next) {
-        let m: StageMessage | null = next;
-        while (m) m = await this.runStage(m);
-      }
+      if (this.d.enqueue) await Promise.all(next.map((m) => this.d.enqueue!(m)));
+      else for (const m of next) await this.runChain(m);
       return;
     }
     if (message.kind === "companies") {
@@ -1187,6 +1192,13 @@ export class Pipeline implements WorkspaceHandlers {
       const company = await this.d.store.getCompany(trooth_id);
       const file = company ? await this.d.versions.getCurrent(trooth_id) : null;
       if (!company || !file) continue;
+      // A read already running for this company finishes first: a second one would read the same pages again and
+      // compete with it, and with a signing, for the same database (2026-10-24).
+      const running = await this.staging.latestBuild(trooth_id);
+      if (running && !["done", "failed"].includes(running.status)) {
+        out.push({ trooth_id, changed: [] });
+        continue;
+      }
       const state = await this.d.store.changeState(trooth_id);
       const changed: string[] = [];
       const seen = new Set<string>();
@@ -1197,7 +1209,13 @@ export class Pipeline implements WorkspaceHandlers {
         const capture = { etag: prev?.etag ?? null, lastModified: prev?.last_modified ?? null, source_hash: prev?.raw_hash ?? page.source_hash, lastmod: prev?.lastmod ?? null };
         const r = await detector.check(page.url, capture, null);
         if (r.fetch && r.fetch.ok && r.fetch.status === 200) {
-          await this.d.store.putChangeState(trooth_id, page.url, { etag: r.fetch.etag, last_modified: r.fetch.lastModified, raw_hash: r.fetch.source_hash, lastmod: prev?.lastmod ?? null, checked_at: r.fetch.fetchedAt });
+          // The words changed: the new text hash and the time it was seen. They did not: only the validators move, and
+          // the row keeps the hash and time of the version it describes, so the review never reports a page as changed
+          // because its bytes carried a new nonce.
+          const row = r.changed
+            ? { etag: r.fetch.etag, last_modified: r.fetch.lastModified, raw_hash: await contentHash(r.fetch.text), lastmod: prev?.lastmod ?? null, checked_at: r.fetch.fetchedAt }
+            : { etag: r.fetch.etag, last_modified: r.fetch.lastModified, raw_hash: prev?.raw_hash ?? (await contentHash(r.fetch.text)), lastmod: prev?.lastmod ?? null, checked_at: prev?.checked_at ?? file.header.built_at };
+          await this.d.store.putChangeState(trooth_id, page.url, row);
         }
         if (r.changed) changed.push(page.url);
       }

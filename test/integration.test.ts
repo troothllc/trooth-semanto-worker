@@ -851,6 +851,8 @@ describe("4. scheduled work", () => {
     await drain(w);
     expect((await signHosted(w)).status).toBe(200);
     w.site.set("https://acme.com/about", { body: readCompiler("about.html").replace("coyote", "roadrunner"), headers: { "content-type": "text/html" } });
+    // The check runs an hour after the build, as the cron does.
+    w.clock.now = new Date(NOW.getTime() + 3_600_000);
     // The cron fans out one message per 25 companies; the message checks them and queues the rebuild.
     await w.pipeline.hourlyChangeDetection();
     expect(w.queued).toEqual([{ kind: "companies", job: "changes", trooth_ids: ["acme"] }]);
@@ -869,6 +871,24 @@ describe("4. scheduled work", () => {
     const summary = await w.pipeline.compile({ trooth_id: "acme", domain: "acme.com", reason: "change_detected", changed_urls: ["https://acme.com/about"], requested_at: NOW.toISOString() });
     expect(summary.version).toBe(2);
     expect(summary.coverage.changed).toEqual(["https://acme.com/about"]);
+  });
+
+  it("hourly: a page whose only change is a per-request nonce is not a change, queues nothing and is served as current", async () => {
+    const w = await world({ queue: true });
+    const withNonce = (n: string) => readCompiler("about.html").replace("</head>", `<script nonce="${n}">window.x=1</script></head>`);
+    w.site.set("https://acme.com/about", { body: withNonce("n-build"), headers: { "content-type": "text/html" } });
+    await post(w, "/acme/build", {});
+    await drain(w);
+    expect((await signHosted(w)).status).toBe(200);
+    w.clock.now = new Date(NOW.getTime() + 3_600_000);
+    w.site.set("https://acme.com/about", { body: withNonce("n-hour-1"), headers: { "content-type": "text/html" } });
+    w.queued.length = 0;
+    expect(await w.pipeline.checkCompanyChanges(["acme"])).toEqual([{ trooth_id: "acme", changed: [] }]);
+    expect(w.queued).toEqual([]);
+    const file = (await w.versions.getCurrent("acme"))!;
+    const entry = file.header.pages_manifest.find((p) => p.url === "https://acme.com/about")!;
+    const page = await get(w, `/acme/pages/${entry.id}`, { accept: "text/markdown" });
+    expect(page.headers.get("trooth-semanto-state")).toBeNull();
   });
 
   it("nightly: signs a tree head, anchors it with an RFC 3161 timestamp, and re-signs the revocation list", async () => {

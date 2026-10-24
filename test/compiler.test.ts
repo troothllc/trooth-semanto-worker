@@ -8,7 +8,8 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { MemoryHttp, FixedClock, fakeSleeper } from "@/compiler/ports";
-import { Fetcher, ChangeDetector, checkUrl, classifyAddress, USER_AGENT } from "@/compiler/fetch";
+import { Fetcher, ChangeDetector, checkUrl, classifyAddress, contentHash, USER_AGENT } from "@/compiler/fetch";
+import { readProgress } from "@/setup/state";
 import { discover, parseRobots, robotsAllows, parseSitemap, exclusionReason, extractLinks } from "@/compiler/discover";
 import { extract, pageBlocks, detectChrome, sentencesOf, parseFrontMatter, splitBlocks } from "@/compiler/extract";
 import { parseHtml, textOf, decodeEntities } from "@/compiler/html";
@@ -198,6 +199,69 @@ describe("discovery", () => {
     expect(exclusionReason("https://acme.com/cart/items")).toMatch(/cart page/);
     expect(exclusionReason("https://acme.com/account")).toMatch(/account page/);
     expect(exclusionReason("https://acme.com/about")).toBeNull();
+  });
+
+  // A site of n linked pages behind a port that counts requests in flight at once.
+  function wideSite(n: number, robots = "User-agent: *\nAllow: /\n") {
+    const http = new MemoryHttp({ "https://widecorp.com/robots.txt": { body: robots, headers: { "content-type": "text/plain" } } });
+    const links = Array.from({ length: n }, (_, i) => `<a href="/p${i}">Page ${i}</a>`).join("");
+    http.set("https://widecorp.com/", { body: `<html><head><title>Wide</title></head><body><main>${links}</main></body></html>` });
+    for (let i = 0; i < n; i++) http.set(`https://widecorp.com/p${i}`, { body: `<html><head><title>Page ${i}</title></head><body><main><p>Page ${i} words.</p></main></body></html>` });
+    let inFlight = 0;
+    const counted = {
+      peak: 0,
+      log: http.log,
+      async request(req: Parameters<MemoryHttp["request"]>[0]) {
+        inFlight++;
+        counted.peak = Math.max(counted.peak, inFlight);
+        await new Promise((r) => setTimeout(r, 2));
+        try {
+          return await http.request(req);
+        } finally {
+          inFlight--;
+        }
+      },
+    };
+    return { http, counted };
+  }
+
+  it("reads up to eight pages at once and keeps the order of the queue", async () => {
+    const { counted } = wideSite(40);
+    const result = await discover("widecorp.com", new Fetcher({ http: counted }, { minIntervalMs: 0 }));
+    expect(counted.peak).toBeGreaterThan(1);
+    expect(counted.peak).toBeLessThanOrEqual(8);
+    const pages = result.urls.filter((u) => /\/p\d+$/.test(u.url)).map((u) => u.url);
+    expect(pages).toEqual(Array.from({ length: 40 }, (_, i) => `https://widecorp.com/p${i}`));
+  });
+
+  it("reads one page at a time when robots.txt sets a Crawl-delay", async () => {
+    const { counted } = wideSite(6, "User-agent: *\nCrawl-delay: 1\nAllow: /\n");
+    const clock = new FixedClock("2026-10-22T12:00:00Z");
+    const result = await discover("widecorp.com", new Fetcher({ http: counted, clock, sleep: fakeSleeper(clock).sleep }, { minIntervalMs: 0 }));
+    expect(result.robots.crawl_delay_s).toBe(1);
+    expect(counted.peak).toBe(1);
+  });
+
+  it("slows to one at a time after a 429 and retries the page once after Retry-After", async () => {
+    const { http, counted } = wideSite(12);
+    let first = true;
+    const flaky = {
+      get peak() {
+        return counted.peak;
+      },
+      async request(req: Parameters<MemoryHttp["request"]>[0]) {
+        if (req.url === "https://widecorp.com/p3" && first) {
+          first = false;
+          return { status: 429, headers: { "retry-after": "3", "content-type": "text/html" }, body: new Uint8Array(0), truncated: false };
+        }
+        return counted.request(req);
+      },
+    };
+    const waits: number[] = [];
+    const result = await discover("widecorp.com", new Fetcher({ http: flaky }, { minIntervalMs: 0 }), { sleep: async (ms) => void waits.push(ms) });
+    expect(waits).toContain(3000);
+    expect(result.urls.find((u) => u.url === "https://widecorp.com/p3")?.status).toBe(200);
+    expect(http.log.filter((r) => r.url === "https://widecorp.com/p3").length).toBe(1);
   });
 
   it("respects a cap", async () => {
@@ -653,5 +717,53 @@ describe("build", () => {
       expect(s.includes("\u2026")).toBe(false);
       expect(/\.\.\.(?![A-Za-z_$([{])/.test(s)).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------- change detection and progress
+
+describe("change detection reads the words, not the bytes", () => {
+  const page = (nonce: string, words = "Acme makes anvils.") => `<html><head><script nonce="${nonce}">1</script><meta name="csrf" content="${nonce}"></head><body><main><p>${words}</p></main></body></html>`;
+
+  it("a new script nonce is the same text; new words are not", async () => {
+    expect(await contentHash(page("a1"))).toBe(await contentHash(page("b2")));
+    expect(await contentHash(page("a1"))).not.toBe(await contentHash(page("a1", "Acme makes rockets.")));
+    expect(await contentHash(page("a1"))).toMatch(/^text:sha256:/);
+  });
+
+  it("the hourly check calls a page with only a new nonce unchanged", async () => {
+    const http = new MemoryHttp({ "https://acme.com/about": page("first") });
+    const detector = new ChangeDetector(new Fetcher({ http }, { minIntervalMs: 0 }));
+    const previous = { etag: null, lastModified: null, source_hash: await contentHash(page("first")), lastmod: null };
+    http.set("https://acme.com/about", { body: page("second") });
+    expect((await detector.check("https://acme.com/about", previous)).reason).toBe("same_text");
+    http.set("https://acme.com/about", { body: page("third", "Acme makes rockets.") });
+    expect((await detector.check("https://acme.com/about", previous)).changed).toBe(true);
+  });
+});
+
+describe("read progress never counts the wrong thing", () => {
+  const start = Date.parse("2026-10-22T12:00:00Z");
+  const reading = (checked: number, found: number, fetched: number, s: number) => readProgress({ status: "reading", found, fetched, checked, planned: 0, rendered: 0, started_at: new Date(start).toISOString() }, start + s * 1000);
+
+  it("gives no time until ten addresses are checked, then counts checked addresses, not HTML pages", () => {
+    expect(reading(5, 40, 3, 2).eta_seconds).toBeUndefined();
+    const p = reading(20, 100, 10, 10);
+    expect(p).toMatchObject({ phase: "reading", done: 20, total: 100 });
+    expect(p.eta_seconds).toBeGreaterThan(0);
+  });
+
+  it("an estimate at a steady pace goes down as the read goes on, even while it finds more addresses", () => {
+    const a = reading(20, 100, 10, 10).eta_seconds!;
+    const b = reading(60, 120, 30, 30).eta_seconds!;
+    const c = reading(110, 120, 55, 55).eta_seconds!;
+    expect(b).toBeLessThan(a);
+    expect(c).toBeLessThan(b);
+  });
+
+  it("names the writing and finishing phases with their own counts", () => {
+    const r = readProgress({ status: "rendering", found: 120, fetched: 60, checked: 120, planned: 60, rendered: 30, started_at: null, rendering_started_at: new Date(start).toISOString() }, start + 3000);
+    expect(r).toMatchObject({ phase: "rendering", done: 30, total: 60 });
+    expect(readProgress({ status: "assembling", found: 120, fetched: 60, planned: 60, rendered: 60, started_at: null }, start)).toMatchObject({ phase: "assembling", done: 60, total: 60 });
   });
 });

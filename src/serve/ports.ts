@@ -63,6 +63,18 @@ export interface VersionSummary {
 /** Whether the live page still matches the last signed bytes. */
 export type PageLiveState = "current" | "behind" | "unknown";
 
+/**
+ * A text hash (src/compiler/fetch.ts contentHash) is rewritten, with the time it was seen, only when a later check
+ * found the page's words changed, so such a row is "behind" when it was written after the version was built and
+ * "current" otherwise. An older byte hash is compared with the page's own bytes, as before.
+ */
+export function pageLiveState(row: { raw_hash: string | null; checked_at: string } | null, source_hash: string, signed_at: string | null, built_at?: string): PageLiveState {
+  if (!row || !row.raw_hash) return "unknown";
+  if (row.raw_hash.startsWith("text:") && built_at) return row.checked_at > built_at ? "behind" : "current";
+  if (signed_at && row.checked_at < signed_at) return "unknown";
+  return row.raw_hash === source_hash ? "current" : "behind";
+}
+
 export interface StoredPage {
   /** The markdown bytes exactly as signed. */
   bytes: Uint8Array;

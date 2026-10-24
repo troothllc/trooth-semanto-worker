@@ -34,7 +34,7 @@ import { discover, type DiscoveredUrl, type RobotsRules } from "./discover";
 import { assembleVersion, dedupeFacts, planBuild, renderPage, type CoverageReceipt, type FetchedMeta } from "./build";
 import { detectChrome, pageBlockKeys } from "./extract";
 import { buildLlmsFull, describePage } from "./llms";
-import type { Fetcher, FetchOk } from "./fetch";
+import { contentHash, type Fetcher, type FetchOk } from "./fetch";
 
 export const PAGES_PER_MESSAGE = 25;
 export const LLMS_FULL_MAX_BYTES = 8 * 1024 * 1024;
@@ -85,6 +85,10 @@ export interface BuildRow {
   requested_at: string;
   started_at: string | null;
   finished_at: string | null;
+  /** Every url the crawl has dealt with so far (migrations/0010_build_progress.sql). */
+  checked?: number;
+  /** When the render stage began. */
+  rendering_started_at?: string | null;
 }
 
 export interface StagedFetch {
@@ -98,6 +102,8 @@ export interface StagedFetch {
   last_modified: string | null;
   block_keys: string[];
   raw_key: string;
+  /** The visible-text hash change detection compares (src/compiler/fetch.ts contentHash). Absent on rows staged before it. */
+  content_hash?: string;
 }
 
 export interface StagedItem {
@@ -134,6 +140,13 @@ export interface BuildStagingPort {
   itemsSlice(build_id: string, from: number, to: number): Promise<StagedItem[]>;
   putRendered(build_id: string, r: StagedRender): Promise<void>;
   listRendered(build_id: string): Promise<StagedRender[]>;
+  /** How many items have a rendered row (one per item, written again on a retry, so a count and not a sum). */
+  countRendered(build_id: string): Promise<number>;
+  /**
+   * Take the build for assembly: true for exactly one caller while it is rendering, or when an earlier claim is older
+   * than staleMs (an assembly that failed and is being retried). Every other caller gets false and does nothing.
+   */
+  claimAssemble(build_id: string, nowIso: string, staleMs: number): Promise<boolean>;
   /** Remove the staged bodies and rows once the version is stored. */
   clear(build_id: string): Promise<void>;
   /** Marks the start of one queue message, for the in-memory meter. */
@@ -166,7 +179,7 @@ const prevIndex = (file: SemantoFile | null) => {
 };
 
 /** Message 1: discover, staging every page as it is read; then plan and queue the first render. */
-export async function runDiscover(build_id: string, deps: StreamDeps): Promise<StageMessage> {
+export async function runDiscover(build_id: string, deps: StreamDeps): Promise<StageMessage[]> {
   const build = await deps.staging.getBuild(build_id);
   if (!build) throw new Error(`stream: no build ${build_id}`);
   const job = build.job;
@@ -179,15 +192,16 @@ export async function runDiscover(build_id: string, deps: StreamDeps): Promise<S
     onFetched: async (f: FetchOk) => {
       const raw_key = await deps.staging.putRaw(build_id, f.url, f.body);
       const keys = pageBlockKeys(f.text, f.url);
-      await deps.staging.putFetched(build_id, { url: f.url, status: f.status, source_hash: f.source_hash, witnessed_at: f.fetchedAt, headers: f.headers, truncated: f.truncated, etag: f.etag, last_modified: f.lastModified, block_keys: keys, raw_key });
+      await deps.staging.putFetched(build_id, { url: f.url, status: f.status, source_hash: f.source_hash, witnessed_at: f.fetchedAt, headers: f.headers, truncated: f.truncated, etag: f.etag, last_modified: f.lastModified, block_keys: keys, raw_key, content_hash: await contentHash(f.text) });
       meta.set(f.url, { status: f.status, source_hash: f.source_hash, truncated: f.truncated });
       blockKeys.set(f.url, keys);
     },
-    onProgress: async (found, fetched) => {
-      // Progress for the setup screen, written every 5 pages so the poll moves on real counts.
-      if (fetched - lastWrite >= 5) {
-        lastWrite = fetched;
-        await deps.staging.updateBuild(build_id, { found, fetched });
+    onProgress: async (found, fetched, checked) => {
+      // Progress for the setup screen, written every 5 urls so the poll moves on real counts. "checked" counts every
+      // url dealt with (pages, files, failures), so checked of found reaches the end and the estimate can use it.
+      if (checked - lastWrite >= 5) {
+        lastWrite = checked;
+        await deps.staging.updateBuild(build_id, { found, fetched, checked });
       }
     },
   });
@@ -204,12 +218,17 @@ export async function runDiscover(build_id: string, deps: StreamDeps): Promise<S
     discovered: discovery.urls.map((u: DiscoveredUrl) => ({ url: u.url, lastmod: u.lastmod ?? null })),
     items: items.length,
   };
-  await deps.staging.updateBuild(build_id, { status: "rendering", found: discovery.urls.length, fetched: meta.size, planned: items.length, state });
-  return items.length ? { kind: "stage", stage: "render", build_id, from: 0, to: Math.min(PAGES_PER_MESSAGE, items.length) } : { kind: "stage", stage: "assemble", build_id };
+  await deps.staging.updateBuild(build_id, { status: "rendering", found: discovery.urls.length, fetched: meta.size, checked: discovery.urls.length, planned: items.length, state, rendering_started_at: deps.now().toISOString() });
+  // Every render batch at once (2026-10-24): the batches write to their own rows and bodies, so they run side by side
+  // on as many queue consumers as Cloudflare gives, and the one that completes the set queues assembly (runRender).
+  if (!items.length) return [{ kind: "stage", stage: "assemble", build_id }];
+  const batches: StageMessage[] = [];
+  for (let from = 0; from < items.length; from += PAGES_PER_MESSAGE) batches.push({ kind: "stage", stage: "render", build_id, from, to: Math.min(from + PAGES_PER_MESSAGE, items.length) });
+  return batches;
 }
 
 /** Messages 2 to n: render or reuse at most PAGES_PER_MESSAGE pages, one at a time. */
-export async function runRender(msg: Extract<StageMessage, { stage: "render" }>, deps: StreamDeps): Promise<StageMessage> {
+export async function runRender(msg: Extract<StageMessage, { stage: "render" }>, deps: StreamDeps): Promise<StageMessage | null> {
   if (msg.to - msg.from > PAGES_PER_MESSAGE) throw new Error(`stream: a render message holds at most ${PAGES_PER_MESSAGE} pages`);
   const build = await deps.staging.getBuild(msg.build_id);
   if (!build || !build.state) throw new Error(`stream: no planned build ${msg.build_id}`);
@@ -237,10 +256,12 @@ export async function runRender(msg: Extract<StageMessage, { stage: "render" }>,
     }
     await deps.staging.putRendered(msg.build_id, { seq: item.seq, url: item.url, entries, facts: prev.factsByUrl.get(item.url) ?? [] });
   }
-  await deps.staging.updateBuild(msg.build_id, { rendered: msg.to });
-  const total = build.state.items;
-  if (msg.to < total) return { kind: "stage", stage: "render", build_id: msg.build_id, from: msg.to, to: Math.min(msg.to + PAGES_PER_MESSAGE, total) };
-  return { kind: "stage", stage: "assemble", build_id: msg.build_id };
+  // The batches finish in any order. Each counts the items that have a rendered row (one row per item, so a retried
+  // batch does not count twice); the batch that sees every item done queues assembly. Two that see it at once both
+  // queue it, and runAssemble's claim lets one through.
+  const done = await deps.staging.countRendered(msg.build_id);
+  await deps.staging.updateBuild(msg.build_id, { rendered: done });
+  return done >= build.state.items ? { kind: "stage", stage: "assemble", build_id: msg.build_id } : null;
 }
 
 export interface AssembledBuild {
@@ -253,10 +274,23 @@ export interface AssembledBuild {
 }
 
 /** The last message: the manifest from D1 in order, the version from build.ts assembleVersion. */
-export async function runAssemble(build_id: string, deps: StreamDeps): Promise<AssembledBuild> {
+export const ASSEMBLE_CLAIM_STALE_MS = 2 * 60 * 1000;
+
+export async function runAssemble(build_id: string, deps: StreamDeps): Promise<AssembledBuild | null> {
   const build = await deps.staging.getBuild(build_id);
   if (!build || !build.state) throw new Error(`stream: no planned build ${build_id}`);
-  await deps.staging.updateBuild(build_id, { status: "assembling" });
+  // Exactly one assembly per build: a second message (two batches finished together) finds it claimed and stops.
+  if (!(await deps.staging.claimAssemble(build_id, deps.now().toISOString(), ASSEMBLE_CLAIM_STALE_MS))) return null;
+  try {
+    return await assembleClaimed(build_id, build as BuildRow & { state: NonNullable<BuildRow["state"]> }, deps);
+  } catch (e) {
+    // A failed assembly gives the claim back, so the queue's retry of this message can take it at once.
+    await deps.staging.updateBuild(build_id, { status: "rendering" });
+    throw e;
+  }
+}
+
+async function assembleClaimed(build_id: string, build: BuildRow & { state: NonNullable<BuildRow["state"]> }, deps: StreamDeps): Promise<AssembledBuild> {
   const job = build.job;
   const rendered = (await deps.staging.listRendered(build_id)).sort((a, b) => a.seq - b.seq);
   const manifest = rendered.flatMap((r) => r.entries);
@@ -288,7 +322,10 @@ export async function runAssemble(build_id: string, deps: StreamDeps): Promise<A
     llmsFull,
   });
   const lastmod = new Map(build.state.discovered.map((d) => [d.url, d.lastmod] as const));
-  const changeRows = (await deps.staging.listFetched(build_id)).map((f) => ({ url: f.url, etag: f.etag, last_modified: f.last_modified, raw_hash: f.source_hash, lastmod: lastmod.get(f.url) ?? null, checked_at: f.witnessed_at }));
+  // A row the read writes carries the version's own time (built_at, the job's request time) when it holds a text hash,
+  // so "checked after the build" (src/pipeline-setup.ts changedSinceRead) can only come from a later check that found
+  // the words changed (src/pipeline.ts checkCompanyChanges writes the hash and time only then).
+  const changeRows = (await deps.staging.listFetched(build_id)).map((f) => ({ url: f.url, etag: f.etag, last_modified: f.last_modified, raw_hash: f.content_hash ?? f.source_hash, lastmod: lastmod.get(f.url) ?? null, checked_at: f.content_hash ? job.requested_at : f.witnessed_at }));
   return { build, file: out.file, receipt: out.receipt, llms: out.llms, changeRows };
 }
 
@@ -367,6 +404,22 @@ export class MemoryBuildStaging implements BuildStagingPort {
   async listRendered(build_id: string): Promise<StagedRender[]> {
     return structuredClone(this.rendered.get(build_id) ?? []);
   }
+  async countRendered(build_id: string): Promise<number> {
+    return (this.rendered.get(build_id) ?? []).length;
+  }
+
+  private readonly claims = new Map<string, string>();
+  async claimAssemble(build_id: string, nowIso: string, staleMs: number): Promise<boolean> {
+    const b = this.builds.get(build_id);
+    if (!b) return false;
+    const claimed = this.claims.get(build_id);
+    const stale = claimed !== undefined && Date.parse(nowIso) - Date.parse(claimed) > staleMs;
+    if (b.status !== "rendering" && !(b.status === "assembling" && (claimed === undefined || stale))) return false;
+    b.status = "assembling";
+    this.claims.set(build_id, nowIso);
+    return true;
+  }
+
   async clear(build_id: string): Promise<void> {
     for (const k of [...this.raw.keys()]) if (k.startsWith(`semanto/builds/${build_id}/`)) this.raw.delete(k);
     this.fetched.delete(build_id);

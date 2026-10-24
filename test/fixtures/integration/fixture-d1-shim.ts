@@ -34,8 +34,9 @@ class ShimStatement {
     return { results: this.db.prepare(this.sql).all(...this.params).map((r) => this.plain<T>(r)), success: true };
   }
   async run(): Promise<{ success: true; meta: Record<string, unknown> }> {
-    this.db.prepare(this.sql).run(...this.params);
-    return { success: true, meta: {} };
+    // meta.changes and meta.last_row_id as the Cloudflare D1 client reports them (claimAssemble reads changes).
+    const r = this.db.prepare(this.sql).run(...this.params);
+    return { success: true, meta: { changes: Number(r.changes), last_row_id: Number(r.lastInsertRowid) } };
   }
 }
 

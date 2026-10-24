@@ -214,9 +214,47 @@ export function nextAction(step: SetupStep, ctx: { osBase: string; trooth_id: st
 }
 
 /** Seconds left at the measured rate, once at least one page is done. */
-export function etaSeconds(pagesDone: number, found: number, startedAt: string | null, nowMs: number): number | undefined {
-  if (!startedAt || pagesDone <= 0 || found <= pagesDone) return undefined;
-  const elapsed = (nowMs - Date.parse(startedAt)) / 1000;
-  if (!(elapsed > 0)) return undefined;
-  return Math.max(1, Math.round((elapsed / pagesDone) * (found - pagesDone)));
+/** Reading: the share of a site's urls that end up rendered, before the crawl has measured it. */
+const RENDERED_SHARE_GUESS = 0.6;
+/** Rendering: seconds per page before the stage has measured its own rate, batches running side by side. */
+const RENDER_S_PER_PAGE_GUESS = 0.08;
+/** Assembling: the roots, the header and the receipt; measured at a few seconds on trooth.co. */
+const ASSEMBLE_S = 8;
+
+export type ReadPhase = "reading" | "rendering" | "assembling";
+
+export interface ReadProgress {
+  phase: ReadPhase;
+  /** What the phase has done, and of how many: urls checked of found while reading, pages of planned while rendering. */
+  done: number;
+  total: number;
+  eta_seconds?: number;
+}
+
+/**
+ * Where a running read is and how long the rest should take (2026-10-24: the estimate divided the time so far by the
+ * pages kept, which stops counting at the html pages while "found" keeps the files too, and went on dividing through
+ * the render stage, so it rose 2, 3, 4, 5, 6 minutes and then the read finished). Now each phase is timed by its own
+ * measured rate, the phases still ahead are added, and nothing is said until a phase has measured something.
+ */
+export function readProgress(b: { status: string; found: number; fetched: number; checked?: number; planned: number; rendered: number; started_at: string | null; rendering_started_at?: string | null }, nowMs: number): ReadProgress {
+  if (b.status === "assembling") return { phase: "assembling", done: b.planned, total: b.planned, eta_seconds: ASSEMBLE_S };
+  if (b.status === "rendering") {
+    const total = b.planned;
+    const done = Math.min(b.rendered, total);
+    const since = b.rendering_started_at ? (nowMs - Date.parse(b.rendering_started_at)) / 1000 : NaN;
+    const rate = done > 0 && since > 0 ? since / done : RENDER_S_PER_PAGE_GUESS;
+    return { phase: "rendering", done, total, eta_seconds: Math.max(1, Math.round((total - done) * rate + ASSEMBLE_S)) };
+  }
+  const checked = b.checked ?? 0;
+  const total = Math.max(b.found, checked);
+  const out: ReadProgress = { phase: "reading", done: checked, total };
+  const elapsed = b.started_at ? (nowMs - Date.parse(b.started_at)) / 1000 : NaN;
+  if (checked >= 10 && elapsed > 0) {
+    const perUrl = elapsed / checked;
+    const share = b.fetched > 0 ? b.fetched / checked : RENDERED_SHARE_GUESS;
+    const renderAhead = Math.round(total * share) * RENDER_S_PER_PAGE_GUESS;
+    out.eta_seconds = Math.max(1, Math.round((total - checked) * perUrl + renderAhead + ASSEMBLE_S));
+  }
+  return out;
 }

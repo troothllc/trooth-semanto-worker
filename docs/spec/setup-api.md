@@ -131,6 +131,10 @@ Decided by the server, in this order:
   "pages_done": 47,
   "left_out": [{ "url": "https://acme.com/login", "reason": "Needs a login", "code": "login" }],
   "eta_seconds": 83,
+  "finish_at": "2026-10-22T12:02:41.000Z",
+  "phase": "reading",
+  "phase_done": 94,
+  "phase_total": 212,
   "started_at": "2026-10-22T12:00:31.000Z",
   "version": null
 }
@@ -138,7 +142,8 @@ Decided by the server, in this order:
 
 - `status`: `queued`, `reading`, `done`, `failed`. `finished_at?` once done or failed; `error?` (plain words) when failed.
 - `held`: the read started before the domain was proven (a company linked before one signup whose domain is not confirmed on trooth.co yet; a start with a confirmed domain is never held). A held read is stored and not published, served or witnessed. When the proof is recorded the held version is promoted: on Semanto Basic it is witnessed and served marked witnessed-not-signed; on the full path it becomes the version to review and sign.
-- `found`: addresses found so far. `pages_done`: pages fetched and stored so far. `read`: pages in the built version (0 until done). `eta_seconds?`: from the measured rate, present once at least one page is done and the read is not finished.
+- `found`: addresses found so far. `pages_done`: pages fetched and stored so far. `read`: pages in the built version (0 until done). While reading, `pages_done` counts every address dealt with (HTML or not), so it reaches `found`. `eta_seconds?`: from the measured rate, present once ten addresses are checked and the read is not finished; it counts the rest of the reading, the writing of the pages still ahead and the finishing. `finish_at?`: the time that estimate ends at, so a screen can keep the earliest finish it was told and count down without the number climbing.
+- `phase?` (while the read runs): `reading` (fetching pages, up to eight at once, one at a time when robots.txt sets a Crawl-delay or the site answers 429 or 503), `rendering` (writing each page as Markdown, in batches of 25 that run side by side) or `assembling` (putting the file together, once). `phase_done?` and `phase_total?` are that step's own count: addresses checked of found, pages written of pages to write, and for assembling both equal the pages to write.
 - `left_out[].reason` is one of these plain sentences, `code` the stable key: `noindex` "Asked search engines not to show it (noindex)", `robots` "Blocked by your robots.txt", `not_found` "Page not found (404)", `server_error` "Server error (5xx)", `login` "Needs a login", `personal` "A cart, account or personal page", `duplicate` "Same page as another one", `too_large` "Too large to read", `not_reached` "Not reached: no link to it from your site or sitemap", `not_html` "Not a web page", `other` "Could not be read".
 - `version`: the built version number once done.
 - An email goes to the address on the session that started setup when a read that took longer than 60 seconds finishes: subject "Semanto read 198 of 212 pages on acme.com", linking to `https://trooth.co/dashboard/semanto`.

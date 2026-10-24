@@ -115,6 +115,11 @@ routes = [
   { pattern = "api.trooth.co/os/semanto/*", zone_name = "trooth.co" },
 ]
 
+# Workers Logs: request outcomes and exceptions for this Worker, so a slow or failed sign can be traced.
+[env.production.observability]
+enabled = true
+head_sampling_rate = 1
+
 [env.production.vars]
 ENVIRONMENT = "production"
 PUBLIC_API_BASE = "https://api.trooth.co/public/semanto"

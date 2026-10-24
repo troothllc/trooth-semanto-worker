@@ -586,6 +586,7 @@ describe("finding 4: a build in queue messages of at most 25 pages, holding no s
     expect((await call(w, "POST", "/acme/build", "Bearer ada", {})).status).toBe(202);
     const stages: string[] = [];
     let renderSizes: number[] = [];
+    let fannedOut = -1;
     while (w.queued.length) {
       const m = w.queued.shift()! as { kind?: string; stage?: string; from?: number; to?: number };
       if (m.kind === "stage") {
@@ -593,9 +594,13 @@ describe("finding 4: a build in queue messages of at most 25 pages, holding no s
         if (m.stage === "render") renderSizes.push(m.to! - m.from!);
       }
       await w.pipeline.jobs().compile(m);
+      // The read hands every render batch to the queue at once, so they run side by side.
+      if (m.stage === "discover") fannedOut = w.queued.length;
     }
+    expect(fannedOut).toBe(Math.ceil(500 / PAGES_PER_MESSAGE));
     expect(stages[0]).toBe("discover");
     expect(stages.at(-1)).toBe("assemble");
+    expect(stages.filter((x) => x === "assemble")).toHaveLength(1);
     expect(renderSizes).toHaveLength(Math.ceil(500 / PAGES_PER_MESSAGE));
     expect(Math.max(...renderSizes)).toBeLessThanOrEqual(PAGES_PER_MESSAGE);
     // The meter: HTML read back from staging in any one message is at most 25 pages, never the site.
@@ -615,6 +620,17 @@ describe("finding 4: a build in queue messages of at most 25 pages, holding no s
     expect(streamed.header.pages_root).toBe(oneShot.file.header.pages_root);
     expect(streamed.header.facts_root).toBe(oneShot.file.header.facts_root);
     expect(streamed.root_hash).toBe(oneShot.file.root_hash);
+  });
+});
+
+describe("render batches side by side: one assembly per build", () => {
+  it("a second assemble message for the same build does nothing, and a claim left by a stopped message is taken again after two minutes", async () => {
+    const staging = new MemoryBuildStaging();
+    const job = { trooth_id: "acme" } as never;
+    await staging.createBuild({ build_id: "b1", trooth_id: "acme", job, status: "rendering" } as never);
+    expect(await staging.claimAssemble("b1", NOW.toISOString(), 120_000)).toBe(true);
+    expect(await staging.claimAssemble("b1", new Date(NOW.getTime() + 1_000).toISOString(), 120_000)).toBe(false);
+    expect(await staging.claimAssemble("b1", new Date(NOW.getTime() + 121_000).toISOString(), 120_000)).toBe(true);
   });
 });
 

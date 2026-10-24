@@ -34,7 +34,7 @@ import { currentKey } from "./identity/keys";
 import { HOST_GUIDES, HOST_KINDS, DEFAULT_SETTINGS, type HostKind } from "./settings/delivery";
 import { questionsFor } from "./gap/prompts";
 import { runInstallCheck, type InstallCheckResult } from "./setup/install-check";
-import { decideStep, etaSeconds, leftOutPlain, LONG_READ_MS, newSetupRecord, nextAction, reviewSections, DETECT_INTERVAL_MS, type LeftOutCode, type NextAction, type SetupRecord, type SetupStep } from "./setup/state";
+import { decideStep, readProgress, leftOutPlain, LONG_READ_MS, newSetupRecord, nextAction, reviewSections, DETECT_INTERVAL_MS, type LeftOutCode, type NextAction, type SetupRecord, type SetupStep } from "./setup/state";
 import { confirmedDomain, confirmedDomains, CONFIRM_DOMAIN_URL, TROOTH_DOMAIN_CLAIM, type WorkspaceDomain, type WorkspaceDomainsAnswer, type WorkspaceDomainsPort } from "./setup/workspace-domains";
 import { isDomainProven, type CompanyRecord, type WorkspaceAction, type WorkspaceAuth, type WorkspaceResult, type WorkspaceSession } from "./serve/ports";
 import type { ProblemCode } from "./serve/errors";
@@ -94,6 +94,12 @@ export interface SetupDoc {
     pages_done: number;
     left_out: { url: string; reason: string; code: LeftOutCode }[];
     eta_seconds?: number;
+    /** While the read runs: the phase, and what it has done of how many (src/setup/state.ts readProgress). */
+    phase?: "reading" | "rendering" | "assembling";
+    phase_done?: number;
+    phase_total?: number;
+    /** now + eta_seconds as a time, so a screen can keep the earliest finish it has been told and count down to it. */
+    finish_at?: string;
     started_at: string | null;
     finished_at?: string;
     error?: string;
@@ -335,7 +341,10 @@ async function changedSinceRead(p: Pipeline, trooth_id: string, file: { header: 
   const out = new Set<string>();
   for (const page of file.header.pages_manifest) {
     const row = state[page.url];
-    if (row && row.raw_hash && row.raw_hash !== page.source_hash && row.checked_at > file.header.built_at) out.add(page.url);
+    if (!row || !row.raw_hash || row.checked_at <= file.header.built_at) continue;
+    // A text hash (src/compiler/fetch.ts contentHash) is written after the build only when the words changed; an older
+    // byte hash is compared with the page's own bytes, as before.
+    if (row.raw_hash.startsWith("text:") || row.raw_hash !== page.source_hash) out.add(page.url);
   }
   return [...out];
 }
@@ -378,8 +387,16 @@ export async function setupState(p: Pipeline, trooth_id: string, opts: { live: b
     version: readStatus === "done" ? (build?.version ?? latest?.file.header.version ?? null) : null,
   };
   if (build && readStatus === "reading") {
-    const eta = etaSeconds(build.fetched, build.found, build.started_at, now.getTime());
-    if (eta !== undefined) read.eta_seconds = eta;
+    const progress = readProgress(build, now.getTime());
+    read.phase = progress.phase;
+    read.phase_done = progress.done;
+    read.phase_total = progress.total;
+    // pages_done of found keeps its meaning for older screens: every url dealt with, so it reaches the end.
+    if (progress.phase === "reading") read.pages_done = progress.done;
+    if (progress.eta_seconds !== undefined) {
+      read.eta_seconds = progress.eta_seconds;
+      read.finish_at = new Date(now.getTime() + progress.eta_seconds * 1000).toISOString();
+    }
   }
   if (build?.finished_at && (readStatus === "done" || readStatus === "failed")) read.finished_at = build.finished_at;
   if (readStatus === "failed" && build?.error) read.error = build.error;

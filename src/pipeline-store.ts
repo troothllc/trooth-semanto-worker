@@ -26,6 +26,7 @@ import type { RevocationEntry } from "./ledger/revocation";
 import type { BasicCompany, ProofMethod } from "./basic/tier";
 import type { FirstPublicationRecord } from "./basic/first-publication";
 import type { CompanyRecord } from "./serve/ports";
+import { pageLiveState } from "./serve/ports";
 import type { BodyPort } from "./compiler/stream";
 import type { SetupRecord } from "./setup/state";
 import type { MemoryVersionStore } from "./serve/memory-ports";
@@ -412,7 +413,8 @@ export class MemoryPipelineStore implements PipelineStore {
       const cur = c.versions.get(c.record.current_version);
       for (const p of cur?.file.header.pages_manifest ?? []) {
         if (p.url !== url || !row.raw_hash) continue;
-        c.live.set(p.id, row.raw_hash === p.source_hash ? "current" : "behind");
+        const live = pageLiveState(row, p.source_hash, null, cur?.file.header.built_at);
+        if (live !== "unknown") c.live.set(p.id, live);
       }
     }
   }

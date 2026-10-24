@@ -21,6 +21,7 @@ import { toPublic, WitnessKeyMissingError, type Jwks, type PrivateJwk, type Publ
 import type { DeliverySettings } from "../settings/delivery";
 import { withDefaults } from "../settings/delivery";
 import type { CompanyRecord, KeyPort, PageLiveState, ReceiptInput, ReceiptPort, SettingsPort, StoredPage, VersionStore, VersionSummary } from "../serve/ports";
+import { pageLiveState } from "../serve/ports";
 import type { DetectionResult } from "../serve/detect";
 import { openPrivateJwk, sealPrivateJwk } from "./key-seal";
 import { fromBase64Url } from "../core/encoding";
@@ -254,12 +255,11 @@ export async function selectPageByUrl(db: D1Database, trooth_id: string, version
 }
 
 /** The live state of a page: behind when the change monitor saw a raw hash different from the signed source hash after the signature. */
-export async function selectPageLiveState(db: D1Database, trooth_id: string, url: string, source_hash: string, signed_at: string | null): Promise<PageLiveState> {
+export async function selectPageLiveState(db: D1Database, trooth_id: string, url: string, source_hash: string, signed_at: string | null, built_at?: string): Promise<PageLiveState> {
   const row = await db.prepare(`SELECT raw_hash, checked_at FROM semanto_change_state WHERE trooth_id = ?1 AND url = ?2`).bind(trooth_id, url).first<ChangeStateRow>();
-  if (!row || !row.raw_hash) return "unknown";
-  if (signed_at && row.checked_at < signed_at) return "unknown";
-  return row.raw_hash === source_hash ? "current" : "behind";
+  return pageLiveState(row, source_hash, signed_at, built_at);
 }
+
 
 // ------------------------------------------------------------ facts
 
@@ -426,7 +426,7 @@ export class D1VersionStore implements VersionStore {
   private async assemblePage(trooth_id: string, v: VersionRow, row: PageRow): Promise<StoredPage | null> {
     const bytes = await r2Bytes(this.store, r2Key.page(trooth_id, v.version, row.page_id));
     if (!bytes) return null;
-    const live = await selectPageLiveState(this.db, trooth_id, row.url, row.source_hash, v.signed_at);
+    const live = await selectPageLiveState(this.db, trooth_id, row.url, row.source_hash, v.signed_at, v.built_at);
     return {
       bytes,
       version: v.version,
@@ -1019,6 +1019,8 @@ interface BuildDbRow {
   requested_at: string;
   started_at: string | null;
   finished_at: string | null;
+  checked?: number | null;
+  rendering_started_at?: string | null;
 }
 
 const toBuild = (r: BuildDbRow): BuildRow => ({
@@ -1038,6 +1040,8 @@ const toBuild = (r: BuildDbRow): BuildRow => ({
   requested_at: r.requested_at,
   started_at: r.started_at,
   finished_at: r.finished_at,
+  checked: r.checked ?? 0,
+  rendering_started_at: r.rendering_started_at ?? null,
 });
 
 /** Build staging over D1 rows (migrations/0005_audit_fixes.sql) and R2 bodies under semanto/builds/<build_id>/. */
@@ -1079,6 +1083,8 @@ export class D1BuildStaging implements BuildStagingPort {
     if (patch.requested_at !== undefined) set("requested_at", patch.requested_at);
     if (patch.started_at !== undefined) set("started_at", patch.started_at);
     if (patch.finished_at !== undefined) set("finished_at", patch.finished_at);
+    if (patch.checked !== undefined) set("checked", patch.checked);
+    if (patch.rendering_started_at !== undefined) set("rendering_started_at", patch.rendering_started_at);
     if (!cols.length) return;
     await this.db.prepare(`UPDATE semanto_builds SET ${cols.join(", ")} WHERE build_id = ?1`).bind(build_id, ...vals).run();
   }
@@ -1116,6 +1122,20 @@ export class D1BuildStaging implements BuildStagingPort {
   async putRendered(build_id: string, r: StagedRender): Promise<void> {
     await this.db.prepare(`INSERT OR REPLACE INTO semanto_build_rendered (build_id, seq, row_json) VALUES (?1, ?2, ?3)`).bind(build_id, r.seq, JSON.stringify(r)).run();
   }
+  async countRendered(build_id: string): Promise<number> {
+    const r = await this.db.prepare(`SELECT count(*) AS n FROM semanto_build_rendered WHERE build_id = ?1`).bind(build_id).first<{ n: number }>();
+    return r?.n ?? 0;
+  }
+
+  async claimAssemble(build_id: string, nowIso: string, staleMs: number): Promise<boolean> {
+    const stale = new Date(Date.parse(nowIso) - staleMs).toISOString();
+    const r = await this.db
+      .prepare(`UPDATE semanto_builds SET status = 'assembling', assemble_claimed_at = ?2 WHERE build_id = ?1 AND (status = 'rendering' OR (status = 'assembling' AND (assemble_claimed_at IS NULL OR assemble_claimed_at < ?3)))`)
+      .bind(build_id, nowIso, stale)
+      .run();
+    return (r.meta?.changes ?? 0) === 1;
+  }
+
   async listRendered(build_id: string): Promise<StagedRender[]> {
     const { results } = await this.db.prepare(`SELECT row_json FROM semanto_build_rendered WHERE build_id = ?1 ORDER BY seq`).bind(build_id).all<{ row_json: string }>();
     return results.map((r) => JSON.parse(r.row_json) as StagedRender);

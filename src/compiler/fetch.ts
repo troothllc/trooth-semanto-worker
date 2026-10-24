@@ -24,6 +24,7 @@
 // reports a change only when the bytes differ.
 
 import { digest } from "../core/hash";
+import { visibleText } from "../monitor/html";
 import { fromUtf8 } from "../core/encoding";
 import type { CompilerPorts, HttpResponse } from "./ports";
 import { hostOf, sameRegistrableDomain } from "./url";
@@ -95,6 +96,7 @@ export class Fetcher {
   constructor(private readonly ports: CompilerPorts, opts: FetcherOptions = {}) {
     this.maxBytes = opts.maxBytes ?? MAX_BODY_BYTES;
     this.minIntervalMs = opts.minIntervalMs ?? 500;
+    this.intervalMs = this.minIntervalMs;
     this.maxRedirects = opts.maxRedirects ?? 5;
     this.userAgent = opts.userAgent ?? USER_AGENT;
     this.accept = opts.accept ?? "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5";
@@ -104,15 +106,34 @@ export class Fetcher {
     return this.ports.clock ? this.ports.clock.now() : new Date();
   }
 
+  /** The gap between two request starts to one host, in milliseconds; a crawl sets it from robots.txt Crawl-delay or backs it off. */
+  private intervalMs: number;
+
+  /** Change the pacing for the rest of this fetcher's life (discover: Crawl-delay, or a 429/503 backoff). */
+  setMinInterval(ms: number): void {
+    this.intervalMs = Math.max(0, Math.round(ms));
+  }
+
+  get minInterval(): number {
+    return this.intervalMs;
+  }
+
+  /**
+   * Pacing that holds when several requests to one host are in flight at once (2026-10-24, the concurrent crawl):
+   * each request reserves the next start slot, at least intervalMs after the one before, and waits for it. The old
+   * check read "the last start" and slept, so two requests started together both saw the same last start and went at
+   * once.
+   */
   private async politeWait(host: string): Promise<void> {
-    const last = this.lastRequestAt.get(host);
     const now = this.now().getTime();
-    if (last !== undefined && now - last < this.minIntervalMs) {
-      const wait = this.minIntervalMs - (now - last);
+    const last = this.lastRequestAt.get(host);
+    const slot = last === undefined ? now : Math.max(now, last + this.intervalMs);
+    this.lastRequestAt.set(host, slot);
+    const wait = slot - now;
+    if (wait > 0) {
       if (this.ports.sleep) await this.ports.sleep(wait);
       else await new Promise<void>((r) => setTimeout(r, wait));
     }
-    this.lastRequestAt.set(host, this.now().getTime());
   }
 
   async fetch(url: string, opts: FetchOptions = {}): Promise<FetchOutcome> {
@@ -191,7 +212,7 @@ export interface PreviousCapture {
   source_hash: string;
 }
 
-export type ChangeReason = "no_previous" | "sitemap_lastmod_same" | "not_modified" | "same_bytes" | "new_bytes" | "fetch_failed" | "status_changed";
+export type ChangeReason = "no_previous" | "sitemap_lastmod_same" | "not_modified" | "same_bytes" | "same_text" | "new_bytes" | "fetch_failed" | "status_changed";
 
 export interface ChangeResult {
   url: string;
@@ -206,6 +227,17 @@ export interface ChangeResult {
  * conditional GET answered 304 means no body; a 200 is compared by hash so a
  * page re-sent with new validators but the same bytes is still unchanged.
  */
+/**
+ * What a change is measured on: the words a person sees on the page, not its bytes (2026-10-24). A site that puts a
+ * fresh nonce, a CSRF token or a build id into every response (trooth.co does: a CSP nonce on each script) changes its
+ * bytes on every request, and comparing bytes re-read such a site every hour. The visible text is what Semanto signs,
+ * so it is what decides whether there is something new to sign. Marked "text:" so it is never mistaken for a byte hash
+ * written by an older build; against one of those the first comparison counts as a change, once.
+ */
+export async function contentHash(html: string): Promise<string> {
+  return `text:${await digest(visibleText(html))}`;
+}
+
 export class ChangeDetector {
   constructor(private readonly fetcher: Fetcher) {}
 
@@ -219,6 +251,7 @@ export class ChangeDetector {
     if (outcome.status === 304) return { url, changed: false, reason: "not_modified", fetch: outcome };
     if (outcome.status !== 200) return { url, changed: true, reason: "status_changed", fetch: outcome };
     if (outcome.source_hash === previous.source_hash) return { url, changed: false, reason: "same_bytes", fetch: outcome };
+    if (previous.source_hash === (await contentHash(outcome.text))) return { url, changed: false, reason: "same_text", fetch: outcome };
     return { url, changed: true, reason: "new_bytes", fetch: outcome };
   }
 }
