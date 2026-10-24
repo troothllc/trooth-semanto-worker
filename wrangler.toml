@@ -13,6 +13,7 @@
 #   HOSTED_KEY_SEAL_SECRET         32+ characters: seals hosted company keys at rest
 #   RECEIPT_IP_SALT_SECRET         16+ characters: the daily salt for read-receipt address hashes
 #   RESEND_API_KEY                 optional: plain-language alerts, setup emails and alert address confirmations
+#   ALERT_FROM                     set as a secret in production (Trooth <security@trooth.co>), not a [vars] entry: a var of the same name would collide
 #   GOOGLE_OAUTH_CLIENT_ID         optional: Connect Google (Merchant Center and Business Profile write-back)
 #   GOOGLE_OAUTH_CLIENT_SECRET     optional: the same OAuth client's secret
 #   SEMANTO_EVENTS_SECRET          optional: HMAC key for recall events sent to worker-f (set the same value on worker-f)
