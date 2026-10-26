@@ -220,7 +220,7 @@ export function guardedFetchPort(opts: { fetchImpl?: typeof fetch; resolve?: Res
 }
 
 /** Where write-back may send: the Merchant Center and Business Profile APIs. */
-export const WRITEBACK_HOSTS = new Set(["shoppingcontent.googleapis.com", "mybusinessbusinessinformation.googleapis.com"]);
+export const WRITEBACK_HOSTS = new Set(["merchantapi.googleapis.com", "mybusinessbusinessinformation.googleapis.com"]);
 
 /** Kept for callers that name it: the guarded port over the global fetch. */
 export function globalFetchPort(): FetchPort {

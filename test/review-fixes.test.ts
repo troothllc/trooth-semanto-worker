@@ -44,7 +44,10 @@ import { buildEstate, FIXED_NOW, type Estate } from "./fixtures/serve/fixture";
 const VECTORS = join(__dirname, "..", "verifier", "test-vectors", "v1");
 const vector = (name: string) => JSON.parse(readFileSync(join(VECTORS, name), "utf8"));
 const BASE = "https://api.trooth.co/public/semanto";
-const settle = () => new Promise((r) => setTimeout(r, 30));
+/** Waits for background work (receipts are written after the response) until `done` holds, up to 3 s; a fixed short sleep failed on a busy machine. */
+async function settle(done: () => boolean): Promise<void> {
+  for (let waited = 0; waited < 3000 && !done(); waited += 10) await new Promise((r) => setTimeout(r, 10));
+}
 
 // ------------------------------------------------------------------ 1
 
@@ -375,7 +378,7 @@ describe("finding 7: a reader is proven through an adapter only when the adapter
     const request = new Request("https://acme.com/pricing", { headers: { ...headers, ...signed } });
     const res = await handleRequest({ request, config, manifestCache: createManifestCache({ config, fetchImpl: apiFetch }), fetchImpl: apiFetch, next: async () => new Response("<html></html>") });
     expect(res.status).toBe(200);
-    await settle();
+    await settle(() => estate.ports.receipts.recorded.some((r) => r.page_id !== null));
     const proven = estate.ports.receipts.recorded.find((r) => r.page_id !== null)!;
     expect(proven).toMatchObject({ proof: "web_bot_auth", keyid: agent.publicJwk.kid, address: "203.0.113.9" });
 
@@ -383,7 +386,7 @@ describe("finding 7: a reader is proven through an adapter only when the adapter
     const again = await signMessage({ kind: "request", method: "GET", url: "https://acme.com/pricing", headers }, agent.privateJwk, { components: ["@authority", "signature-agent"], created: nowS - 5, ttlSeconds: 60, nonce: "forged-forwarding", tag: "web-bot-auth" });
     estate.ports.receipts.recorded.length = 0;
     await app.request(`${BASE}/acme-inc/pages/${estate.acme.entries[2]!.id}`, { headers: { ...headers, ...again, "trooth-forwarded-authority": "acme.com", "trooth-forwarded-for": "198.51.100.1" } });
-    await settle();
+    await settle(() => estate.ports.receipts.recorded.length > 0);
     expect(estate.ports.receipts.recorded[0]).toMatchObject({ proof: "none" });
     // The forged Trooth-Forwarded-For is ignored too: the address is the one the platform saw.
     expect(estate.ports.receipts.recorded[0]!.address).toBe("203.0.113.9");

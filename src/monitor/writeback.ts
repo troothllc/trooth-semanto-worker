@@ -47,7 +47,6 @@ export interface WritebackPayload {
   carries: Record<string, unknown>;
 }
 
-const MC_BASE = "https://shoppingcontent.googleapis.com/content/v2.1";
 const GBP_BASE = "https://mybusinessbusinessinformation.googleapis.com/v1";
 
 export interface MerchantCenterTarget {
@@ -99,48 +98,29 @@ function mcAvailability(v: string | null): string {
 
 // ------------------------------------------------------ Merchant Center
 
-/** products.insert bodies, one per signed product, in the Content API v2.1 shape with the UCP attributes. */
-export function merchantCenterPayload(record: SignedRecord, target: MerchantCenterTarget, at: string): WritebackPayload {
-  const views = productViews(record, at);
-  const channel = target.channel ?? "online";
-  const bodies = views.map((v) => {
-    const p = v.product;
-    const notice = noticeOf(p.consumer_notice);
-    const body: Record<string, unknown> = {
-      offerId: v.key,
-      title: p.name,
-      link: p.url,
-      contentLanguage: target.contentLanguage,
-      targetCountry: target.targetCountry,
-      channel,
-      availability: mcAvailability(v.availability),
-      customAttributes: [
-        { name: "native_commerce", value: "true" },
-        { name: "merchant_item_id", value: p.product_id },
-        { name: "semanto_record", value: `https://trooth.co/network/company/${record.trooth_id}` },
-      ],
-    };
-    if (v.price) body.price = { value: v.price.amount, currency: v.price.currency };
-    if (p.gtin) body.gtin = p.gtin;
-    if (p.brand) body.brand = p.brand;
-    if (p.description) body.description = p.description;
-    if (p.variant_id) body.itemGroupId = p.product_id;
-    if (notice) body.consumerNotices = [{ noticeType: (notice.type ?? "legal_disclaimer").toUpperCase(), noticeMessage: notice.message }];
-    return body;
-  });
-  const carries: Record<string, unknown> = {};
-  for (const v of views) carries[v.key] = { price: v.price, availability: mcAvailability(v.availability), consumer_notice: noticeOf(v.product.consumer_notice)?.message ?? null };
-  return {
-    connector: "merchant_center",
-    transport: "http",
-    method: "POST",
-    url: `${MC_BASE}/${encodeURIComponent(target.merchantId)}/products`,
+/**
+ * One accounts.productInputs.insert request per signed product, through the
+ * Merchant API (merchantapi.googleapis.com). The Content API for Shopping this
+ * replaced reached its sunset on 2026-08-18, fails intermittently since
+ * 2026-09-01 and shuts down in early 2027 (developers.google.com/shopping-content/guides/sunset).
+ * The Merchant API has no batch insert, so each product is its own request;
+ * a resend with the same offerId, contentLanguage and data source replaces the
+ * earlier input. Needs the account's API data source.
+ */
+export function merchantApiPayloads(record: SignedRecord, target: MerchantCenterTarget, at: string): WritebackPayload[] {
+  const url = merchantInsertUrl(target);
+  if (!url) return [];
+  return merchantProductInputs(record, target, at).map((input) => ({
+    connector: "merchant_center" as const,
+    transport: "http" as const,
+    method: "POST" as const,
+    url,
     content_type: "application/json",
-    body: JSON.stringify({ products: bodies }, null, 2),
-    dry_run: `Would send ${bodies.length} product${bodies.length === 1 ? "" : "s"} to Merchant Center account ${target.merchantId} (products.insert, ${channel}:${target.contentLanguage}:${target.targetCountry}). Each carries the signed price, stock, GTIN and consumer notice. Needs the customer's Google OAuth token with the content scope.`,
-    needs: "oauth_token",
-    carries,
-  };
+    body: JSON.stringify(input.body, null, 2),
+    dry_run: `Would send ${input.summary} to Merchant Center account ${target.merchantId} (Merchant API productInputs.insert, ${target.contentLanguage}:${target.targetCountry}). It carries the signed price, stock, GTIN and consumer notice. Needs the customer's Google OAuth token with the content scope.`,
+    needs: "oauth_token" as const,
+    carries: { [input.offerId]: input.carries },
+  }));
 }
 
 /** A supplemental feed (TSV) with the same values, for customers who upload feeds rather than call the API. */
@@ -639,7 +619,9 @@ export function allPayloads(record: SignedRecord, ctx: WritebackContext): { payl
   const skipped: { connector: ConnectorName; why: string }[] = [];
   const hasProducts = record.products.length > 0;
   if (ctx.merchantCenter && hasProducts) {
-    payloads.push(merchantCenterPayload(record, ctx.merchantCenter, ctx.at));
+    const api = merchantApiPayloads(record, ctx.merchantCenter, ctx.at);
+    payloads.push(...api);
+    if (!api.length) skipped.push({ connector: "merchant_center", why: "the Merchant Center account has no API data source yet; the supplemental feed below can be uploaded instead" });
     payloads.push(merchantCenterSupplementalFeed(record, ctx.at));
   } else skipped.push({ connector: "merchant_center", why: hasProducts ? "no Merchant Center account connected" : "no products in the record" });
   if (ctx.businessProfileLocation) payloads.push(businessProfilePayload(record, ctx.businessProfileLocation));

@@ -233,7 +233,10 @@ const json = async (r: Response) => (await r.json()) as Record<string, any>;
 /** Hosted signing, as the wizard does it: sign/options (adding a passkey first), the assertion, then sign. */
 const signHosted = (w: World, trooth_id = "acme", token = "Bearer owner-token", body: Record<string, unknown> = {}) => passkeySign((path, b, t) => post(w, path, b, t), trooth_id, token, w.wallet, body);
 const get = (w: World, path: string, headers: Record<string, string> = {}) => w.app.request(`${API}${path}`, { headers });
-const settle = () => new Promise((r) => setTimeout(r, 10));
+/** Waits for background work (receipts are written after the response) until `done` holds, up to 3 s; a fixed short sleep failed on a busy machine. */
+async function settle(done: () => boolean): Promise<void> {
+  for (let waited = 0; waited < 3000 && !done(); waited += 10) await new Promise((r) => setTimeout(r, 10));
+}
 /** Run every queued message, and the messages they queue, as the queue consumer would. */
 async function drain(w: World): Promise<void> {
   while (w.queued.length) await w.pipeline.jobs().compile(w.queued.shift());
@@ -582,7 +585,7 @@ describe("4. the same flow over the D1 and R2 adapters the Worker uses (SQLite a
     const runs = d1.db.prepare("SELECT COUNT(*) AS n FROM semanto_monitor_runs").get() as { n: number };
     expect(runs.n).toBe(1);
 
-    await settle();
+    await settle(() => (d1.db.prepare("SELECT COUNT(*) AS n FROM semanto_read_receipts").get() as { n: number }).n > 0);
     const receipts = d1.db.prepare("SELECT proof, ip_hash FROM semanto_read_receipts").all() as { proof: string; ip_hash: string }[];
     expect(receipts.length).toBeGreaterThan(0);
     expect(receipts.every((r) => r.proof === "none" && /^[0-9a-f]{64}$/.test(r.ip_hash))).toBe(true);
@@ -949,7 +952,7 @@ describe("4. readers: Web Bot Auth behind the receipt middleware, receipts throu
     const proven = await w.app.request(url, { headers: { ...headers, ...signed } });
     const unsigned = await w.app.request(url, { headers: { accept: "text/markdown", "signature-agent": '"https://agent.fixtureagent.com"', "cf-connecting-ip": "203.0.113.7" } });
     expect(Buffer.from(await proven.arrayBuffer()).equals(Buffer.from(await unsigned.arrayBuffer()))).toBe(true);
-    await settle();
+    await settle(() => w.receiptRows.rows.length >= 2 && w.receiptRows.rows.some((r) => r.proof === "web_bot_auth"));
     const rows = w.receiptRows.rows;
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({ proof: "web_bot_auth", agent_key_url: "https://agent.fixtureagent.com/", keyid: w.agent.pub.kid, representation: "markdown", page_id: entry.id });
@@ -1042,6 +1045,14 @@ describe("6. house rules across every source file", () => {
   for (const d of ["src", "migrations", "adapters", "verifier", "web", "docs", "test"]) walkAll(fileURLToPath(new URL(`../${d}`, import.meta.url)));
   const rootDir = fileURLToPath(new URL("..", import.meta.url));
   for (const name of readdirSync(rootDir)) if (TEXT.test(name) && !SKIP_FILES.has(name) && statSync(`${rootDir}${name}`).isFile()) everyFile.push(`${rootDir}${name}`);
+
+  it("no test waits for background work with a fixed sleep: it polls for the result (a 10 ms sleep failed on a busy machine, 2026-10-25)", () => {
+    const dir = fileURLToPath(new URL("./", import.meta.url));
+    for (const f of readdirSync(dir).filter((n) => n.endsWith(".test.ts"))) {
+      const s = readFileSync(`${dir}${f}`, "utf8");
+      expect([f, /const settle = \(\) =>/.test(s)]).toEqual([f, false]);
+    }
+  });
 
   it("no banned word (inflections included), no ellipsis and no X-prefixed Semanto header in any folder or root file", () => {
     const xHeader = new RegExp(["X", "Semanto", ""].join("-"), "i");

@@ -14,6 +14,7 @@ import {
   readLivePageFrom,
   readLivePage,
   parseMerchantCenterContentApi,
+  detectMerchantCenterFormat,
   parseMerchantCenterTsv,
   parseMerchantCenterXml,
   merchantCenterRead,
@@ -29,7 +30,7 @@ import {
 import { compareSurface, compareLivePage, compareAll, buildRun, runToRow, runFromRow, severityFor, surfaceCovers } from "@/monitor/consistency";
 import { normalizePhone, normalizeAddress, equivalent, normalizeHours, parsePrice, whatDiffers, displayPhone } from "@/monitor/normalize";
 import { indexabilityReport, robotsAllows, pageIndexability } from "@/monitor/indexability";
-import { merchantCenterPayload, merchantCenterSupplementalFeed, businessProfilePayload, jsonLdDiff, siteJsonLdPayload, alignToPage, jsonLdGraphDiff, acpFeedPayload, ucpCatalogPayload, allPayloads, sendPayload, splitAddress } from "@/monitor/writeback";
+import { merchantApiPayloads, merchantCenterSupplementalFeed, businessProfilePayload, jsonLdDiff, siteJsonLdPayload, alignToPage, jsonLdGraphDiff, acpFeedPayload, ucpCatalogPayload, allPayloads, sendPayload, splitAddress } from "@/monitor/writeback";
 import { alertsFrom, dedupeAlerts, applyDailyCap, buildEmail, toDashboard, messageForMismatch, dayWords, alertToRow, alertFromRow, resolvedAlerts } from "@/monitor/alerts";
 import { runMonitor } from "@/monitor/run";
 import { fetchFromMap, fixedClock, memoryStore, memoryEmail, memoryTokens, type FetchResult } from "@/monitor/ports";
@@ -66,7 +67,7 @@ function routes(): Record<string, FetchResult | string> {
   const out: Record<string, FetchResult | string> = {};
   for (const [url, file] of Object.entries(PAGES)) out[url] = read(file);
   out["https://acme.com/robots.txt"] = { status: 200, headers: { "content-type": "text/plain" }, body: read("fixture-robots.txt") };
-  out["https://shoppingcontent.googleapis.com/content/v2.1/123/products"] = { status: 200, headers: { "content-type": "application/json" }, body: read("fixture-merchant-center-content-api.json") };
+  out["https://merchantapi.googleapis.com/products/v1/accounts/123/products"] = { status: 200, headers: { "content-type": "application/json" }, body: read("fixture-merchant-center-merchant-api.json") };
   out["https://mybusinessbusinessinformation.googleapis.com/v1/locations/1234567890"] = { status: 200, headers: { "content-type": "application/json" }, body: read("fixture-business-profile.json") };
   out["https://acme.com/.well-known/ucp"] = { status: 200, headers: { "content-type": "application/json" }, body: read("fixture-ucp-manifest.json") };
   out["https://acme.com/.well-known/ucp-catalog.json"] = { status: 200, headers: { "content-type": "application/json" }, body: read("fixture-ucp-catalog.json") };
@@ -389,23 +390,40 @@ describe("indexability", () => {
   });
 });
 
+describe("Merchant Center through the Merchant API", () => {
+  it("reads a Merchant API product list: offerId, productAttributes, price in micros, IN_STOCK and gtins", () => {
+    const body = read("fixture-merchant-center-merchant-api.json");
+    expect(detectMerchantCenterFormat({ status: 200, headers: { "content-type": "application/json" }, body } as FetchResult)).toBe("merchant_api");
+    const products = parseMerchantCenterContentApi(JSON.parse(body));
+    const kettle = products.find((p) => p.key === "KET-100")!;
+    expect(kettle).toMatchObject({ name: "Acme Kettle 1.7L", url: "https://acme.com/products/kettle-1", price: { amount: "45.00", currency: "USD" }, availability: "in stock", gtin: "12345678905", brand: "Acme" });
+    expect(products.find((p) => p.key === "MUG-300")!.price).toEqual({ amount: "9.00", currency: "USD" });
+    expect(merchantCenterRead(products, "https://merchantapi.googleapis.com/products/v1/accounts/123/products", NOW, "merchant_api").notes).toEqual(["3 products read from the Merchant API"]);
+  });
+});
+
 // ------------------------------------------------------------- write-back
 
 describe("write-back", () => {
-  it("builds Merchant Center products.insert bodies with the signed values and the UCP attributes", () => {
-    const p = merchantCenterPayload(record, { merchantId: "123", contentLanguage: "en", targetCountry: "US" }, NOW);
-    expect(p.method).toBe("POST");
-    expect(p.url).toBe("https://shoppingcontent.googleapis.com/content/v2.1/123/products");
-    const body = JSON.parse(p.body) as { products: Record<string, unknown>[] };
-    const kettle = body.products.find((x) => x.offerId === "KET-100")!;
-    expect(kettle.price).toEqual({ value: "49.00", currency: "USD" });
-    expect(kettle.gtin).toBe("00012345678905");
-    expect(kettle.availability).toBe("in_stock");
-    expect(kettle.consumerNotices).toEqual([{ noticeType: "PROP_65", noticeMessage: "WARNING: This product can expose you to chemicals known to the State of California to cause cancer." }]);
-    expect(kettle.customAttributes).toEqual(expect.arrayContaining([{ name: "native_commerce", value: "true" }, { name: "merchant_item_id", value: "p-100" }]));
-    const toaster = body.products.find((x) => x.offerId === "TST-200")!;
-    expect(toaster.price).toEqual({ value: "27.50", currency: "USD" });
-    expect(p.dry_run).toContain("Merchant Center account 123");
+  it("builds one Merchant API productInputs.insert request per product with the signed values and the UCP attributes", () => {
+    const target = { merchantId: "123", contentLanguage: "en", targetCountry: "US", dataSource: "accounts/123/dataSources/456" };
+    const ps = merchantApiPayloads(record, target, NOW);
+    expect(ps.length).toBe(record.products.length);
+    for (const p of ps) {
+      expect(p.method).toBe("POST");
+      expect(p.url).toBe("https://merchantapi.googleapis.com/products/v1/accounts/123/productInputs:insert?dataSource=accounts%2F123%2FdataSources%2F456");
+      expect(new URL(p.url!).hostname).not.toBe("shoppingcontent.googleapis.com");
+    }
+    const kettle = ps.map((p) => JSON.parse(p.body) as Record<string, any>).find((x) => x.offerId === "KET-100")!;
+    expect(kettle.productAttributes.price).toEqual({ amountMicros: "49000000", currencyCode: "USD" });
+    expect(kettle.productAttributes.gtins).toEqual(["00012345678905"]);
+    expect(kettle.productAttributes.availability).toBe("IN_STOCK");
+    expect(kettle.customAttributes).toEqual(expect.arrayContaining([{ name: "native_commerce", value: "true" }, { name: "merchant_item_id", value: "p-100" }, { name: "consumer_notice", value: expect.stringContaining("prop_65:WARNING") }]));
+    const toaster = ps.map((p) => JSON.parse(p.body) as Record<string, any>).find((x) => x.offerId === "TST-200")!;
+    expect(toaster.productAttributes.price).toEqual({ amountMicros: "27500000", currencyCode: "USD" });
+    expect(ps[0]!.dry_run).toContain("Merchant Center account 123");
+    // Without an API data source there is nothing to insert into.
+    expect(merchantApiPayloads(record, { merchantId: "123", contentLanguage: "en", targetCountry: "US" }, NOW)).toEqual([]);
     const feed = merchantCenterSupplementalFeed(record, NOW);
     expect(feed.body.split("\n")[0]).toBe("id\ttitle\tlink\tprice\tavailability\tgtin\tbrand\tconsumer_notice\tnative_commerce\tmerchant_item_id");
     expect(feed.body).toContain("KET-100\tAcme Kettle 1.7L\thttps://acme.com/products/kettle-1\t49.00 USD\tin_stock\t00012345678905\tAcme\tprop_65:WARNING");
@@ -478,8 +496,8 @@ describe("write-back", () => {
     const ucp = ucpCatalogPayload(record, NOW);
     const cat = JSON.parse(ucp.body) as { items: Record<string, unknown>[] };
     expect(cat.items[0]).toMatchObject({ id: "KET-100", merchant_item_id: "p-100", native_commerce: true, consumer_notice: { type: "prop_65" } });
-    const all = allPayloads(record, { merchantCenter: { merchantId: "123", contentLanguage: "en", targetCountry: "US" }, businessProfileLocation: "locations/1234567890", pages: [{ url: "https://acme.com/", current: [], generated: { "@type": "Organization", "@id": "https://acme.com/#semanto" } }], at: NOW });
-    expect(all.payloads.map((p) => p.connector)).toEqual(["merchant_center", "merchant_center", "business_profile", "site_jsonld", "acp_feed", "ucp_catalog"]);
+    const all = allPayloads(record, { merchantCenter: { merchantId: "123", contentLanguage: "en", targetCountry: "US", dataSource: "accounts/123/dataSources/456" }, businessProfileLocation: "locations/1234567890", pages: [{ url: "https://acme.com/", current: [], generated: { "@type": "Organization", "@id": "https://acme.com/#semanto" } }], at: NOW });
+    expect(all.payloads.map((p) => p.connector)).toEqual([...record.products.map(() => "merchant_center"), "merchant_center", "business_profile", "site_jsonld", "acp_feed", "ucp_catalog"]);
     expect(all.skipped).toEqual([]);
     const none = allPayloads(record, { at: NOW });
     expect(none.skipped.map((s) => s.connector)).toEqual(["merchant_center", "business_profile", "site_jsonld"]);
@@ -488,11 +506,12 @@ describe("write-back", () => {
   it("one change in the signed record changes every payload", () => {
     const changed: SignedRecord = JSON.parse(JSON.stringify(record)) as SignedRecord;
     changed.products[0]!.price = { amount: "52.00", currency: "USD" };
-    const before = allPayloads(record, { merchantCenter: { merchantId: "123", contentLanguage: "en", targetCountry: "US" }, at: NOW }).payloads;
-    const after = allPayloads(changed, { merchantCenter: { merchantId: "123", contentLanguage: "en", targetCountry: "US" }, at: NOW }).payloads;
+    const before = allPayloads(record, { merchantCenter: { merchantId: "123", contentLanguage: "en", targetCountry: "US", dataSource: "accounts/123/dataSources/456" }, at: NOW }).payloads.filter((p) => p.body.includes("KET-100"));
+    const after = allPayloads(changed, { merchantCenter: { merchantId: "123", contentLanguage: "en", targetCountry: "US", dataSource: "accounts/123/dataSources/456" }, at: NOW }).payloads.filter((p) => p.body.includes("KET-100"));
     for (let i = 0; i < before.length; i++) {
       expect(before[i]!.body).not.toBe(after[i]!.body);
-      expect(after[i]!.body).toContain("52.00");
+      // Feeds carry "52.00"; the Merchant API carries the same price in micros.
+      expect(after[i]!.body).toMatch(/52\.00|"52000000"/);
     }
   });
 
@@ -584,7 +603,7 @@ describe("runner", () => {
       {
         record,
         surfaces: {
-          merchant_center: { url: "https://shoppingcontent.googleapis.com/content/v2.1/123/products" },
+          merchant_center: { url: "https://merchantapi.googleapis.com/products/v1/accounts/123/products" },
           business_profile: { url: "https://mybusinessbusinessinformation.googleapis.com/v1/locations/1234567890" },
           acp: { url: "https://acme.com/.well-known/acp-products.jsonl" },
         },
@@ -607,7 +626,7 @@ describe("runner", () => {
     expect(email.sent[0]!.subject).toBe("5 things to check on acme.com");
     expect(store.alerts.filter((a) => a.sent_at !== null).length).toBe(5);
 
-    const second = await runMonitor({ record, surfaces: { merchant_center: { url: "https://shoppingcontent.googleapis.com/content/v2.1/123/products" }, business_profile: { url: "https://mybusinessbusinessinformation.googleapis.com/v1/locations/1234567890" }, acp: { url: "https://acme.com/.well-known/acp-products.jsonl" } }, email: { from: "alerts@trooth.co", to: ["owner@acme.com"], actionUrl: "https://trooth.co/x" } }, ports);
+    const second = await runMonitor({ record, surfaces: { merchant_center: { url: "https://merchantapi.googleapis.com/products/v1/accounts/123/products" }, business_profile: { url: "https://mybusinessbusinessinformation.googleapis.com/v1/locations/1234567890" }, acp: { url: "https://acme.com/.well-known/acp-products.jsonl" } }, email: { from: "alerts@trooth.co", to: ["owner@acme.com"], actionUrl: "https://trooth.co/x" } }, ports);
     expect(second.summary.alerts).toMatchObject({ raised: 0, duplicates: 7, emailed: false });
     expect(email.sent.length).toBe(1);
     expect(store.runs.length).toBe(2);
@@ -615,9 +634,9 @@ describe("runner", () => {
 
   it("treats a surface that failed to read as failed, not as a mismatch, and reads UCP when given", async () => {
     const r = routes();
-    delete r["https://shoppingcontent.googleapis.com/content/v2.1/123/products"];
+    delete r["https://merchantapi.googleapis.com/products/v1/accounts/123/products"];
     const store = memoryStore();
-    const out = await runMonitor({ record, surfaces: { merchant_center: { url: "https://shoppingcontent.googleapis.com/content/v2.1/123/products" }, ucp: { manifest_url: "https://acme.com/.well-known/ucp", catalog_url: "https://acme.com/.well-known/ucp-catalog.json" }, live_pages: false } }, { fetch: fetchFromMap(r), clock: fixedClock(NOW), store });
+    const out = await runMonitor({ record, surfaces: { merchant_center: { url: "https://merchantapi.googleapis.com/products/v1/accounts/123/products" }, ucp: { manifest_url: "https://acme.com/.well-known/ucp", catalog_url: "https://acme.com/.well-known/ucp-catalog.json" }, live_pages: false } }, { fetch: fetchFromMap(r), clock: fixedClock(NOW), store });
     const mc = out.summary.surfaces.find((s) => s.surface === "merchant_center");
     expect(mc).toMatchObject({ state: "failed", note: "feed answered 404" });
     expect(out.run.mismatches.filter((m) => m.surface === "merchant_center")).toEqual([]);

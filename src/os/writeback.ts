@@ -62,9 +62,10 @@ async function itemId(p: { connector: string; transport: string; url: string | n
 
 /**
  * Every change write-back would make now, one per preview payload, built from
- * the signed record and the connected targets. The Merchant Center payload is
- * the Merchant API form that is actually sent (one productInputs.insert per
- * product), not the Content API form the monitor module also builds.
+ * the signed record and the connected targets. Merchant Center is one item
+ * for the whole catalog, sent as one productInputs.insert per product through
+ * the Merchant API; the preview's per-product requests are folded into it, and
+ * it is shown (blocked, with the reason) before a data source is chosen.
  */
 export async function proposedItems(s: OsService, trooth_id: string): Promise<ProposedItem[] | null> {
   const base = await s.p.read("writeback", { trooth_id, role: "owner", user_id: "writeback", name: "write-back" }, trooth_id, {});
@@ -74,10 +75,13 @@ export async function proposedItems(s: OsService, trooth_id: string): Promise<Pr
   const config = await s.p.d.store.getConfig(trooth_id);
   const mc = config.writeback?.merchant_center;
   const out: ProposedItem[] = [];
-  for (const raw of Array.isArray(base.body.payloads) ? base.body.payloads : []) {
-    if (!isRecord(raw)) continue;
-    const p = raw as unknown as WritebackPayload;
-    if (p.connector === "merchant_center" && p.transport === "http" && mc) {
+  const payloads = (Array.isArray(base.body.payloads) ? base.body.payloads : []).filter(isRecord) as unknown as WritebackPayload[];
+  const firstMerchant = payloads.findIndex((p) => p.connector === "merchant_center");
+  const merchantGroup: WritebackPayload = { connector: "merchant_center", transport: "http", method: "POST", url: null, content_type: "application/json", body: "", dry_run: "", needs: "oauth_token", carries: {} } as unknown as WritebackPayload;
+  // The catalog item goes where the preview's first Merchant Center change was; the per-product requests fold into it.
+  const ordered = mc && record.products.length && firstMerchant >= 0 ? [...payloads.slice(0, firstMerchant), merchantGroup, ...payloads.slice(firstMerchant).filter((p) => !(p.connector === "merchant_center" && p.transport === "http"))] : payloads;
+  for (const p of ordered) {
+    if (p === merchantGroup && mc) {
       const inputs = merchantProductInputs(record, mc, iso(s.now()));
       const url = merchantInsertUrl(mc);
       const shown = url ?? `https://merchantapi.googleapis.com/products/v1/accounts/${encodeURIComponent(mc.merchantId)}/productInputs:insert`;

@@ -152,7 +152,7 @@ export async function runMonitor(input: RunInput, ports: MonitorPorts): Promise<
   return { run, summary, alerts: toRaise };
 }
 
-const GOOGLE_HOSTS: Record<"merchant_center" | "business_profile", string> = { merchant_center: "shoppingcontent.googleapis.com", business_profile: "mybusinessbusinessinformation.googleapis.com" };
+const GOOGLE_HOSTS: Record<"merchant_center" | "business_profile", string> = { merchant_center: "merchantapi.googleapis.com", business_profile: "mybusinessbusinessinformation.googleapis.com" };
 
 /** The customer's token goes only to Google's own API host, never to a feed url on another host. */
 async function tokenFor(connector: "merchant_center" | "business_profile", url: string, ports: MonitorPorts): Promise<string | null> {

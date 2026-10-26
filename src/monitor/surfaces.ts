@@ -358,7 +358,7 @@ export async function readLivePage(fetchPort: FetchPort, url: string, now: strin
 
 // ------------------------------------------------- (c) Merchant Center
 
-export type MerchantCenterFormat = "content_api" | "tsv" | "xml";
+export type MerchantCenterFormat = "merchant_api" | "content_api" | "tsv" | "xml";
 
 interface FeedProduct {
   key: string;
@@ -373,14 +373,35 @@ interface FeedProduct {
   id: string | null;
 }
 
-/** Content API v2.1: { resources: Product[] } from products.list, or a bare array, or { products: [] }. */
+/** Merchant API v1 price: { amountMicros: "45000000", currencyCode: "USD" } to { amount: "45.00", currency }. */
+function microsPrice(p: unknown): Price | null {
+  if (!p || typeof p !== "object") return null;
+  const o = p as Record<string, unknown>;
+  const micros = typeof o.amountMicros === "number" ? String(o.amountMicros) : str(o.amountMicros);
+  if (!micros || !/^-?\d+$/.test(micros)) return null;
+  const neg = micros.startsWith("-");
+  const digits = (neg ? micros.slice(1) : micros).padStart(7, "0");
+  const units = digits.slice(0, -6).replace(/^0+(?=\d)/, "");
+  const cents = digits.slice(-6, -4);
+  return { amount: `${neg ? "-" : ""}${units}.${cents}`, currency: (str(o.currencyCode) ?? "").toUpperCase() };
+}
+
+/**
+ * Merchant API v1 products.list ({ products: [{ offerId, productAttributes }] }, availability "IN_STOCK", price in
+ * micros, gtins as a list) and the Content API v2.1 it replaced ({ resources: Product[] }, a bare array, or { products: [] }).
+ */
 export function parseMerchantCenterContentApi(json: unknown): FeedProduct[] {
   const list = Array.isArray(json) ? json : json && typeof json === "object" ? ((json as Record<string, unknown>).resources ?? (json as Record<string, unknown>).products ?? (json as Record<string, unknown>).entries ?? []) : [];
   const out: FeedProduct[] = [];
   for (const raw of Array.isArray(list) ? list : []) {
     const p = raw && typeof raw === "object" ? ((raw as Record<string, unknown>).product ?? raw) : null;
     if (!p || typeof p !== "object") continue;
-    const o = p as Record<string, unknown>;
+    const top = p as Record<string, unknown>;
+    // A Merchant API product keeps its values under productAttributes; the Content API keeps them on the product.
+    const attrs = top.productAttributes && typeof top.productAttributes === "object" ? (top.productAttributes as Record<string, unknown>) : null;
+    const o: Record<string, unknown> = attrs
+      ? { ...attrs, id: top.name ?? top.id, offerId: top.offerId, price: microsPrice(attrs.price), availability: typeof attrs.availability === "string" ? attrs.availability.toLowerCase().replace(/_/g, " ") : attrs.availability, gtin: Array.isArray(attrs.gtins) ? attrs.gtins[0] : attrs.gtin }
+      : top;
     const fullId = str(o.id);
     const offerId = str(o.offerId) ?? (fullId ? fullId.split(":").pop() ?? fullId : null);
     const notices = Array.isArray(o.consumerNotices) ? o.consumerNotices : o.consumerNotice ?? o.consumer_notice;
@@ -470,13 +491,13 @@ export function parseMerchantCenterXml(text: string): FeedProduct[] {
 export function merchantCenterRead(products: FeedProduct[], url: string, observed_at: string, format: MerchantCenterFormat): SurfaceRead {
   const facts: SurfaceFact[] = [];
   for (const p of products) productFacts("merchant_center", p.key, p, url, observed_at, facts);
-  return { surface: "merchant_center", url, observed_at, facts, notes: [`${products.length} products read from the ${format === "content_api" ? "Content API" : format.toUpperCase() + " feed"}`] };
+  return { surface: "merchant_center", url, observed_at, facts, notes: [`${products.length} products read from the ${format === "merchant_api" ? "Merchant API" : format === "content_api" ? "Content API" : format.toUpperCase() + " feed"}`] };
 }
 
 export function detectMerchantCenterFormat(res: FetchResult): MerchantCenterFormat {
   const ct = (res.headers["content-type"] ?? "").toLowerCase();
   const body = res.body.trimStart();
-  if (ct.includes("json") || body.startsWith("{") || body.startsWith("[")) return "content_api";
+  if (ct.includes("json") || body.startsWith("{") || body.startsWith("[")) return body.includes('"productAttributes"') ? "merchant_api" : "content_api";
   if (ct.includes("xml") || body.startsWith("<")) return "xml";
   return "tsv";
 }
@@ -490,7 +511,7 @@ export async function readMerchantCenter(fetchPort: FetchPort, source: { url: st
   const format = source.format ?? detectMerchantCenterFormat(res);
   let products: FeedProduct[] = [];
   try {
-    products = format === "content_api" ? parseMerchantCenterContentApi(JSON.parse(res.body)) : format === "xml" ? parseMerchantCenterXml(res.body) : parseMerchantCenterTsv(res.body);
+    products = format === "content_api" || format === "merchant_api" ? parseMerchantCenterContentApi(JSON.parse(res.body)) : format === "xml" ? parseMerchantCenterXml(res.body) : parseMerchantCenterTsv(res.body);
   } catch (e) {
     return { surface: "merchant_center", url: source.url, observed_at: at, facts: [], notes: [`feed did not parse: ${e instanceof Error ? e.message : "unknown error"}`] };
   }
