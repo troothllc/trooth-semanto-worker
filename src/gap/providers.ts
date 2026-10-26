@@ -7,7 +7,7 @@
 // parser over the fetch port; the key comes from Env and a provider without a
 // key is reported as "not configured", never silently skipped.
 //
-// Request shapes follow each vendor's public API reference as of October 2026:
+// Request shapes follow each vendor's public API reference as of October 2026 (models updated 2026-10-25):
 //   OpenAI      Chat Completions with web_search_options (platform.openai.com,
 //               "Web search" guide) and url_citation annotations
 //   Anthropic   Messages API with the web_search_20250305 server tool and
@@ -41,9 +41,11 @@ export const PROVIDER_LABELS: Record<ProviderName, string> = {
 
 /** The model each adapter asks for. Change here and nowhere else. */
 export const MODELS = {
-  openai: "gpt-4o-search-preview",
-  anthropic: "claude-sonnet-4-5",
-  gemini: "gemini-2.5-flash",
+  // 2026-10-25: gpt-4o-search-preview was shut down on 2026-07-23; gpt-5-search-api is OpenAI's web search model for
+  // Chat Completions. gemini-3.8-flash is the newest stable Flash with Grounding with Google Search (GA 2026-09-02).
+  openai: "gpt-5-search-api",
+  anthropic: "claude-sonnet-5-5",
+  gemini: "gemini-3.8-flash",
   perplexity: "sonar",
 } as const;
 

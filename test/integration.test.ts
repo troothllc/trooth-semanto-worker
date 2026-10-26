@@ -1011,9 +1011,12 @@ describe("4. readers: Web Bot Auth behind the receipt middleware, receipts throu
     await settle(() => w.receiptRows.rows.length >= 2 && w.receiptRows.rows.some((r) => r.proof === "web_bot_auth"));
     const rows = w.receiptRows.rows;
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toMatchObject({ proof: "web_bot_auth", agent_key_url: "https://agent.fixtureagent.com/", keyid: w.agent.pub.kid, representation: "markdown", page_id: entry.id });
-    expect(rows[1]).toMatchObject({ proof: "none", agent_key_url: null, keyid: null });
-    expect(rows[0]!.ip_hash).toMatch(/^[0-9a-f]{64}$/);
+    // Receipts are written after each response, so the unsigned request's (no key check) can land first: find each by its proof.
+    const provenRow = rows.find((r) => r.proof === "web_bot_auth");
+    const plainRow = rows.find((r) => r.proof === "none");
+    expect(provenRow).toMatchObject({ proof: "web_bot_auth", agent_key_url: "https://agent.fixtureagent.com/", keyid: w.agent.pub.kid, representation: "markdown", page_id: entry.id });
+    expect(plainRow).toMatchObject({ proof: "none", agent_key_url: null, keyid: null });
+    expect(provenRow!.ip_hash).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(rows)).not.toContain("203.0.113.7");
   });
 

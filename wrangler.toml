@@ -18,6 +18,7 @@
 #   GOOGLE_OAUTH_CLIENT_SECRET     optional: the same OAuth client's secret
 #   SEMANTO_EVENTS_SECRET          optional: HMAC key for recall events sent to worker-f (set the same value on worker-f)
 #   OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, PERPLEXITY_API_KEY   optional: gap report providers
+#   SERPAPI_API_KEY   optional: Google AI Mode, Google AI Overviews and Microsoft Copilot through SerpApi
 #
 # Founder steps before the first deploy: create the D1 database and the KV namespace and put their
 # ids where REPLACE_WITH_ stands below; create the R2 bucket trooth-semanto and the queues

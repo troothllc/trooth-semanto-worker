@@ -38,6 +38,7 @@
 // A deployment without TROOTH_WITNESS_KEY still starts: routes that sign or
 // witness answer a 503 witness_key_missing problem and the rest keep working.
 
+import { serpApiPort } from "./gap/serpapi";
 import type { Env, QueueMessage } from "./env";
 import { WitnessKeyMissingError, type PrivateJwk, type PublicJwk } from "./core/keys";
 import { createApp, runQueue, runScheduled, DASHBOARD_ORIGINS, DEVELOPMENT_DASHBOARD_ORIGIN, type RouteDeps } from "./serve/routes";
@@ -159,7 +160,7 @@ export function wire(env: Env): Wired {
     staging: new D1BuildStaging(env.DB, env.STORE),
     receiptStore,
     ...(env.TSA_URL ? { tsa: { url: env.TSA_URL, fetch: platformFetch() } } : {}),
-    gapAdapters: () => allAdapters(env, (url, init) => fetch(url, init)),
+    gapAdapters: () => allAdapters(env, (url, init) => fetch(url, init), env.SERPAPI_API_KEY ? serpApiPort(env.SERPAPI_API_KEY, (url, init) => fetch(url, init)) : undefined),
     ...(env.COMPILE_QUEUE ? { enqueue: async (job: QueueMessage) => void (await env.COMPILE_QUEUE!.send(job)) } : {}),
     // Production never runs a build inside a request: without the queue, a build is refused.
     inlineBuilds: env.ENVIRONMENT !== "production",

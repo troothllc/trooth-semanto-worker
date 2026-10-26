@@ -33,6 +33,8 @@ export interface Env {
   ANTHROPIC_API_KEY?: string;
   GEMINI_API_KEY?: string;
   PERPLEXITY_API_KEY?: string;
+  /** SerpApi key: Google AI Mode, Google AI Overviews and Microsoft Copilot answers for the gap report (src/gap/serpapi.ts). */
+  SERPAPI_API_KEY?: string;
   /** RFC 3161 timestamp authority URL, same one worker-f anchors with. */
   TSA_URL?: string;
   /** Resend, for plain-language alerts. */
