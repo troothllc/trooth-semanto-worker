@@ -1071,7 +1071,7 @@ export function prefersPlainText(accept: string | null): boolean {
 export async function runScheduled(ports: Ports, cron: string): Promise<void> {
   if (cron === "15 * * * *") return ports.jobs.hourlyChangeDetection();
   if (cron === "30 1 * * *") return ports.jobs.nightlyCheckpoint();
-  if (cron === "0 6 * * 1") return ports.jobs.weeklyGapReports();
+  if (cron === "0 6 * * MON") return ports.jobs.weeklyGapReports();
 }
 
 /** Attempts a message gets (wrangler.toml max_retries 3, so four in all) before it goes to the dead letter queue. */

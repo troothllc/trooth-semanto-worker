@@ -97,6 +97,8 @@ export type { WebBotAuthResult };
 export const CONNECTOR_TAG = "trooth-connector";
 /** The crons fan out one queue message per this many companies. */
 export const COMPANIES_PER_MESSAGE = 25;
+/** The Watch page's Ask now queues a gap report at most once in this window after the newest report. */
+export const GAP_ASK_NOW_GAP_MS = 10 * 60 * 1000;
 
 /** A source outside Trooth (a registry, the company's site, a provider) gave no usable answer. */
 export class UpstreamError extends Error {}
@@ -836,6 +838,15 @@ export class Pipeline implements WorkspaceHandlers {
     if (!company) return problem("conflict", "This company has no record yet.");
     const file = (await this.d.versions.getCurrent(trooth_id)) ?? (await this.d.store.latestVersion(trooth_id))?.file ?? null;
     if (!file) return problem("conflict", "Build a version first; the report compares answers with it.");
+    // { "queue": true } (the Watch page's Ask now): the report runs on the queue, where asking every assistant
+    // every question has the time it needs, instead of inside a request. At most one every ten minutes.
+    if (body.queue === true && this.d.enqueue) {
+      const last = await this.d.store.latestGapReport(trooth_id);
+      const next = last ? Date.parse(last.ran_at) + GAP_ASK_NOW_GAP_MS : 0;
+      if (next > this.d.now().getTime()) return problem("conflict", `A report ran at ${last!.ran_at}. Ask again after ${iso(new Date(next))}.`);
+      await this.d.enqueue({ kind: "companies", job: "gap", trooth_ids: [trooth_id] });
+      return ok(202, { object: "semanto.gap_report_queued", trooth_id, queued_at: iso(this.d.now()) });
+    }
     const config = await this.d.store.getConfig(trooth_id);
     const kind = (["b2b", "shopping", "local", "competitor"] as QuestionKind[]).find((k) => k === body.kind) ?? config.gap.kinds[0] ?? "b2b";
     const products = Array.isArray(body.products) ? body.products.filter((p): p is string => typeof p === "string") : config.gap.products;

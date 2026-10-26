@@ -275,12 +275,12 @@ describe("gap report", () => {
     expect(back.regressed).toHaveLength(1);
   });
   it("plans the weekly Monday run", () => {
-    expect(WEEKLY_RUN.cron).toBe("0 6 * * 1");
+    expect(WEEKLY_RUN.cron).toBe("0 6 * * MON");
     expect(nextWeeklyRun(new Date("2026-10-21T12:00:00Z")).toISOString()).toBe("2026-10-26T06:00:00.000Z");
     expect(nextWeeklyRun(new Date("2026-10-26T06:00:00Z")).toISOString()).toBe("2026-11-02T06:00:00.000Z");
     expect(nextWeeklyRun(new Date("2026-10-26T05:00:00Z")).toISOString()).toBe("2026-10-26T06:00:00.000Z");
     const plan = weeklyRunPlan("acme-inc", new Date("2026-10-21T12:00:00Z"));
-    expect(plan).toMatchObject({ trooth_id: "acme-inc", cron: "0 6 * * 1", next_run_at: "2026-10-26T06:00:00.000Z", alert_on: ["differs", "unsupported_claim"] });
+    expect(plan).toMatchObject({ trooth_id: "acme-inc", cron: "0 6 * * MON", next_run_at: "2026-10-26T06:00:00.000Z", alert_on: ["differs", "unsupported_claim"] });
   });
   it("runs end to end through adapters with in-memory ports", async () => {
     const fetchPort: FetchPort = async () => ({ status: 200, headers: { get: () => null }, text: async () => JSON.stringify(fixture("openai.fixture.json")) });

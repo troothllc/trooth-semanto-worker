@@ -426,7 +426,7 @@ describe("receipts and background handlers", () => {
   it("routes crons and queue messages to the job port", async () => {
     await runScheduled(estate.ports, "15 * * * *");
     await runScheduled(estate.ports, "30 1 * * *");
-    await runScheduled(estate.ports, "0 6 * * 1");
+    await runScheduled(estate.ports, "0 6 * * MON");
     let acked = 0;
     await runQueue(estate.ports, [{ body: { trooth_id: "acme-inc" }, ack: () => acked++, retry: () => undefined }]);
     expect(estate.ports.jobs.calls).toEqual(["hourly", "nightly", "weekly", 'compile:{"trooth_id":"acme-inc"}']);

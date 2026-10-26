@@ -236,17 +236,18 @@ function citationWords(c: Finding["citation"]): string {
 
 /**
  * The one weekly schedule. wrangler.toml carries the same cron
- * (["15 * * * *", "30 1 * * *", "0 6 * * 1"]) and src/serve/routes.ts
+ * (["15 * * * *", "30 1 * * *", "0 6 * * MON"]) and src/serve/routes.ts
  * runScheduled maps it to the weekly gap job; test/integration.test.ts fails
  * if the three disagree.
  */
 export const WEEKLY_RUN = {
-  /** Mondays at 06:00 UTC, before the US working day, so the report is in the inbox when it starts. */
-  cron: "0 6 * * 1",
+  /** Mondays at 06:00 UTC, before the US working day, so the report is in the inbox when it starts. The weekday is
+   * a name: Cloudflare numbers weekdays from 1 = Sunday, so "0 6 * * 1" ran on Sundays (found 2026-10-26). */
+  cron: "0 6 * * MON",
   hour_utc: 6,
   timezone: "UTC",
   kinds: ["b2b", "shopping", "local", "competitor"] as QuestionKind[],
-  wranglerSnippet: '[triggers]\ncrons = ["15 * * * *", "30 1 * * *", "0 6 * * 1"]',
+  wranglerSnippet: '[triggers]\ncrons = ["15 * * * *", "30 1 * * *", "0 6 * * MON"]',
 } as const;
 
 export interface RunPlan {

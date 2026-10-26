@@ -864,6 +864,23 @@ describe("4. signing paths, keys and the workspace actions", () => {
     await drain(w);
     expect((await w.store.latestVersion("acme"))?.file.header.state).toBe("read");
   });
+
+  it("Ask now queues the gap report, the consumer runs it, and a second ask within ten minutes is refused", async () => {
+    const w = await world({ queue: true });
+    await post(w, "/acme/build", {});
+    await drain(w);
+    const r = await post(w, "/acme/gap-report", { queue: true });
+    expect(r.status).toBe(202);
+    expect((await json(r)).object).toBe("semanto.gap_report_queued");
+    expect(w.queued).toEqual([{ kind: "companies", job: "gap", trooth_ids: ["acme"] }]);
+    await drain(w);
+    expect(w.store.gapReports.length).toBeGreaterThan(0);
+    const again = await post(w, "/acme/gap-report", { queue: true });
+    expect(again.status).toBe(409);
+    expect(w.queued).toEqual([]);
+    w.clock.now = new Date(w.clock.now.getTime() + 10 * 60 * 1000 + 1);
+    expect((await post(w, "/acme/gap-report", { queue: true })).status).toBe(202);
+  });
 });
 
 // ------------------------------------------------------------------------ 4. scheduled work
@@ -984,7 +1001,9 @@ describe("4. scheduled work", () => {
     const toml = readFileSync(fileURLToPath(new URL("../wrangler.toml", import.meta.url)), "utf8");
     const crons = JSON.parse(/crons = (\[[^\]]*\])/.exec(toml)![1]!) as string[];
     expect(crons).toEqual(["15 * * * *", "30 1 * * *", WEEKLY_RUN.cron]);
-    expect(WEEKLY_RUN.cron).toBe("0 6 * * 1");
+    expect(WEEKLY_RUN.cron).toBe("0 6 * * MON");
+    // Cloudflare numbers weekdays from 1 = Sunday, unlike most cron: a weekday field is a name or *, never a number.
+    for (const c of crons) expect(c.split(" ")[4], c).toMatch(/^(\*|[A-Z]{3}(-[A-Z]{3})?)$/);
     expect(toml).toContain('binding = "TROOTH_OS"');
     expect(toml).toContain('service = "trooth-os-worker-f"');
     const w = await world();
