@@ -52,7 +52,7 @@ async function V_core_inclusion(p: { index: number; tree_size: number; leaf_hash
   const { digestBytes: db } = await import("@/core/hash");
   return verifyInclusionDigests(db(p.leaf_hash), p.index, p.tree_size, p.path, p.root_hash);
 }
-import { MemoryPipelineStore } from "@/pipeline-store";
+import { MemoryPipelineStore, isLivePage } from "@/pipeline-store";
 import { Pipeline, ReaderReceipts, troothOsAuthorize, webBotAuthReaders, withCompanies, type PipelineDeps, type ServiceFetcher } from "@/pipeline";
 import type { CompileJob, QueueMessage } from "@/env";
 import { openPrivateJwk, sealPrivateJwk } from "@/db/key-seal";
@@ -484,6 +484,20 @@ describe("5. end to end: build, sign, witness, log, serve, verify", () => {
 
 // ------------------------------------------------------------------------ 4. the Worker's own D1 and R2 adapters
 
+describe("4. live pages over D1: an earlier change time survives a row without one", () => {
+  it("putChangeStates from a build keeps prev_change_at; a detected change replaces it", async () => {
+    const d1 = new FixtureD1();
+    const store = new D1PipelineStore(d1.asD1(), new FixtureR2().asR2(), "fixture-seal-secret-of-at-least-32-chars");
+    const url = "https://acme.com/status";
+    await store.putChangeState("acme", url, { etag: null, last_modified: null, raw_hash: "text:sha256:a", checked_at: "2026-10-25T15:15:00.000Z", prev_change_at: "2026-10-25T14:15:00.000Z" });
+    expect(isLivePage((await store.changeState("acme"))[url])).toBe(true);
+    await store.putChangeStates("acme", [{ url, etag: null, last_modified: null, raw_hash: "text:sha256:b", checked_at: "2026-10-26T14:17:00.000Z" }]);
+    expect((await store.changeState("acme"))[url]!.prev_change_at).toBe("2026-10-25T14:15:00.000Z");
+    await store.putChangeState("acme", url, { etag: null, last_modified: null, raw_hash: "text:sha256:c", checked_at: "2026-10-26T15:15:00.000Z", prev_change_at: "2026-10-26T14:17:00.000Z" });
+    expect((await store.changeState("acme"))[url]).toMatchObject({ raw_hash: "text:sha256:c", prev_change_at: "2026-10-26T14:17:00.000Z" });
+  });
+});
+
 describe("4. the same flow over the D1 and R2 adapters the Worker uses (SQLite and a Map standing in)", () => {
   it("builds, signs with a sealed hosted key, logs, serves, proves, takes a catalog and runs the monitor through src/db/d1.ts and src/ledger/store-d1.ts", async () => {
     const d1 = new FixtureD1();
@@ -905,6 +919,48 @@ describe("4. scheduled work", () => {
     const entry = file.header.pages_manifest.find((p) => p.url === "https://acme.com/about")!;
     const page = await get(w, `/acme/pages/${entry.id}`, { accept: "text/markdown" });
     expect(page.headers.get("trooth-semanto-state")).toBeNull();
+  });
+
+  it("hourly: a live page (words changed twice within 48 hours) never starts a version on its own; it rides with an ordinary change, or the weekly build", async () => {
+    const w = await world({ queue: true });
+    await post(w, "/acme/build", {});
+    await drain(w);
+    expect((await signHosted(w)).status).toBe(200);
+    const live = "https://acme.com/pricing";
+    const at = (h: number) => (w.clock.now = new Date(NOW.getTime() + h * 3_600_000));
+    const tick = (n: number) => w.site.set(live, { body: readCompiler("pricing.html").replace("</main>", `<p>Updated ${n} minutes ago.</p></main>`), headers: { "content-type": "text/html" } });
+    // Hourly for a day: the words change every hour.
+    for (let h = 1; h <= 24; h++) {
+      at(h);
+      tick(h);
+      w.queued.length = 0;
+      await w.pipeline.checkCompanyChanges(["acme"]);
+      expect([h, w.queued.length]).toEqual([h, 0]);
+    }
+    expect(isLivePage((await w.store.changeState("acme"))[live])).toBe(true);
+    // An ordinary page changes: one version, carrying the live page too.
+    at(25);
+    tick(25);
+    w.site.set("https://acme.com/about", { body: readCompiler("about.html").replace("coyote", "roadrunner"), headers: { "content-type": "text/html" } });
+    w.queued.length = 0;
+    await w.pipeline.checkCompanyChanges(["acme"]);
+    expect(w.queued).toEqual([expect.objectContaining({ reason: "change_detected", changed_urls: expect.arrayContaining(["https://acme.com/about", live]) })]);
+    const job = w.queued.shift()!;
+    await w.pipeline.jobs().compile(job);
+    await drain(w);
+    // Six more days of only the live page changing: nothing, then the weekly build.
+    for (let h = 26; h <= 25 + 24 * 6; h += 12) {
+      at(h);
+      tick(h);
+      w.queued.length = 0;
+      await w.pipeline.checkCompanyChanges(["acme"]);
+      expect([h, w.queued.length]).toEqual([h, 0]);
+    }
+    at(25 + 24 * 7);
+    tick(999);
+    w.queued.length = 0;
+    await w.pipeline.checkCompanyChanges(["acme"]);
+    expect(w.queued).toEqual([expect.objectContaining({ reason: "change_detected", changed_urls: [live] })]);
   });
 
   it("nightly: signs a tree head, anchors it with an RFC 3161 timestamp, and re-signs the revocation list", async () => {

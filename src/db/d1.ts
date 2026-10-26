@@ -723,19 +723,20 @@ export class D1PipelineStore implements PipelineStore {
   }
 
   async changeState(trooth_id: string): Promise<Record<string, ChangeRow>> {
-    const { results } = await this.db.prepare(`SELECT url, etag, last_modified, raw_hash, lastmod, checked_at FROM semanto_change_state WHERE trooth_id = ?1`).bind(trooth_id).all<ChangeRow & { url: string }>();
+    const { results } = await this.db.prepare(`SELECT url, etag, last_modified, raw_hash, lastmod, checked_at, prev_change_at FROM semanto_change_state WHERE trooth_id = ?1`).bind(trooth_id).all<ChangeRow & { url: string }>();
     const out: Record<string, ChangeRow> = {};
-    for (const r of results) out[r.url] = { etag: r.etag, last_modified: r.last_modified, raw_hash: r.raw_hash, lastmod: r.lastmod ?? null, checked_at: r.checked_at };
+    for (const r of results) out[r.url] = { etag: r.etag, last_modified: r.last_modified, raw_hash: r.raw_hash, lastmod: r.lastmod ?? null, checked_at: r.checked_at, prev_change_at: r.prev_change_at ?? null };
     return out;
   }
 
   private changeStateStatement(trooth_id: string, url: string, row: ChangeRow): D1PreparedStatement {
+    // prev_change_at survives a write that does not carry one (a build's rows), so a live page stays live.
     return this.db
       .prepare(
-        `INSERT INTO semanto_change_state (trooth_id, url, etag, last_modified, raw_hash, lastmod, checked_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(trooth_id, url) DO UPDATE SET etag = excluded.etag, last_modified = excluded.last_modified, raw_hash = excluded.raw_hash, lastmod = excluded.lastmod, checked_at = excluded.checked_at`,
+        `INSERT INTO semanto_change_state (trooth_id, url, etag, last_modified, raw_hash, lastmod, checked_at, prev_change_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(trooth_id, url) DO UPDATE SET etag = excluded.etag, last_modified = excluded.last_modified, raw_hash = excluded.raw_hash, lastmod = excluded.lastmod, checked_at = excluded.checked_at, prev_change_at = COALESCE(excluded.prev_change_at, semanto_change_state.prev_change_at)`,
       )
-      .bind(trooth_id, url, row.etag, row.last_modified, row.raw_hash, row.lastmod ?? null, row.checked_at);
+      .bind(trooth_id, url, row.etag, row.last_modified, row.raw_hash, row.lastmod ?? null, row.checked_at, row.prev_change_at ?? null);
   }
   async putChangeState(trooth_id: string, url: string, row: ChangeRow): Promise<void> {
     await this.changeStateStatement(trooth_id, url, row).run();

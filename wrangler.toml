@@ -36,7 +36,7 @@ ENVIRONMENT = "development"
 PUBLIC_API_BASE = "https://api.trooth.co/public/semanto"
 NETWORK_BASE = "https://trooth.co/network/company"
 LEDGER_URL = "https://api.trooth.co/public/semanto/log"
-# Optional vars: TSA_URL (the RFC 3161 time-stamp authority; without it no tree head is timestamped),
+# Optional vars: TSA_URL (the RFC 3161 time-stamp authority; without it no tree head is timestamped; production sets it),
 # ALERT_FROM (the sender address for alerts and setup emails) and GOOGLE_OAUTH_REDIRECT_URI (where Google
 # redirects after consent; https://api.trooth.co/public/semanto/google/callback when unset).
 # Development only (src/dev-upstream.ts, ignored in production): DEV_UPSTREAM_BASE (a loopback origin that stands in for
@@ -125,6 +125,10 @@ ENVIRONMENT = "production"
 PUBLIC_API_BASE = "https://api.trooth.co/public/semanto"
 NETWORK_BASE = "https://trooth.co/network/company"
 LEDGER_URL = "https://api.trooth.co/public/semanto/log"
+# RFC 3161 time-stamp authority for the log's tree heads (each signing and the nightly checkpoint): Sectigo's public
+# authority over HTTPS. Chosen 2026-10-25 after real requests built by src/ledger/timestamp.ts: Sectigo and FreeTSA
+# returned valid tokens over HTTPS; DigiCert answered only over plain HTTP.
+TSA_URL = "https://timestamp.sectigo.com"
 
 [[env.production.d1_databases]]
 binding = "DB"

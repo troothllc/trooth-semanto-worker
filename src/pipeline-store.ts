@@ -94,6 +94,18 @@ export interface ChangeRow {
   raw_hash: string | null;
   lastmod?: string | null;
   checked_at: string;
+  /** When the words changed before the change at checked_at; kept across builds (null leaves it as it was). */
+  prev_change_at?: string | null;
+}
+
+/** Two word changes within this long mark a page live (src/pipeline.ts isLivePage). */
+export const LIVE_PAGE_WINDOW_MS = 48 * 3600_000;
+
+/** A page whose words changed twice within 48 hours: a status page, a live count, a feed. */
+export function isLivePage(row: ChangeRow | undefined): boolean {
+  if (!row || !row.prev_change_at) return false;
+  const gap = Date.parse(row.checked_at) - Date.parse(row.prev_change_at);
+  return Number.isFinite(gap) && gap >= 0 && gap <= LIVE_PAGE_WINDOW_MS;
 }
 
 export interface PendingSigning {
@@ -414,7 +426,8 @@ export class MemoryPipelineStore implements PipelineStore {
   }
   async putChangeState(trooth_id: string, url: string, row: ChangeRow): Promise<void> {
     const m = this.change.get(trooth_id) ?? {};
-    m[url] = row;
+    // As D1 does it: a row without prev_change_at keeps the one it had.
+    m[url] = { ...row, prev_change_at: row.prev_change_at ?? m[url]?.prev_change_at ?? null };
     this.change.set(trooth_id, m);
     // The serving layer reads "behind" from the same state (src/db/d1.ts selectPageLiveState does this in the Worker).
     const c = this.versions.companies.get(trooth_id);

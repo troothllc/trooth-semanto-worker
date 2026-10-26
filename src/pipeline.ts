@@ -85,7 +85,8 @@ import { wellKnownSemanto } from "./serve/represent";
 import { isDomainProven, type CompanyRecord, type JobPort, type KeyPort, type ReceiptInput, type ReceiptPort, type ServeConfig, type SettingsPort, type SignedRequest, type VersionStore, type WorkspaceAction, type WorkspaceAuth, type WorkspaceHandlers, type WorkspaceRead, type WorkspaceResult, type WorkspaceRole, type WorkspaceSession } from "./serve/ports";
 import type { LedgerLogPort } from "./serve/ledger-port";
 import { PROBLEMS, SessionUnavailable, type ProblemCode } from "./serve/errors";
-import type { PipelineStore, VersionHead } from "./pipeline-store";
+import type { ChangeRow, PipelineStore, VersionHead } from "./pipeline-store";
+import { isLivePage } from "./pipeline-store";
 import type { SetupDnsPort } from "./setup/ports";
 import { DOMAINS_PROOF_HEADER, troothOsWorkspaceDomains } from "./setup/workspace-domains";
 import { ensureSetup, syncDomainProof, setupAction, setupAfterBuild, setupReview, setupSession, setupState, stampStep } from "./pipeline-setup";
@@ -1187,6 +1188,8 @@ export class Pipeline implements WorkspaceHandlers {
   /** For these companies, check each signed page cheaply (sitemap lastmod, conditional GET, raw hash) and queue a rebuild of what changed. */
   /** The shortest time between two builds that change detection starts (23 hours, so the daily one lands on the same hour). */
   static readonly CHANGE_REBUILD_INTERVAL_MS = 23 * 3600_000;
+  /** When only live pages changed: a build at most once a week, so they do not go stale. */
+  static readonly LIVE_ONLY_REBUILD_INTERVAL_MS = 7 * 24 * 3600_000 - 3600_000;
 
   async checkCompanyChanges(trooth_ids: string[]): Promise<{ trooth_id: string; changed: string[] }[]> {
     const out: { trooth_id: string; changed: string[] }[] = [];
@@ -1218,9 +1221,11 @@ export class Pipeline implements WorkspaceHandlers {
           // The words changed: the new text hash and the time it was seen. They did not: only the validators move, and
           // the row keeps the hash and time of the version it describes, so the review never reports a page as changed
           // because its bytes carried a new nonce.
-          const row = r.changed
-            ? { etag: r.fetch.etag, last_modified: r.fetch.lastModified, raw_hash: await contentHash(r.fetch.text), lastmod: prev?.lastmod ?? null, checked_at: r.fetch.fetchedAt }
-            : { etag: r.fetch.etag, last_modified: r.fetch.lastModified, raw_hash: prev?.raw_hash ?? (await contentHash(r.fetch.text)), lastmod: prev?.lastmod ?? null, checked_at: prev?.checked_at ?? file.header.built_at };
+          // A change remembers the one before it when that one was also seen by a check (after the newest build); a
+          // row a build wrote holds the build's time, which is not a change, so it carries no earlier change.
+          const row: ChangeRow = r.changed
+            ? { etag: r.fetch.etag, last_modified: r.fetch.lastModified, raw_hash: await contentHash(r.fetch.text), lastmod: prev?.lastmod ?? null, checked_at: r.fetch.fetchedAt, prev_change_at: prev && prev.checked_at > since ? prev.checked_at : null }
+            : { etag: r.fetch.etag, last_modified: r.fetch.lastModified, raw_hash: prev?.raw_hash ?? (await contentHash(r.fetch.text)), lastmod: prev?.lastmod ?? null, checked_at: prev?.checked_at ?? file.header.built_at, prev_change_at: null };
           await this.d.store.putChangeState(trooth_id, page.url, row);
           if (row.checked_at > since) pending.push(page.url);
         } else if (prev && prev.checked_at > since) pending.push(page.url);
@@ -1228,9 +1233,14 @@ export class Pipeline implements WorkspaceHandlers {
       }
       // Every change is recorded within the hour (readers get the signed copy marked behind), but a new version is
       // built at most once a day: a status page or a live count changes every hour, and a version to sign each hour
-      // helps no one. The rebuild carries every page changed since the newest build (2026-10-24).
+      // helps no one. The rebuild carries every page changed since the newest build (2026-10-24). A live page (words
+      // changed twice within 48 hours) does not start one on its own: it rides along with the next change to an
+      // ordinary page, or with the weekly build that keeps it from going stale (2026-10-25).
       const lastBuild = running ? Date.parse(running.requested_at) : 0;
-      const due = this.d.now().getTime() - lastBuild >= Pipeline.CHANGE_REBUILD_INTERVAL_MS;
+      const sinceBuild = this.d.now().getTime() - lastBuild;
+      const after = await this.d.store.changeState(trooth_id);
+      const ordinary = pending.filter((u) => !isLivePage(after[u]));
+      const due = sinceBuild >= Pipeline.CHANGE_REBUILD_INTERVAL_MS && (ordinary.length > 0 || sinceBuild >= Pipeline.LIVE_ONLY_REBUILD_INTERVAL_MS);
       if (pending.length && due) {
         const job: CompileJob = { trooth_id, domain: company.domain, reason: "change_detected", changed_urls: pending, requested_at: iso(this.d.now()) };
         if (this.d.enqueue) await this.d.enqueue(job);
