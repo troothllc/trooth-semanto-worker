@@ -175,6 +175,7 @@ async function world(opts: { queue?: boolean; probe?: (url: string, headers: Rec
     setupDns: dns,
     staging,
     gapAdapters: () => [],
+    gapReports: true,
     random: (n) => new Uint8Array(n),
     nonces: new MemoryNonceStore(),
     receiptStore: new MemoryReceiptStore(),

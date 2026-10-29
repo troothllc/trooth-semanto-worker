@@ -160,6 +160,8 @@ export function wire(env: Env): Wired {
     staging: new D1BuildStaging(env.DB, env.STORE),
     receiptStore,
     ...(env.TSA_URL ? { tsa: { url: env.TSA_URL, fetch: platformFetch() } } : {}),
+    // Watch what AI says is off until it returns as a paid feature (founder, 2026-10-29): no report asks a paid provider.
+    gapReports: false,
     // Paused assistants (src/gap/providers.ts PAUSED_PROVIDERS) are left out of customer reports; each request is cut off after GAP_ASK_TIMEOUT_MS.
     gapAdapters: () => {
       const timed = (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => fetch(url, { ...init, signal: AbortSignal.timeout(GAP_ASK_TIMEOUT_MS) });

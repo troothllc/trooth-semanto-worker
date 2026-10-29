@@ -53,7 +53,7 @@ async function V_core_inclusion(p: { index: number; tree_size: number; leaf_hash
   return verifyInclusionDigests(db(p.leaf_hash), p.index, p.tree_size, p.path, p.root_hash);
 }
 import { MemoryPipelineStore, isLivePage } from "@/pipeline-store";
-import { Pipeline, ReaderReceipts, troothOsAuthorize, webBotAuthReaders, withCompanies, type PipelineDeps, type ServiceFetcher } from "@/pipeline";
+import { GAP_REPORTS_OFF, Pipeline, ReaderReceipts, troothOsAuthorize, webBotAuthReaders, withCompanies, type PipelineDeps, type ServiceFetcher } from "@/pipeline";
 import type { CompileJob, QueueMessage } from "@/env";
 import { openPrivateJwk, sealPrivateJwk } from "@/db/key-seal";
 import { catalogToInputs } from "@/pipeline";
@@ -202,6 +202,8 @@ async function world(opts: { custody?: "hosted" | "customer"; trooth_id?: string
     identity: { http: identityHttp },
     ...(tsa ? { tsa } : {}),
     gapAdapters: gapAnswers,
+    // These tests cover Watch what AI says, which production keeps off (src/index.ts).
+    gapReports: true,
     ...(opts.queue ? { enqueue: async (job: QueueMessage) => void queued.push(job) } : {}),
     ...(opts.random ? { random: opts.random } : {}),
     // Review finding 19: catalog nonces are claimed once (the NonceDO in the Worker).
@@ -886,6 +888,26 @@ describe("4. signing paths, keys and the workspace actions", () => {
     expect((await post(w, "/acme/gap-report", { queue: true })).status).toBe(202);
   });
 
+  it("with Watch what AI says off (production), no report, competitor report, weekly job or queued message asks a provider", async () => {
+    const w = await world({ queue: true });
+    await post(w, "/acme/build", {});
+    await drain(w);
+    let asked = 0;
+    const counting = { ...w.deps, gapReports: false, gapAdapters: () => { asked++; return []; } };
+    const off = new Pipeline(counting);
+    const ada = WORKSPACES["Bearer owner-token"]!;
+    for (const [action, body] of [["gap-report", {}], ["gap-report", { queue: true }], ["competitor-report", {}]] as const) {
+      const r = await off.handle(action, ada, "acme", body);
+      expect(r.problem?.code).toBe("conflict");
+      expect(r.problem?.detail).toBe(GAP_REPORTS_OFF);
+    }
+    expect(await off.weeklyGapReports()).toEqual([]);
+    await off.jobs().compile({ kind: "companies", job: "gap", trooth_ids: ["acme"] });
+    expect(asked).toBe(0);
+    expect(w.store.gapReports).toHaveLength(0);
+    expect(w.queued).toEqual([]);
+  });
+
   it("a retried gap message asks nothing twice, a day allows six reports, and one report asks at most forty questions", async () => {
     const w = await world({ queue: true });
     await post(w, "/acme/build", {});
@@ -1032,7 +1054,9 @@ describe("4. scheduled work", () => {
   it("weekly: one schedule, in wrangler.toml, WEEKLY_RUN and runScheduled, runs the gap report for each signed company", async () => {
     const toml = readFileSync(fileURLToPath(new URL("../wrangler.toml", import.meta.url)), "utf8");
     const crons = JSON.parse(/crons = (\[[^\]]*\])/.exec(toml)![1]!) as string[];
-    expect(crons).toEqual(["15 * * * *", "30 1 * * *", WEEKLY_RUN.cron]);
+    // Watch what AI says is off in production (founder, 2026-10-29): its weekly cron is not scheduled; runScheduled still maps it.
+    expect(crons).toEqual(["15 * * * *", "30 1 * * *"]);
+    expect(crons).not.toContain(WEEKLY_RUN.cron);
     expect(WEEKLY_RUN.cron).toBe("0 6 * * MON");
     // Cloudflare numbers weekdays from 1 = Sunday, unlike most cron: a weekday field is a name or *, never a number.
     for (const c of crons) expect(c.split(" ")[4], c).toMatch(/^(\*|[A-Z]{3}(-[A-Z]{3})?)$/);

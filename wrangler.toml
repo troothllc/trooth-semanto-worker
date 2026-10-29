@@ -45,9 +45,10 @@ LEDGER_URL = "https://api.trooth.co/public/semanto/log"
 # The compile queue also carries the workspace jobs (writeback, recall_event, credential): no new cron, no polling.
 
 # Hourly: change detection for every signed company; nightly: tree head, RFC 3161 timestamp and revocation list;
-# weekly: gap reports (src/gap/report.ts WEEKLY_RUN.cron is the same "0 6 * * MON"; src/serve/routes.ts runScheduled maps all three).
+# Watch what AI says is off (src/index.ts gapReports: false, founder 2026-10-29), so its weekly cron is not scheduled; when it
+# returns, add WEEKLY_RUN.cron ("0 6 * * MON", src/gap/report.ts) back here; src/serve/routes.ts runScheduled still maps it.
 [triggers]
-crons = ["15 * * * *", "30 1 * * *", "0 6 * * MON"]
+crons = ["15 * * * *", "30 1 * * *"]
 
 [[d1_databases]]
 binding = "DB"

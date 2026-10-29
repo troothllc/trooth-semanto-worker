@@ -99,6 +99,8 @@ export const CONNECTOR_TAG = "trooth-connector";
 export const COMPANIES_PER_MESSAGE = 25;
 /** The Watch page's Ask now queues a gap report at most once in this window after the newest report. */
 export const GAP_ASK_NOW_GAP_MS = 10 * 60 * 1000;
+/** The answer while Watch what AI says is off (PipelineDeps.gapReports). */
+export const GAP_REPORTS_OFF = "Watch what AI says is not available yet. It will return as a paid feature.";
 /** Ask now: at most this many reports per company in any 24 hours, weekly ones included (the spending cap). */
 export const GAP_REPORTS_PER_DAY = 6;
 /** The most questions one report asks (built-in and the owner's own together): the spending cap per report. */
@@ -137,6 +139,12 @@ export interface PipelineDeps {
   tsa?: { url: string; fetch: LedgerFetchPort };
   /** The gap report's providers (src/gap/providers.ts allAdapters with the Env keys in the Worker). */
   gapAdapters(): ProviderAdapter[];
+  /**
+   * Watch what AI says (gap reports, the competitor report, Ask now and the weekly job) runs only when this is true.
+   * Off in production (src/index.ts) until it returns as a paid feature (founder, 2026-10-29): every report asks paid
+   * AI providers, and the platform is free for now. The code stays built and tested.
+   */
+  gapReports?: boolean;
   /** The compile queue: compile jobs, build stages and the cron fan-out. Without it, they run inline. */
   enqueue?: (job: QueueMessage) => Promise<void>;
   /** False in production: without a queue, a build is refused instead of run inside a request. */
@@ -400,7 +408,7 @@ export class Pipeline implements WorkspaceHandlers {
     if (message.kind === "companies") {
       const m = message as unknown as CompaniesMessage;
       if (m.job === "changes") await this.checkCompanyChanges(m.trooth_ids);
-      else if (m.job === "gap") await this.gapReportsFor(m.trooth_ids, m.started_at);
+      else if (m.job === "gap" && this.d.gapReports) await this.gapReportsFor(m.trooth_ids, m.started_at);
       // Any other job (the retired "proof" job of a message queued before one signup) is acknowledged and dropped.
       return;
     }
@@ -453,6 +461,7 @@ export class Pipeline implements WorkspaceHandlers {
           return await registerPasskey(this, ws, trooth_id, body);
         case "gap-report":
           if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
+          if (!this.d.gapReports) return problem("conflict", GAP_REPORTS_OFF);
           return await this.gapReport(trooth_id, body);
         case "monitor/run":
           if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
@@ -478,6 +487,7 @@ export class Pipeline implements WorkspaceHandlers {
           return await this.detect(trooth_id);
         case "competitor-report":
           if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
+          if (!this.d.gapReports) return problem("conflict", GAP_REPORTS_OFF);
           return await this.competitorReport(trooth_id, body);
         default:
           return await setupAction(this, action, ws, trooth_id, body);
@@ -1316,6 +1326,7 @@ export class Pipeline implements WorkspaceHandlers {
 
   /** Weekly (WEEKLY_RUN.cron): queue the gap reports, one message per 25 signed companies. */
   async weeklyGapReports(): Promise<{ trooth_id: string; kinds: QuestionKind[]; errors: string[] }[]> {
+    if (!this.d.gapReports) return [];
     const ids = (await this.d.store.listCompanies("signed")).map((c) => c.trooth_id);
     // One company a message: a report asks every question of every assistant, so one company fills a consumer's time.
     const started_at = iso(this.d.now());
