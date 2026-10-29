@@ -11,7 +11,7 @@ import { questionsFor, allQuestions, coveredKeys, KEY_CATALOG, keyInfo, QUESTION
 import {
   parseOpenAiResponse, parseAnthropicResponse, parseGeminiResponse, parsePerplexityResponse,
   buildOpenAiRequest, buildAnthropicRequest, buildGeminiRequest, buildPerplexityRequest,
-  httpAdapter, serpAdapter, allAdapters, liveAdapters, withDeadline, PAUSED_PROVIDERS, isAnswer, isNotConfigured, isProviderError, MODELS, PROVIDERS, type ProviderAnswer,
+  httpAdapter, serpAdapter, allAdapters, liveAdapters, withDeadline, PAUSED_PROVIDERS, providerMessage, retryDelayMs, isAnswer, isNotConfigured, isProviderError, MODELS, PROVIDERS, type ProviderAnswer,
 } from "@/gap/providers";
 import type { FetchPort, SerpPort, SerpAnswer, SerpEngine } from "@/gap/ports";
 import { compareAnswer, citationNote, normalizeHours, extractMoney, type CompareContext } from "@/gap/compare";
@@ -170,6 +170,30 @@ describe("gap adapters: deadlines and paused assistants", () => {
     expect(liveAdapters(keys, fetchPort).map((a) => a.provider)).toEqual(["openai", "anthropic", "perplexity"]);
     expect([...PAUSED_PROVIDERS].sort()).toEqual(["copilot", "gemini", "google_ai_mode", "google_ai_overviews"]);
     expect(liveAdapters(keys, fetchPort, undefined, new Set()).map((a) => a.provider)).toEqual(["openai", "anthropic", "gemini", "perplexity", "google_ai_mode", "google_ai_overviews", "copilot"]);
+  });
+  it("a rate-limited assistant is asked again after Retry-After, and a failure keeps the provider's own reason without any key", async () => {
+    let calls = 0;
+    const busyOnce: FetchPort = async () => {
+      calls++;
+      if (calls === 1) return { status: 429, headers: { get: (n: string) => (n === "retry-after" ? "0" : null) }, text: async () => JSON.stringify({ error: { message: "Rate limit reached" } }) };
+      return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify(fixture("openai.fixture.json")) };
+    };
+    const ok = await httpAdapter("openai", { OPENAI_API_KEY: "k" }, busyOnce).ask("Who is Acme?");
+    expect(calls).toBe(2);
+    expect(isAnswer(ok)).toBe(true);
+    const denied: FetchPort = async () => ({ status: 401, headers: { get: () => null }, text: async () => JSON.stringify({ error: { message: "Incorrect API key provided: sk-proj-****abcd. You can find your API key at https://platform.openai.com." } }) });
+    const r = (await httpAdapter("openai", { OPENAI_API_KEY: "k" }, denied).ask("q")) as { error: string; status: number };
+    expect(r.status).toBe(401);
+    expect(r.error).toContain("provider answered 401: Incorrect API key provided: [key]");
+    expect(r.error).not.toContain("sk-proj");
+    expect(providerMessage(JSON.stringify({ error: "credit balance too low" }))).toBe("credit balance too low");
+    expect(providerMessage("<html>")).toBeNull();
+    expect(retryDelayMs("3", 0)).toBe(3000);
+    expect(retryDelayMs(null, 1)).toBe(4000);
+    expect(retryDelayMs("120", 0)).toBe(10_000);
+    // The report keeps the first reason per assistant.
+    const report = await runGapReport({ trooth_id: "acme-inc", company: "Acme Inc", kind: "b2b", ran_at: "2026-10-29T21:00:00Z", questions: allQuestions(PARAMS).filter((x) => x.kind === "b2b").slice(0, 2), adapters: [httpAdapter("openai", { OPENAI_API_KEY: "k" }, denied)], context: await ctx() });
+    expect(report.providers[0]).toMatchObject({ provider: "openai", errors: 2, last_error: expect.stringContaining("401") });
   });
   it("withDeadline passes a prompt answer through untouched", async () => {
     expect(await withDeadline(Promise.resolve(7), 1000)).toBe(7);

@@ -27,6 +27,8 @@ export interface ProviderSummary {
   questions_asked: number;
   /** Questions where the provider was configured but the request failed. */
   errors: number;
+  /** The first failure's reason, as the provider gave it (status and message), so the owner sees why. */
+  last_error?: string;
   model?: string;
 }
 
@@ -110,6 +112,7 @@ export async function buildGapReport(input: BuildInput): Promise<GapReport> {
       s.questions_asked += 1;
       if (isProviderError(r)) {
         s.errors += 1;
+        s.last_error ??= r.error;
         continue;
       }
       if (!isAnswer(r)) continue;

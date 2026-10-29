@@ -285,6 +285,30 @@ export function liveAdapters(keys: ProviderKeys, fetchPort: FetchPort, serp?: Se
   return allAdapters(keys, fetchPort, serp).filter((a) => !paused.has(a.provider));
 }
 
+const RETRY_STATUSES = new Set([429, 503, 529]);
+const RETRIES = 2;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Retry-After in seconds (capped at 10), else 2 s then 4 s. */
+export function retryDelayMs(retryAfter: string | null, attempt: number): number {
+  const s = retryAfter !== null && /^\d+$/.test(retryAfter.trim()) ? Number(retryAfter.trim()) : NaN;
+  return Math.min(Number.isFinite(s) ? s * 1000 : 2000 * 2 ** attempt, 10_000);
+}
+
+/** The provider's own error message ({ error: { message } } or { error: "a message" }), one line, at most 200 characters. */
+export function providerMessage(bodyText: string): string | null {
+  let j: unknown;
+  try {
+    j = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  const e = (j as { error?: unknown; detail?: unknown } | null)?.error ?? (j as { detail?: unknown } | null)?.detail;
+  const m = typeof e === "string" ? e : typeof (e as { message?: unknown } | null)?.message === "string" ? (e as { message: string }).message : null;
+  // Never keep anything shaped like a key, even a masked one ("sk-proj-****abcd").
+  return m ? m.replace(/\b(?:sk|pplx|xai|AIza)[-_A-Za-z0-9*]{4,}/g, "[key]").replace(/[A-Za-z0-9_*-]{32,}/g, "[redacted]").replace(/\s+/g, " ").trim().slice(0, 200) : null;
+}
+
 export function httpAdapter(provider: HttpProvider, keys: ProviderKeys, fetchPort: FetchPort, timeoutMs = GAP_ASK_TIMEOUT_MS): ProviderAdapter {
   const spec = HTTP[provider];
   const key = keys[spec.keyName];
@@ -302,15 +326,23 @@ export function httpAdapter(provider: HttpProvider, keys: ProviderKeys, fetchPor
       try {
         ({ res, bodyText } = await withDeadline(
           (async () => {
-            const r = await fetchPort(req.url, req.init);
-            return { res: r, bodyText: await r.text() };
+            // A busy or rate-limited provider (429, 503, 529) is asked again after its Retry-After, at most twice.
+            for (let attempt = 0; ; attempt++) {
+              const r = await fetchPort(req.url, req.init);
+              const text = await r.text();
+              if (!RETRY_STATUSES.has(r.status) || attempt >= RETRIES) return { res: r, bodyText: text };
+              await sleep(retryDelayMs(r.headers.get("retry-after"), attempt));
+            }
           })(),
           timeoutMs,
         ));
       } catch (e) {
         return { provider, configured: true, error: `request failed: ${(e as Error).message}`, asked_at };
       }
-      if (res.status < 200 || res.status >= 300) return { provider, configured: true, error: `provider answered ${res.status}`, status: res.status, asked_at };
+      if (res.status < 200 || res.status >= 300) {
+        const why = providerMessage(bodyText);
+        return { provider, configured: true, error: `provider answered ${res.status}${why ? `: ${why}` : ""}`, status: res.status, asked_at };
+      }
       let json: unknown;
       try {
         json = JSON.parse(bodyText);
