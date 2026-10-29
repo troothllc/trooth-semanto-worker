@@ -83,6 +83,8 @@ export interface CompaniesMessage {
   /** "proof" was the hourly pending-proof sweep, retired with one signup: a message of that kind still in the queue is acknowledged and dropped. */
   job: "changes" | "gap" | "proof";
   trooth_ids: string[];
+  /** A gap job: when the run started. A retried message skips each kind already reported since then, so it never asks twice. */
+  started_at?: string;
 }
 
 /** One build stage (src/compiler/stream.ts StageMessage). */

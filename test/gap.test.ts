@@ -11,7 +11,7 @@ import { questionsFor, allQuestions, coveredKeys, KEY_CATALOG, keyInfo, QUESTION
 import {
   parseOpenAiResponse, parseAnthropicResponse, parseGeminiResponse, parsePerplexityResponse,
   buildOpenAiRequest, buildAnthropicRequest, buildGeminiRequest, buildPerplexityRequest,
-  httpAdapter, serpAdapter, allAdapters, isAnswer, isNotConfigured, isProviderError, MODELS, PROVIDERS, type ProviderAnswer,
+  httpAdapter, serpAdapter, allAdapters, liveAdapters, withDeadline, PAUSED_PROVIDERS, isAnswer, isNotConfigured, isProviderError, MODELS, PROVIDERS, type ProviderAnswer,
 } from "@/gap/providers";
 import type { FetchPort, SerpPort, SerpAnswer, SerpEngine } from "@/gap/ports";
 import { compareAnswer, citationNote, normalizeHours, extractMoney, type CompareContext } from "@/gap/compare";
@@ -151,6 +151,30 @@ describe("gap provider adapters", () => {
 });
 
 // ------------------------------------------------------------------ A3 comparison
+
+describe("gap adapters: deadlines and paused assistants", () => {
+  it("an assistant that never answers counts as not answered once the deadline passes", async () => {
+    const hang: FetchPort = () => new Promise(() => undefined);
+    const a = httpAdapter("openai", { OPENAI_API_KEY: "k" }, hang, 20);
+    const r = await a.ask("Who is Acme?");
+    expect(r).toMatchObject({ provider: "openai", configured: true });
+    expect((r as { error?: string }).error).toContain("no answer within");
+    const slowBody: FetchPort = async () => ({ status: 200, headers: { get: () => null }, text: () => new Promise<string>(() => undefined) });
+    expect(((await httpAdapter("anthropic", { ANTHROPIC_API_KEY: "k" }, slowBody, 20).ask("q")) as { error?: string }).error).toContain("no answer within");
+    const serp: SerpPort = { name: "fixture", engines: ["copilot"], fetchAnswer: () => new Promise<SerpAnswer | null>(() => undefined) };
+    expect(((await serpAdapter("copilot", serp, 20).ask("q")) as { error?: string }).error).toContain("no answer within");
+  });
+  it("production reports leave out the paused assistants until they are taken out of the set", () => {
+    const keys = { OPENAI_API_KEY: "k", ANTHROPIC_API_KEY: "k", GEMINI_API_KEY: "k", PERPLEXITY_API_KEY: "k" };
+    const fetchPort: FetchPort = async () => ({ status: 500, headers: { get: () => null }, text: async () => "" });
+    expect(liveAdapters(keys, fetchPort).map((a) => a.provider)).toEqual(["openai", "anthropic", "perplexity"]);
+    expect([...PAUSED_PROVIDERS].sort()).toEqual(["copilot", "gemini", "google_ai_mode", "google_ai_overviews"]);
+    expect(liveAdapters(keys, fetchPort, undefined, new Set()).map((a) => a.provider)).toEqual(["openai", "anthropic", "gemini", "perplexity", "google_ai_mode", "google_ai_overviews", "copilot"]);
+  });
+  it("withDeadline passes a prompt answer through untouched", async () => {
+    expect(await withDeadline(Promise.resolve(7), 1000)).toBe(7);
+  });
+});
 
 describe("gap comparison", () => {
   it("classifies a wrong price as differs with the signed correction", async () => {

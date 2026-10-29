@@ -99,6 +99,12 @@ export const CONNECTOR_TAG = "trooth-connector";
 export const COMPANIES_PER_MESSAGE = 25;
 /** The Watch page's Ask now queues a gap report at most once in this window after the newest report. */
 export const GAP_ASK_NOW_GAP_MS = 10 * 60 * 1000;
+/** Ask now: at most this many reports per company in any 24 hours, weekly ones included (the spending cap). */
+export const GAP_REPORTS_PER_DAY = 6;
+/** The most questions one report asks (built-in and the owner's own together): the spending cap per report. */
+export const GAP_MAX_QUESTIONS = 40;
+/** The most products a shopping report asks about. */
+export const GAP_MAX_PRODUCTS = 10;
 
 /** A source outside Trooth (a registry, the company's site, a provider) gave no usable answer. */
 export class UpstreamError extends Error {}
@@ -394,7 +400,7 @@ export class Pipeline implements WorkspaceHandlers {
     if (message.kind === "companies") {
       const m = message as unknown as CompaniesMessage;
       if (m.job === "changes") await this.checkCompanyChanges(m.trooth_ids);
-      else if (m.job === "gap") await this.gapReportsFor(m.trooth_ids);
+      else if (m.job === "gap") await this.gapReportsFor(m.trooth_ids, m.started_at);
       // Any other job (the retired "proof" job of a message queued before one signup) is acknowledged and dropped.
       return;
     }
@@ -841,15 +847,23 @@ export class Pipeline implements WorkspaceHandlers {
     // { "queue": true } (the Watch page's Ask now): the report runs on the queue, where asking every assistant
     // every question has the time it needs, instead of inside a request. At most one every ten minutes.
     if (body.queue === true && this.d.enqueue) {
+      const now = this.d.now().getTime();
+      const config = await this.d.store.getConfig(trooth_id);
       const last = await this.d.store.latestGapReport(trooth_id);
-      const next = last ? Date.parse(last.ran_at) + GAP_ASK_NOW_GAP_MS : 0;
-      if (next > this.d.now().getTime()) return problem("conflict", `A report ran at ${last!.ran_at}. Ask again after ${iso(new Date(next))}.`);
-      await this.d.enqueue({ kind: "companies", job: "gap", trooth_ids: [trooth_id] });
-      return ok(202, { object: "semanto.gap_report_queued", trooth_id, queued_at: iso(this.d.now()) });
+      // The newest of the last report and the last ask: a second click while a report is still queued is refused too.
+      const since = Math.max(last ? Date.parse(last.ran_at) : 0, config.gap.asked_at ? Date.parse(config.gap.asked_at) : 0);
+      const next = since ? since + GAP_ASK_NOW_GAP_MS : 0;
+      if (next > now) return problem("conflict", `A report was asked for at ${iso(new Date(since))}. Ask again after ${iso(new Date(next))}.`);
+      const today = await this.d.store.gapReportsSince(trooth_id, iso(new Date(now - 24 * 3600_000)));
+      if (today.length >= GAP_REPORTS_PER_DAY) return problem("conflict", `This company has had ${today.length} reports in the last 24 hours, the most a day allows. Ask again tomorrow.`);
+      const queued_at = iso(this.d.now());
+      await this.d.store.putConfig(trooth_id, { ...config, gap: { ...config.gap, asked_at: queued_at } });
+      await this.d.enqueue({ kind: "companies", job: "gap", trooth_ids: [trooth_id], started_at: queued_at });
+      return ok(202, { object: "semanto.gap_report_queued", trooth_id, queued_at });
     }
     const config = await this.d.store.getConfig(trooth_id);
     const kind = (["b2b", "shopping", "local", "competitor"] as QuestionKind[]).find((k) => k === body.kind) ?? config.gap.kinds[0] ?? "b2b";
-    const products = Array.isArray(body.products) ? body.products.filter((p): p is string => typeof p === "string") : config.gap.products;
+    const products = (Array.isArray(body.products) ? body.products.filter((p): p is string => typeof p === "string") : config.gap.products).slice(0, GAP_MAX_PRODUCTS);
     const competitor = isRecord(body.competitor) && str(body.competitor.name) && str(body.competitor.domain) ? { name: str(body.competitor.name)!, domain: str(body.competitor.domain)! } : config.gap.competitor;
     const params: QuestionParams = { company: company.org, domain: company.domain, products, ...(competitor ? { competitor } : {}), ...(str(body.service) ?? config.gap.service ? { service: str(body.service) ?? config.gap.service } : {}) };
     const report = await runGapReport({
@@ -857,7 +871,7 @@ export class Pipeline implements WorkspaceHandlers {
       company: company.org,
       kind,
       ran_at: iso(this.d.now()),
-      questions: [...questionsFor(kind, params), ...(config.gap.questions ?? []).map((text, i) => ({ id: `custom:${i + 1}`, template_id: "custom", kind, text, keys: [] }))],
+      questions: [...questionsFor(kind, params), ...(config.gap.questions ?? []).map((text, i) => ({ id: `custom:${i + 1}`, template_id: "custom", kind, text, keys: [] }))].slice(0, GAP_MAX_QUESTIONS),
       adapters: this.d.gapAdapters(),
       context: { facts: file.facts, domains: file.header.domains, networkBase: this.d.config.network_base },
     });
@@ -1175,11 +1189,11 @@ export class Pipeline implements WorkspaceHandlers {
   // ---------------------------------------------------------------- scheduled work: the crons fan out, one queue message per 25 companies
 
   /** Enqueue one message per 25 companies, or run them inline without a queue. Answers what ran inline. */
-  private async fanOut<T>(job: CompaniesMessage["job"], ids: string[], inline: (ids: string[]) => Promise<T[]>): Promise<T[]> {
+  private async fanOut<T>(job: CompaniesMessage["job"], ids: string[], inline: (ids: string[]) => Promise<T[]>, per = COMPANIES_PER_MESSAGE, started_at?: string): Promise<T[]> {
     const out: T[] = [];
-    for (let i = 0; i < ids.length; i += COMPANIES_PER_MESSAGE) {
-      const chunk = ids.slice(i, i + COMPANIES_PER_MESSAGE);
-      if (this.d.enqueue) await this.d.enqueue({ kind: "companies", job, trooth_ids: chunk });
+    for (let i = 0; i < ids.length; i += per) {
+      const chunk = ids.slice(i, i + per);
+      if (this.d.enqueue) await this.d.enqueue({ kind: "companies", job, trooth_ids: chunk, ...(started_at ? { started_at } : {}) });
       else out.push(...(await inline(chunk)));
     }
     return out;
@@ -1303,17 +1317,22 @@ export class Pipeline implements WorkspaceHandlers {
   /** Weekly (WEEKLY_RUN.cron): queue the gap reports, one message per 25 signed companies. */
   async weeklyGapReports(): Promise<{ trooth_id: string; kinds: QuestionKind[]; errors: string[] }[]> {
     const ids = (await this.d.store.listCompanies("signed")).map((c) => c.trooth_id);
-    return this.fanOut("gap", ids, (chunk) => this.gapReportsFor(chunk));
+    // One company a message: a report asks every question of every assistant, so one company fills a consumer's time.
+    const started_at = iso(this.d.now());
+    return this.fanOut("gap", ids, (chunk) => this.gapReportsFor(chunk, started_at), 1, started_at);
   }
 
   /** The gap report for these companies, for the kinds each asked for. */
-  async gapReportsFor(trooth_ids: string[]): Promise<{ trooth_id: string; kinds: QuestionKind[]; errors: string[] }[]> {
+  async gapReportsFor(trooth_ids: string[], started_at?: string): Promise<{ trooth_id: string; kinds: QuestionKind[]; errors: string[] }[]> {
     const out: { trooth_id: string; kinds: QuestionKind[]; errors: string[] }[] = [];
     for (const trooth_id of trooth_ids) {
       const config = await this.d.store.getConfig(trooth_id);
       const kinds = (config.gap.kinds.length ? config.gap.kinds : WEEKLY_RUN.kinds.slice(0, 1)).filter((k) => (k === "shopping" ? config.gap.products.length > 0 : k === "competitor" ? Boolean(config.gap.competitor) : true));
       const errors: string[] = [];
+      // A retried message (or a second delivery) skips each kind already reported in this run, so nothing is asked twice.
+      const done = new Set(started_at ? (await this.d.store.gapReportsSince(trooth_id, started_at)).map((r) => r.kind) : []);
       for (const kind of kinds) {
+        if (done.has(kind)) continue;
         const r = await this.gapReport(trooth_id, { kind });
         if (r.problem) errors.push(`${kind}: ${r.problem.detail}`);
       }

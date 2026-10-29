@@ -260,7 +260,32 @@ const HTTP: Record<HttpProvider, { keyName: keyof ProviderKeys; build: (q: strin
   perplexity: { keyName: "PERPLEXITY_API_KEY", build: buildPerplexityRequest, parse: parsePerplexityResponse },
 };
 
-export function httpAdapter(provider: HttpProvider, keys: ProviderKeys, fetchPort: FetchPort): ProviderAdapter {
+/** How long one question waits for one assistant, answer body included, before it counts as not answered. */
+export const GAP_ASK_TIMEOUT_MS = 45_000;
+
+/** Settles with the promise, or rejects once `ms` passes, so one slow assistant never holds the whole report. */
+export function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no answer within ${Math.round(ms / 1000)} seconds`)), ms);
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Assistants kept out of customer reports until counsel has reviewed them (founder, 2026-10-29): Gemini answers
+ * grounded in Google Search (the Gemini API terms limit storing and analyzing grounded results) and the three
+ * surfaces read through SerpApi (Google v. SerpApi and Reddit v. SerpApi are open). The adapters stay built and
+ * tested; taking a name out of this set brings that assistant back.
+ */
+export const PAUSED_PROVIDERS: ReadonlySet<ProviderName> = new Set<ProviderName>(["gemini", "google_ai_mode", "google_ai_overviews", "copilot"]);
+
+/** The adapters production reports use: every adapter except the paused ones. */
+export function liveAdapters(keys: ProviderKeys, fetchPort: FetchPort, serp?: SerpPort, paused: ReadonlySet<ProviderName> = PAUSED_PROVIDERS): ProviderAdapter[] {
+  return allAdapters(keys, fetchPort, serp).filter((a) => !paused.has(a.provider));
+}
+
+export function httpAdapter(provider: HttpProvider, keys: ProviderKeys, fetchPort: FetchPort, timeoutMs = GAP_ASK_TIMEOUT_MS): ProviderAdapter {
   const spec = HTTP[provider];
   const key = keys[spec.keyName];
   const missing = () => (key ? null : `${spec.keyName} is not set`);
@@ -273,12 +298,18 @@ export function httpAdapter(provider: HttpProvider, keys: ProviderKeys, fetchPor
       const asked_at = iso(opts);
       const req = spec.build(question, key!);
       let res;
+      let bodyText: string;
       try {
-        res = await fetchPort(req.url, req.init);
+        ({ res, bodyText } = await withDeadline(
+          (async () => {
+            const r = await fetchPort(req.url, req.init);
+            return { res: r, bodyText: await r.text() };
+          })(),
+          timeoutMs,
+        ));
       } catch (e) {
         return { provider, configured: true, error: `request failed: ${(e as Error).message}`, asked_at };
       }
-      const bodyText = await res.text();
       if (res.status < 200 || res.status >= 300) return { provider, configured: true, error: `provider answered ${res.status}`, status: res.status, asked_at };
       let json: unknown;
       try {
@@ -292,7 +323,7 @@ export function httpAdapter(provider: HttpProvider, keys: ProviderKeys, fetchPor
   };
 }
 
-export function serpAdapter(engine: SerpEngine, serp: SerpPort | undefined): ProviderAdapter {
+export function serpAdapter(engine: SerpEngine, serp: SerpPort | undefined, timeoutMs = GAP_ASK_TIMEOUT_MS): ProviderAdapter {
   const missing = () => {
     if (!serp) return `no SERP data provider is connected for ${PROVIDER_LABELS[engine]}`;
     if (!serp.engines.includes(engine)) return `the SERP data provider ${serp.name} does not return ${PROVIDER_LABELS[engine]}`;
@@ -307,7 +338,7 @@ export function serpAdapter(engine: SerpEngine, serp: SerpPort | undefined): Pro
       const asked_at = iso(opts);
       let a;
       try {
-        a = await serp!.fetchAnswer(engine, question, { ...(opts?.country ? { country: opts.country } : {}), ...(opts?.language ? { language: opts.language } : {}) });
+        a = await withDeadline(serp!.fetchAnswer(engine, question, { ...(opts?.country ? { country: opts.country } : {}), ...(opts?.language ? { language: opts.language } : {}) }), timeoutMs);
       } catch (e) {
         return { provider: engine, configured: true, error: `SERP provider failed: ${(e as Error).message}`, asked_at };
       }

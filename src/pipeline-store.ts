@@ -39,7 +39,7 @@ export interface CompanyConfig {
   surfaces: AvailableSurfaces;
   /** Who gets the plain-language alerts. */
   alert_emails: string[];
-  gap: { kinds: QuestionKind[]; products: string[]; competitor?: { name: string; domain: string }; service?: string; /** The owner's own questions (setup step 9), asked with every report. */ questions?: string[] };
+  gap: { kinds: QuestionKind[]; products: string[]; competitor?: { name: string; domain: string }; service?: string; /** The owner's own questions (setup step 9), asked with every report. */ questions?: string[]; /** When Ask now last queued a report, so a second ask while it waits is refused. */ asked_at?: string };
   /** public_record facts from registries (GLEIF), added to every build. */
   public_record_facts: Fact[];
   /** Write-back targets the company connected (GET /os/semanto/{id}/writeback previews against them). */
@@ -238,6 +238,8 @@ export interface PipelineStore extends BodyPort {
   saveGapReport(report: GapReport): Promise<void>;
   /** The newest gap report for the company (by ran_at), or null before the first. */
   latestGapReport(trooth_id: string): Promise<GapReport | null>;
+  /** The kind and time of each gap report this company has from `since` on (resume after a retry, the daily cap). */
+  gapReportsSince(trooth_id: string, since: string): Promise<{ kind: string; ran_at: string }[]>;
   getBasic(trooth_id: string): Promise<BasicCompany | null>;
   putBasic(c: BasicCompany): Promise<void>;
   putFirstPublication(r: FirstPublicationRecord): Promise<void>;
@@ -550,6 +552,9 @@ export class MemoryPipelineStore implements PipelineStore {
 
   async saveGapReport(report: GapReport): Promise<void> {
     this.gapReports.push(report);
+  }
+  async gapReportsSince(trooth_id: string, since: string): Promise<{ kind: string; ran_at: string }[]> {
+    return this.gapReports.filter((r) => r.trooth_id === trooth_id && r.ran_at >= since).map((r) => ({ kind: r.kind, ran_at: r.ran_at }));
   }
   async getBasic(trooth_id: string): Promise<BasicCompany | null> {
     return this.basics.get(trooth_id) ?? null;

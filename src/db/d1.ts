@@ -902,6 +902,11 @@ export class D1PipelineStore implements PipelineStore {
       .run();
   }
 
+  async gapReportsSince(trooth_id: string, since: string): Promise<{ kind: string; ran_at: string }[]> {
+    const { results } = await this.db.prepare(`SELECT kind, ran_at FROM semanto_gap_reports WHERE trooth_id = ?1 AND ran_at >= ?2 ORDER BY ran_at`).bind(trooth_id, since).all<{ kind: string; ran_at: string }>();
+    return results;
+  }
+
   async latestGapReport(trooth_id: string): Promise<GapReport | null> {
     const r = await this.db.prepare(`SELECT report_json FROM semanto_gap_reports WHERE trooth_id = ?1 ORDER BY ran_at DESC LIMIT 1`).bind(trooth_id).first<{ report_json: string }>();
     return r ? (JSON.parse(r.report_json) as GapReport) : null;

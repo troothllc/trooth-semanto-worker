@@ -872,7 +872,11 @@ describe("4. signing paths, keys and the workspace actions", () => {
     const r = await post(w, "/acme/gap-report", { queue: true });
     expect(r.status).toBe(202);
     expect((await json(r)).object).toBe("semanto.gap_report_queued");
-    expect(w.queued).toEqual([{ kind: "companies", job: "gap", trooth_ids: ["acme"] }]);
+    const queued_at = w.clock.now.toISOString();
+    expect(w.queued).toEqual([{ kind: "companies", job: "gap", trooth_ids: ["acme"], started_at: queued_at }]);
+    // A second click while the first report still waits in the queue is refused, and queues nothing.
+    expect((await post(w, "/acme/gap-report", { queue: true })).status).toBe(409);
+    expect(w.queued).toHaveLength(1);
     await drain(w);
     expect(w.store.gapReports.length).toBeGreaterThan(0);
     const again = await post(w, "/acme/gap-report", { queue: true });
@@ -880,6 +884,34 @@ describe("4. signing paths, keys and the workspace actions", () => {
     expect(w.queued).toEqual([]);
     w.clock.now = new Date(w.clock.now.getTime() + 10 * 60 * 1000 + 1);
     expect((await post(w, "/acme/gap-report", { queue: true })).status).toBe(202);
+  });
+
+  it("a retried gap message asks nothing twice, a day allows six reports, and one report asks at most forty questions", async () => {
+    const w = await world({ queue: true });
+    await post(w, "/acme/build", {});
+    await drain(w);
+    // Retry: the same run start finds the kind already reported and asks nothing again.
+    const started_at = w.clock.now.toISOString();
+    await w.pipeline.gapReportsFor(["acme"], started_at);
+    const after = w.store.gapReports.length;
+    expect(after).toBeGreaterThan(0);
+    await w.pipeline.gapReportsFor(["acme"], started_at);
+    expect(w.store.gapReports).toHaveLength(after);
+    // The daily cap: six reports in the last 24 hours, the last more than ten minutes ago, still refuses Ask now.
+    const base = w.store.gapReports[0]!;
+    for (let i = 0; i < 6; i++) await w.store.saveGapReport({ ...base, id: `cap-${i}`, ran_at: new Date(w.clock.now.getTime() - (20 + i) * 60_000).toISOString() });
+    w.clock.now = new Date(w.clock.now.getTime() + 11 * 60_000);
+    const capped = await post(w, "/acme/gap-report", { queue: true });
+    expect(capped.status).toBe(409);
+    expect((await json(capped)).detail).toContain("last 24 hours");
+    // The question cap: fifty of the owner's own questions, and the report asks forty in all.
+    const config = await w.store.getConfig("acme");
+    await w.store.putConfig("acme", { ...config, gap: { ...config.gap, questions: Array.from({ length: 50 }, (_, i) => `Question ${i + 1} about Acme?`) } });
+    const r = await post(w, "/acme/gap-report", { kind: "b2b" });
+    expect(r.status).toBe(200);
+    const { report } = await json(r);
+    for (const p of report.providers) if (p.configured) expect(p.questions_asked).toBeLessThanOrEqual(40);
+    expect(report.providers.some((p: any) => p.questions_asked === 40)).toBe(true);
   });
 });
 

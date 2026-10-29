@@ -58,7 +58,7 @@ import { LogDO, durableLogAppender, type LogNamespace } from "./ledger/log-do";
 import { dohResolver } from "./core/ssrf";
 import { guardedFetchPort, guardedGet, resendEmailPort } from "./monitor/ports";
 import { dohSetupDns } from "./setup/ports";
-import { allAdapters } from "./gap/providers";
+import { GAP_ASK_TIMEOUT_MS, liveAdapters } from "./gap/providers";
 import { Pipeline, ReaderReceipts, forwardingFromStore, troothOsAuthorize, troothOsSession, webBotAuthReaders, withCompanies } from "./pipeline";
 import { D1OsStore } from "./db/os-d1";
 import { DEFAULT_GOOGLE_REDIRECT_URI, OsService, platformOutbound } from "./os/service";
@@ -160,7 +160,11 @@ export function wire(env: Env): Wired {
     staging: new D1BuildStaging(env.DB, env.STORE),
     receiptStore,
     ...(env.TSA_URL ? { tsa: { url: env.TSA_URL, fetch: platformFetch() } } : {}),
-    gapAdapters: () => allAdapters(env, (url, init) => fetch(url, init), env.SERPAPI_API_KEY ? serpApiPort(env.SERPAPI_API_KEY, (url, init) => fetch(url, init)) : undefined),
+    // Paused assistants (src/gap/providers.ts PAUSED_PROVIDERS) are left out of customer reports; each request is cut off after GAP_ASK_TIMEOUT_MS.
+    gapAdapters: () => {
+      const timed = (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => fetch(url, { ...init, signal: AbortSignal.timeout(GAP_ASK_TIMEOUT_MS) });
+      return liveAdapters(env, timed, env.SERPAPI_API_KEY ? serpApiPort(env.SERPAPI_API_KEY, timed) : undefined);
+    },
     ...(env.COMPILE_QUEUE ? { enqueue: async (job: QueueMessage) => void (await env.COMPILE_QUEUE!.send(job)) } : {}),
     // Production never runs a build inside a request: without the queue, a build is refused.
     inlineBuilds: env.ENVIRONMENT !== "production",

@@ -884,7 +884,7 @@ describe("findings 10 to 18 (medium)", () => {
     expect(await readCapped(new Request("https://x/", { method: "POST", body: "12345" }), 4)).toBeNull();
   });
 
-  it("finding 12: the hourly and weekly crons queue one message per 25 companies instead of looping", async () => {
+  it("finding 12: the hourly cron queues one message per 25 companies; the weekly gap cron one per company, with the run's start", async () => {
     const companies = Array.from({ length: 60 }, (_, i) => ({ trooth_id: `co${i}`, proven: true }));
     const w = await world({ queue: true, companies });
     for (const c of companies) {
@@ -896,11 +896,8 @@ describe("findings 10 to 18 (medium)", () => {
     expect(w.site.log).toHaveLength(0);
     w.queued.length = 0;
     await w.pipeline.weeklyGapReports();
-    expect(w.queued).toEqual([
-      { kind: "companies", job: "gap", trooth_ids: companies.slice(0, 25).map((c) => c.trooth_id) },
-      { kind: "companies", job: "gap", trooth_ids: companies.slice(25, 50).map((c) => c.trooth_id) },
-      { kind: "companies", job: "gap", trooth_ids: companies.slice(50).map((c) => c.trooth_id) },
-    ]);
+    // A report asks every question of every assistant, so a gap message carries one company (2026-10-29).
+    expect(w.queued).toEqual(companies.map((c) => ({ kind: "companies", job: "gap", trooth_ids: [c.trooth_id], started_at: w.clock.now.toISOString() })));
   });
 
   it("finding 13: basic/prove never compiles inside the request; it records the proof and queues the read", async () => {
