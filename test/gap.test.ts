@@ -11,7 +11,7 @@ import { questionsFor, allQuestions, coveredKeys, KEY_CATALOG, keyInfo, QUESTION
 import {
   parseOpenAiResponse, parseAnthropicResponse, parseGeminiResponse, parsePerplexityResponse,
   buildOpenAiRequest, buildAnthropicRequest, buildGeminiRequest, buildPerplexityRequest,
-  httpAdapter, serpAdapter, allAdapters, liveAdapters, withDeadline, PAUSED_PROVIDERS, providerMessage, retryDelayMs, isAnswer, isNotConfigured, isProviderError, MODELS, PROVIDERS, type ProviderAnswer,
+  httpAdapter, serpAdapter, allAdapters, liveAdapters, withDeadline, PAUSED_PROVIDERS, providerMessage, retryDelayMs, durationMs, USER_PROMPT_PREFIX, isAnswer, isNotConfigured, isProviderError, MODELS, PROVIDERS, type ProviderAnswer,
 } from "@/gap/providers";
 import type { FetchPort, SerpPort, SerpAnswer, SerpEngine } from "@/gap/ports";
 import { compareAnswer, citationNote, normalizeHours, extractMoney, type CompareContext } from "@/gap/compare";
@@ -78,7 +78,7 @@ describe("gap provider adapters", () => {
   it("builds the documented request shapes with the model constants", () => {
     const o = buildOpenAiRequest("q", "k1");
     expect(o.url).toBe("https://api.openai.com/v1/chat/completions");
-    expect(JSON.parse(o.init.body)).toMatchObject({ model: MODELS.openai, web_search_options: {} });
+    expect(JSON.parse(o.init.body)).toMatchObject({ model: MODELS.openai, web_search_options: { search_context_size: "low" } });
     expect(o.init.headers.authorization).toBe("Bearer k1");
     const a = buildAnthropicRequest("q", "k2");
     expect(a.init.headers["x-api-key"]).toBe("k2");
@@ -86,8 +86,10 @@ describe("gap provider adapters", () => {
     const g = buildGeminiRequest("q", "k3");
     expect(g.url).toContain(`/models/${MODELS.gemini}:generateContent`);
     expect(JSON.parse(g.init.body).tools[0]).toEqual({ google_search: {} });
+    // Sonar Chat Completions ended 2026-09-27: the Agent API at /v1/agent, "fast" effort, the question as input.
     const p = buildPerplexityRequest("q", "k4");
-    expect(JSON.parse(p.init.body).model).toBe("sonar");
+    expect(p.url).toBe("https://api.perplexity.ai/v1/agent");
+    expect(JSON.parse(p.init.body)).toEqual({ effort: "fast", input: `${USER_PROMPT_PREFIX}q` });
   });
   it("parses the OpenAI fixture: text and url_citation annotations", () => {
     const r = parseOpenAiResponse(fixture("openai.fixture.json"));
@@ -104,6 +106,12 @@ describe("gap provider adapters", () => {
     const r = parseGeminiResponse(fixture("gemini.fixture.json"));
     expect(r.answer_text).toBe("Acme Inc holds a SOC 2 Type II report, renewed every year.");
     expect(r.citations.map((c) => c.url)).toEqual(["https://example-reviews.test/acme", "https://example-directory.test/acme-inc"]);
+  });
+  it("parses the Perplexity Agent API answer: output_text parts and search_results items", () => {
+    const r = parsePerplexityResponse(fixture("perplexity-agent.fixture.json"));
+    expect(r.answer_text).toContain("multi-factor");
+    expect(r.citations.map((c) => c.url)).toEqual(["https://example-reviews.test/acme-security", "https://example-forum.test/thread/12"]);
+    expect(r.model).toBe("perplexity/agent-fast-fixture");
   });
   it("parses the Perplexity fixture: content, search_results and citations, deduplicated", () => {
     const r = parsePerplexityResponse(fixture("perplexity.fixture.json"));
@@ -132,7 +140,7 @@ describe("gap provider adapters", () => {
       expect(r.asked_at).toBe("2026-10-20T09:00:00.000Z");
       expect(r.citations.length).toBe(2);
     }
-    const failing: FetchPort = async () => ({ status: 429, headers: { get: () => null }, text: async () => "slow down" });
+    const failing: FetchPort = async () => ({ status: 500, headers: { get: () => null }, text: async () => "server error" });
     const e = await httpAdapter("perplexity", { PERPLEXITY_API_KEY: "k" }, failing).ask("q");
     expect(isProviderError(e)).toBe(true);
   });
@@ -194,6 +202,29 @@ describe("gap adapters: deadlines and paused assistants", () => {
     // The report keeps the first reason per assistant.
     const report = await runGapReport({ trooth_id: "acme-inc", company: "Acme Inc", kind: "b2b", ran_at: "2026-10-29T21:00:00Z", questions: allQuestions(PARAMS).filter((x) => x.kind === "b2b").slice(0, 2), adapters: [httpAdapter("openai", { OPENAI_API_KEY: "k" }, denied)], context: await ctx() });
     expect(report.providers[0]).toMatchObject({ provider: "openai", errors: 2, last_error: expect.stringContaining("401") });
+  });
+  it("OpenAI is asked one question at a time, a key is read without surrounding spaces, and reset times parse", async () => {
+    let open = 0;
+    let most = 0;
+    const seen: string[] = [];
+    const slow: FetchPort = async (_url, init) => {
+      open++;
+      most = Math.max(most, open);
+      seen.push(init.headers.authorization ?? "");
+      await new Promise((r) => setTimeout(r, 5));
+      open--;
+      return { status: 200, headers: { get: () => null }, text: async () => JSON.stringify(fixture("openai.fixture.json")) };
+    };
+    const a = httpAdapter("openai", { OPENAI_API_KEY: "  k-openai \n" }, slow);
+    await Promise.all([a.ask("q1"), a.ask("q2"), a.ask("q3")]);
+    expect(most).toBe(1);
+    expect(seen).toEqual(["Bearer k-openai", "Bearer k-openai", "Bearer k-openai"]);
+    expect(durationMs("28ms")).toBe(28);
+    expect(durationMs("1.5s")).toBe(1500);
+    expect(durationMs("6m0s")).toBe(360_000);
+    expect(durationMs("soon")).toBeNull();
+    expect(retryDelayMs(null, 0, "28ms")).toBe(250);
+    expect(retryDelayMs(null, 0, "1.5s")).toBe(1500);
   });
   it("withDeadline passes a prompt answer through untouched", async () => {
     expect(await withDeadline(Promise.resolve(7), 1000)).toBe(7);

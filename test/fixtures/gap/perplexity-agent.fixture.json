@@ -1,0 +1,15 @@
+{
+  "id": "resp_fixture",
+  "created_at": 1784292159,
+  "model": "perplexity/agent-fast-fixture",
+  "object": "response",
+  "output": [
+    { "type": "search_results", "results": [
+      { "id": 1, "snippet": "Acme supports authenticator apps.", "title": "Acme security review", "url": "https://example-reviews.test/acme-security", "source": "web" },
+      { "id": 2, "snippet": "A thread about Acme.", "title": "Forum thread", "url": "https://example-forum.test/thread/12", "source": "web" }
+    ] },
+    { "id": "msg_fixture", "type": "message", "role": "assistant", "status": "completed",
+      "content": [{ "type": "output_text", "text": "Yes, Acme supports multi-factor authentication through authenticator apps.[1]", "annotations": [] }] }
+  ],
+  "status": "completed"
+}

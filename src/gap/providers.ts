@@ -46,14 +46,16 @@ export const MODELS = {
   openai: "gpt-5-search-api",
   anthropic: "claude-sonnet-5-5",
   gemini: "gemini-3.8-flash",
-  perplexity: "sonar",
+  // 2026-10-29: Sonar Chat Completions support ended on 2026-09-27 (the API answers 403); the Agent API's "fast" effort
+  // is Perplexity's mapping for Sonar (docs.perplexity.ai/docs/agent-api/migrate-from-sonar/overview).
+  perplexity: "fast",
 } as const;
 
 export const ENDPOINTS = {
   openai: "https://api.openai.com/v1/chat/completions",
   anthropic: "https://api.anthropic.com/v1/messages",
   gemini: (model: string) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-  perplexity: "https://api.perplexity.ai/chat/completions",
+  perplexity: "https://api.perplexity.ai/v1/agent",
 } as const;
 
 export const ANTHROPIC_VERSION = "2023-06-01";
@@ -144,7 +146,9 @@ export function buildOpenAiRequest(question: string, key: string): BuiltRequest 
       headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
       body: JSON.stringify({
         model: MODELS.openai,
-        web_search_options: {},
+        // "low" keeps each answer's search context small: a new account's tokens-per-minute limit (45,000 on
+        // 2026-10-29) was spent by two questions at the default size.
+        web_search_options: { search_context_size: "low" },
         messages: [{ role: "user", content: USER_PROMPT_PREFIX + question }],
       }),
     },
@@ -236,17 +240,31 @@ export function buildPerplexityRequest(question: string, key: string): BuiltRequ
     init: {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model: MODELS.perplexity, messages: [{ role: "user", content: USER_PROMPT_PREFIX + question }] }),
+      body: JSON.stringify({ effort: MODELS.perplexity, input: USER_PROMPT_PREFIX + question }),
     },
   };
 }
 
+/** The Agent API answer (output[]: search_results items and message items with output_text parts), and the older Sonar shape. */
 export function parsePerplexityResponse(json: unknown): Parsed {
-  const j = json as { model?: string; choices?: { message?: { content?: string } }[]; search_results?: { url?: string; title?: string }[]; citations?: string[] };
+  type Part = { type?: string; text?: string; annotations?: { type?: string; url?: string; title?: string }[] };
+  type Item = { type?: string; results?: { url?: string; title?: string }[]; content?: Part[] };
+  const j = json as { model?: string; output_text?: string; output?: Item[]; choices?: { message?: { content?: string } }[]; search_results?: { url?: string; title?: string }[]; citations?: string[] };
   const citations: Citation[] = [];
+  let text = "";
+  for (const item of j.output ?? []) {
+    if (item.type === "search_results") for (const r of item.results ?? []) if (r.url) citations.push({ url: r.url, ...(r.title ? { title: r.title } : {}) });
+    if (item.type === "message") {
+      for (const part of item.content ?? []) {
+        if (part.type === "output_text" && part.text) text += part.text;
+        for (const a of part.annotations ?? []) if (a.url) citations.push({ url: a.url, ...(a.title ? { title: a.title } : {}) });
+      }
+    }
+  }
   for (const r of j.search_results ?? []) if (r.url) citations.push({ url: r.url, ...(r.title ? { title: r.title } : {}) });
   for (const u of j.citations ?? []) citations.push({ url: u });
-  return { answer_text: j.choices?.[0]?.message?.content ?? "", citations: dedupe(citations), model: j.model ?? MODELS.perplexity };
+  const answer = text || (typeof j.output_text === "string" ? j.output_text : "") || j.choices?.[0]?.message?.content || "";
+  return { answer_text: answer, citations: dedupe(citations), model: j.model ?? `perplexity-agent:${MODELS.perplexity}` };
 }
 
 // ------------------------------------------------------------------ adapters
@@ -286,13 +304,23 @@ export function liveAdapters(keys: ProviderKeys, fetchPort: FetchPort, serp?: Se
 }
 
 const RETRY_STATUSES = new Set([429, 503, 529]);
-const RETRIES = 2;
+/** Asked one question at a time (OpenAI's search model: 45,000 tokens a minute on a new account, 2026-10-29). */
+const ONE_AT_A_TIME: ReadonlySet<HttpProvider> = new Set<HttpProvider>(["openai"]);
+const RETRIES = 4;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Retry-After in seconds (capped at 10), else 2 s then 4 s. */
-export function retryDelayMs(retryAfter: string | null, attempt: number): number {
-  const s = retryAfter !== null && /^\d+$/.test(retryAfter.trim()) ? Number(retryAfter.trim()) : NaN;
-  return Math.min(Number.isFinite(s) ? s * 1000 : 2000 * 2 ** attempt, 10_000);
+/** A reset time as OpenAI writes it ("28ms", "1.5s", "6m0s"), in milliseconds. */
+export function durationMs(v: string | null): number | null {
+  if (!v) return null;
+  const m = /^(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?(?:(\d+)ms)?$/.exec(v.trim());
+  if (!m || (!m[1] && !m[2] && !m[3])) return null;
+  return Number(m[1] ?? 0) * 60_000 + Number(m[2] ?? 0) * 1000 + Number(m[3] ?? 0);
+}
+
+/** Retry-After in seconds, else the tokens or requests reset time, else 2 s doubling; never under 250 ms or over 10 s. */
+export function retryDelayMs(retryAfter: string | null, attempt: number, reset: string | null = null): number {
+  const s = retryAfter !== null && /^\d+$/.test(retryAfter.trim()) ? Number(retryAfter.trim()) * 1000 : durationMs(reset);
+  return Math.max(250, Math.min(s ?? 2000 * 2 ** attempt, 10_000));
 }
 
 /** The provider's own error message ({ error: { message } } or { error: "a message" }), one line, at most 200 characters. */
@@ -311,12 +339,24 @@ export function providerMessage(bodyText: string): string | null {
 
 export function httpAdapter(provider: HttpProvider, keys: ProviderKeys, fetchPort: FetchPort, timeoutMs = GAP_ASK_TIMEOUT_MS): ProviderAdapter {
   const spec = HTTP[provider];
-  const key = keys[spec.keyName];
+  // A key pasted with a space or a line break around it is read without them.
+  const key = keys[spec.keyName]?.trim();
   const missing = () => (key ? null : `${spec.keyName} is not set`);
+  // Providers with a tight tokens-per-minute limit are asked one question at a time; the deadline starts when the turn comes.
+  let turn: Promise<unknown> = Promise.resolve();
+  const oneAtATime = ONE_AT_A_TIME.has(provider);
   return {
     provider,
     missing,
-    async ask(question, opts) {
+    ask(question, opts) {
+      if (!oneAtATime) return askNow(question, opts);
+      const mine = turn.then(() => askNow(question, opts));
+      turn = mine.catch(() => undefined);
+      return mine;
+    },
+  };
+  async function askNow(question: string, opts?: AskOptions): Promise<AskResult> {
+    {
       const why = missing();
       if (why) return { provider, configured: false, reason: why };
       const asked_at = iso(opts);
@@ -331,7 +371,7 @@ export function httpAdapter(provider: HttpProvider, keys: ProviderKeys, fetchPor
               const r = await fetchPort(req.url, req.init);
               const text = await r.text();
               if (!RETRY_STATUSES.has(r.status) || attempt >= RETRIES) return { res: r, bodyText: text };
-              await sleep(retryDelayMs(r.headers.get("retry-after"), attempt));
+              await sleep(retryDelayMs(r.headers.get("retry-after"), attempt, r.headers.get("x-ratelimit-reset-tokens") ?? r.headers.get("x-ratelimit-reset-requests")));
             }
           })(),
           timeoutMs,
@@ -351,8 +391,8 @@ export function httpAdapter(provider: HttpProvider, keys: ProviderKeys, fetchPor
       }
       const parsed = spec.parse(json);
       return { provider, model: parsed.model, answer_text: parsed.answer_text, citations: parsed.citations, asked_at, raw: json };
-    },
-  };
+    }
+  }
 }
 
 export function serpAdapter(engine: SerpEngine, serp: SerpPort | undefined, timeoutMs = GAP_ASK_TIMEOUT_MS): ProviderAdapter {
