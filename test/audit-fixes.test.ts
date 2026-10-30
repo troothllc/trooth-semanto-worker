@@ -827,6 +827,17 @@ describe("finding 8: rate limits, receipts counted per minute, directory fetch l
     expect(digestRows.reduce((n, r) => n + (r.count ?? 1), 0)).toBe(5);
     expect((await minuteRow({ ...digestRows[0]!, read_at: "2026-10-22T12:00:42.123Z" })).read_at).toBe("2026-10-22T12:00:00.000Z");
   });
+  it("prunes D1 receipts older than the cutoff, at most the limit per run", async () => {
+    const d1 = new FixtureD1();
+    const store = new D1ReceiptStore(d1.asD1());
+    const base = { trooth_id: "acme", version: 1, page_id: null, representation: "markdown" as const, agent_key_url: null, keyid: null, proof: "none" as const, ip_hash: "0".repeat(64), count: 1 };
+    await store.put({ ...base, id: "smd_a", read_at: "2026-08-01T00:00:00.000Z" });
+    await store.put({ ...base, id: "smd_b", read_at: "2026-08-02T00:00:00.000Z" });
+    await store.put({ ...base, id: "smd_c", read_at: "2026-10-20T00:00:00.000Z" });
+    expect(await store.prune("2026-09-22T00:00:00.000Z", 1)).toBe(1);
+    expect(await store.prune("2026-09-22T00:00:00.000Z", 10)).toBe(1);
+    expect((d1.db.prepare("SELECT id FROM semanto_read_receipts").all() as { id: string }[]).map((r) => r.id)).toEqual(["smd_c"]);
+  });
 
   it("does not fetch a Web Bot Auth key directory past the per-origin or per-client limit", async () => {
     const agent = await generateKeyPair();

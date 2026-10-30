@@ -7,7 +7,8 @@
 // shown: the receipt keeps a salted hash whose salt rotates every UTC day, so
 // two reads on one day from one address correlate and reads on different days
 // do not (the daily-rotating-salt practice of privacy-preserving analytics,
-// as Plausible and Fathom document it). A signed daily digest per company
+// as Plausible and Fathom document it). Receipts are kept 30 days
+// (RECEIPT_RETENTION_DAYS) and the CSV export leaves the hash out. A signed daily digest per company
 // (JWS typ readReceipt) gives the company a statement it can hand to anyone.
 //
 // The dashboard names a reader only when proof is web_bot_auth, and then by
@@ -109,6 +110,11 @@ export interface DailyDigest {
 
 export const DIGEST_VALIDITY_MS = 2 * 365 * 24 * 60 * 60 * 1000;
 
+/** Each receipt is kept 30 days; the nightly job deletes older ones. A day's signed digest can be asked for while its receipts are kept. */
+export const RECEIPT_RETENTION_DAYS = 30;
+/** Rows deleted per nightly run, so one run stays inside a Worker's limits; a backlog clears over a few nights. */
+export const RECEIPT_PRUNE_LIMIT = 50_000;
+
 export function dayBounds(day: string): { from: string; to: string } {
   const start = new Date(`${day}T00:00:00.000Z`);
   if (Number.isNaN(start.getTime())) throw new Error("dayBounds: day must be YYYY-MM-DD");
@@ -198,7 +204,8 @@ export function dashboardRows(receipts: Receipt[], known?: Record<string, string
 
 // ---------------------------------------------------------------- CSV export
 
-export const CSV_COLUMNS = ["id", "trooth_id", "version", "page_id", "representation", "agent_key_url", "keyid", "proof", "read_at", "ip_hash", "count"] as const;
+/** The export carries no address hash: a hash that links reads within a day is Trooth's to keep, not to hand out. */
+export const CSV_COLUMNS = ["id", "trooth_id", "version", "page_id", "representation", "agent_key_url", "keyid", "proof", "read_at", "count"] as const;
 
 function csvCell(v: unknown): string {
   if (v === null || v === undefined) return "";
@@ -208,7 +215,7 @@ function csvCell(v: unknown): string {
   return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
-/** RFC 4180 CSV, one row per receipt, CRLF line ends, a header row. The ip_hash column is the salted hash, never an address. */
+/** RFC 4180 CSV, one row per receipt, CRLF line ends, a header row. No address and no address hash. */
 export function receiptsCsv(receipts: Receipt[]): string {
   const lines = [CSV_COLUMNS.join(",")];
   for (const r of receipts) lines.push(CSV_COLUMNS.map((c) => csvCell(c === "count" ? (r.count ?? 1) : r[c])).join(","));

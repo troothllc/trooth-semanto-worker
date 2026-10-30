@@ -12,7 +12,7 @@ import { signMessage, contentDigest } from "@/core/httpsig";
 import { verifyJws, JWS_TYPES } from "@/core/jws";
 import { MemoryHttp, MemoryKeyCache, MemoryNonceStore, MemoryReceiptStore } from "@/readers/ports";
 import { verifyWebBotAuth, parseSignatureAgent, directoryUrl, directoryDisplayName, fetchDirectory, DIRECTORY_PATH, type WebBotAuthDeps } from "@/readers/webbotauth";
-import { makeReceipt, recordRead, hashIp, ipHashSalt, utcDay, signDailyDigest, verifyDailyDigest, summarize, dashboardRows, receiptsCsv, type Receipt } from "@/readers/receipts";
+import { makeReceipt, recordRead, hashIp, ipHashSalt, utcDay, signDailyDigest, verifyDailyDigest, summarize, dashboardRows, receiptsCsv, RECEIPT_RETENTION_DAYS, type Receipt } from "@/readers/receipts";
 
 const NOW_S = 1_792_000_000; // a fixed unix time
 const AGENT = "https://agent.fixtureagent.com";
@@ -222,14 +222,27 @@ describe("read receipts", () => {
     expect(JSON.stringify(view)).not.toMatch(/203\.0\.113|198\.51\.100/);
   });
 
-  it("exports CSV with one row per receipt and the hash column, never an address", async () => {
+  it("exports CSV with one row per receipt, never an address and never the address hash", async () => {
     const rows = await sample();
     const csv = receiptsCsv(rows);
     const lines = csv.split("\r\n").filter(Boolean);
-    expect(lines[0]).toBe("id,trooth_id,version,page_id,representation,agent_key_url,keyid,proof,read_at,ip_hash,count");
+    expect(lines[0]).toBe("id,trooth_id,version,page_id,representation,agent_key_url,keyid,proof,read_at,count");
     expect(lines.length).toBe(1 + rows.length);
-    expect(lines[1]).toMatch(/^smd_[a-z2-7]{26},acme,3,smp_aaaaaaaaaaaaaaaaaaaaaaaaaa,markdown,https:\/\/agent\.example\/,k1,web_bot_auth,2026-10-22T10:00:00\.000Z,[0-9a-f]{64},1$/);
+    expect(lines[1]).toMatch(/^smd_[a-z2-7]{26},acme,3,smp_aaaaaaaaaaaaaaaaaaaaaaaaaa,markdown,https:\/\/agent\.example\/,k1,web_bot_auth,2026-10-22T10:00:00\.000Z,1$/);
     expect(csv).not.toMatch(/203\.0\.113|198\.51\.100/);
+    for (const r of rows) expect(csv).not.toContain(r.ip_hash);
     expect(receiptsCsv([{ ...rows[0]!, keyid: '=cmd|"x"' }])).toContain("\"'=cmd|\"\"x\"\"\"");
+  });
+
+  it("keeps receipts 30 days: prune deletes older rows, at most the limit, and keeps the rest", async () => {
+    const store = new MemoryReceiptStore();
+    const old = { ...(await sample())[0]!, id: "smd_old", read_at: "2026-09-01T00:00:00.000Z" };
+    const older = { ...old, id: "smd_older", read_at: "2026-08-01T00:00:00.000Z" };
+    const fresh = { ...old, id: "smd_fresh", read_at: "2026-10-20T00:00:00.000Z" };
+    for (const r of [old, older, fresh]) await store.put(r);
+    expect(RECEIPT_RETENTION_DAYS).toBe(30);
+    expect(await store.prune("2026-09-22T00:00:00.000Z", 1)).toBe(1);
+    expect(await store.prune("2026-09-22T00:00:00.000Z", 10)).toBe(1);
+    expect(store.rows.map((r) => r.id)).toEqual(["smd_fresh"]);
   });
 });

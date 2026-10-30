@@ -14,7 +14,7 @@ Three rules apply everywhere:
 
 ## Reads and read receipts
 
-Source: `semanto_read_receipts` (`src/readers/receipts.ts`), one row per answered request for a page, the facts file, the llms files, the sitemap or the whole file. The row holds the `smd_` id, `trooth_id`, `version`, `page_id`, `representation`, `agent_key_url`, `keyid`, `proof` (`web_bot_auth` or `none`), `read_at`, and `ip_hash` (a salted daily hash, never an address). A read is recorded when the response status is 200 or 304. Problems (4xx, 5xx) are not reads.
+Source: `semanto_read_receipts` (`src/readers/receipts.ts`), one row per answered request for a page, the facts file, the llms files, the sitemap or the whole file. The row holds the `smd_` id, `trooth_id`, `version`, `page_id`, `representation`, `agent_key_url`, `keyid`, `proof` (`web_bot_auth` or `none`), `read_at`, and `ip_hash` (a salted daily hash, never an address). A read is recorded when the response status is 200 or 304. Problems (4xx, 5xx) are not reads. Rows are kept 30 days; the nightly job deletes older ones, up to 50,000 a night. A receipt that fails to write is counted and logged as `receipt_write_failed`, once a minute per isolate, with how many were lost.
 
 | Number | How it is counted |
 | --- | --- |
@@ -27,7 +27,7 @@ Source: `semanto_read_receipts` (`src/readers/receipts.ts`), one row per answere
 | Pages read | Distinct `page_id` among the rows. |
 | By representation | Rows grouped by `representation` (`markdown`, `jsonld`, `json`, `llms`, `sitemap`). |
 | Daily digest | `summarize` over the day's rows: `total`, `proven`, `unproven`, `by_agent`, `by_page`, `by_representation`, and the list of receipt ids. The digest is signed by Trooth's witness key (`GET /os/semanto/{trooth_id}/receipts`) and lists the receipt ids it counted, so a count shown later can be checked against them. It is not appended to the public log. |
-| CSV | One row per receipt, RFC 4180, the columns above. The `ip_hash` column is the salted hash. |
+| CSV | One row per receipt, RFC 4180, the columns above except `ip_hash`: the export carries no address and no address hash. |
 
 Not counted anywhere: requests the adapter passed through to the host (HTML), requests answered from a CDN cache without reaching the adapter or the API (the panel says "reads Trooth answered" for this reason), and requests refused by a rate limit.
 

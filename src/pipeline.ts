@@ -59,7 +59,7 @@ import type { FetchPort as LedgerFetchPort } from "./ledger/ports";
 import { keyState, revocationLeaf, signRevocationList, type RevocationEntry } from "./ledger/revocation";
 import { type WebBotAuthDeps, type WebBotAuthResult } from "./readers/webbotauth";
 import { proveReader, type ForwardingContext, type ReaderProof } from "./readers/forwarded";
-import { dashboardRows, dayBounds, receiptsCsv, recordRead, signDailyDigest, utcDay } from "./readers/receipts";
+import { dashboardRows, dayBounds, receiptsCsv, recordRead, signDailyDigest, utcDay, RECEIPT_PRUNE_LIMIT, RECEIPT_RETENTION_DAYS } from "./readers/receipts";
 import type { NonceStore, ReceiptStore } from "./readers/ports";
 import { runMonitor, type AvailableSurfaces } from "./monitor/run";
 import { jsonLdBlocks } from "./monitor/html";
@@ -1306,7 +1306,7 @@ export class Pipeline implements WorkspaceHandlers {
   }
 
   /** Nightly: sign a tree head, anchor it with an RFC 3161 timestamp, and re-sign every revocation list (each company's and everyone's). */
-  async nightlyCheckpoint(): Promise<{ tree_head: { tree_size: number; root_hash: string } | null; timestamp: unknown; revocations: number }> {
+  async nightlyCheckpoint(): Promise<{ tree_head: { tree_size: number; root_hash: string } | null; timestamp: unknown; revocations: number; receipts_pruned: number }> {
     const size = await this.d.log.ledger.size();
     let head = null;
     let timestamp: unknown = null;
@@ -1321,7 +1321,19 @@ export class Pipeline implements WorkspaceHandlers {
     // signs every list, so the nightly job stays inside a Worker's limits at any number of companies.
     const ids = [...new Set((await this.d.store.listCompanies("all")).map((c) => c.trooth_id))];
     await this.fanOut("revocations", ids, (chunk) => this.resignRevocationsFor(chunk), REVOCATIONS_PER_MESSAGE);
-    return { tree_head: head, timestamp, revocations: entries.length };
+    return { tree_head: head, timestamp, revocations: entries.length, receipts_pruned: await this.pruneReceipts() };
+  }
+
+  /** Delete read receipts older than RECEIPT_RETENTION_DAYS. A failure is logged and left for the next night. */
+  async pruneReceipts(): Promise<number> {
+    if (!this.d.receiptStore?.prune) return 0;
+    const before = iso(new Date(this.d.now().getTime() - RECEIPT_RETENTION_DAYS * 86_400_000));
+    try {
+      return await this.d.receiptStore.prune(before, RECEIPT_PRUNE_LIMIT);
+    } catch (e) {
+      console.error(JSON.stringify({ alert: "receipt_prune_failed", error: e instanceof Error ? e.message.slice(0, 200) : "unknown" }));
+      return 0;
+    }
   }
 
   /** Re-sign the revocation lists of these companies (a queued "revocations" message, or inline without a queue). */

@@ -208,6 +208,8 @@ export interface ReceiptStore {
   put(r: ReceiptRow): Promise<void>;
   /** Receipts for a company between two ISO instants, [from, to). */
   list(troothId: string, fromIso: string, toIso: string): Promise<ReceiptRow[]>;
+  /** Delete receipts read before this instant, at most `limit` of them; returns how many went. */
+  prune?(beforeIso: string, limit: number): Promise<number>;
 }
 
 export class MemoryReceiptStore implements ReceiptStore {
@@ -217,6 +219,16 @@ export class MemoryReceiptStore implements ReceiptStore {
   }
   async list(troothId: string, fromIso: string, toIso: string): Promise<ReceiptRow[]> {
     return this.rows.filter((r) => r.trooth_id === troothId && r.read_at >= fromIso && r.read_at < toIso);
+  }
+  async prune(beforeIso: string, limit: number): Promise<number> {
+    let n = 0;
+    for (let i = this.rows.length - 1; i >= 0 && n < limit; i--) {
+      if (this.rows[i]!.read_at < beforeIso) {
+        this.rows.splice(i, 1);
+        n++;
+      }
+    }
+    return n;
   }
 }
 
@@ -249,5 +261,9 @@ export class D1ReceiptStore implements ReceiptStore {
       .bind(troothId, fromIso, toIso)
       .all<ReceiptRow>();
     return res.results;
+  }
+  async prune(beforeIso: string, limit: number): Promise<number> {
+    const res = await this.db.prepare("DELETE FROM semanto_read_receipts WHERE id IN (SELECT id FROM semanto_read_receipts WHERE read_at < ?1 LIMIT ?2)").bind(beforeIso, limit).run();
+    return res.meta?.changes ?? 0;
   }
 }
