@@ -11,6 +11,7 @@
 // listed as failed with the reason. This is the handler behind
 // POST /os/semanto/{trooth_id}/monitor/run; the route itself is not here.
 
+import { parity, type ParityResult } from "./parity";
 import { alertsFrom, applyDailyCap, dedupeAlerts, resolvedAlerts, sendAlertEmail, startOfDay, surfaceWords, fieldWords, DEFAULT_DAILY_CAP } from "./alerts";
 import { buildRun, compareAll, countBySeverity } from "./consistency";
 import { indexabilityReport, type IndexabilityOptions } from "./indexability";
@@ -58,6 +59,8 @@ export interface RunSummary {
   fixes: Fix[];
   pages: { checked: number; eligible: number; not_eligible: number; jsonld_present: number };
   alerts: { raised: number; duplicates: number; held_by_cap: number; resolved: number; emailed: boolean; email_error: string | null };
+  /** Signed facts found word for word on their live pages (src/monitor/parity.ts); null when live pages were not read. */
+  parity: ParityResult | null;
 }
 
 export async function runMonitor(input: RunInput, ports: MonitorPorts): Promise<{ run: MonitorRun; summary: RunSummary; alerts: Alert[] }> {
@@ -148,6 +151,7 @@ export async function runMonitor(input: RunInput, ports: MonitorPorts): Promise<
     fixes: fixesFrom(mismatches, record),
     pages: { checked: indexability.totals.pages, eligible: indexability.totals.eligible, not_eligible: indexability.totals.not_eligible, jsonld_present: indexability.totals.jsonld_present },
     alerts: { raised: toRaise.length, duplicates: duplicates.length, held_by_cap: held.length, resolved: resolved.length, emailed, email_error: emailError },
+    parity: input.surfaces.live_pages !== false ? parity(record.facts, liveByUrl) : null,
   };
   return { run, summary, alerts: toRaise };
 }

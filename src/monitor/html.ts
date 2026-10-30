@@ -124,8 +124,47 @@ export function canonical(html: string): string | null {
   return null;
 }
 
+/** True for an element people cannot see: the hidden attribute, aria-hidden="true", or display:none or visibility:hidden inline. */
+function hiddenByAttrs(raw: string): boolean {
+  const a = attrs(raw);
+  if ("hidden" in a) return true;
+  if ((a["aria-hidden"] ?? "").toLowerCase() === "true") return true;
+  const style = (a.style ?? "").toLowerCase().replace(/\s+/g, "");
+  return style.includes("display:none") || style.includes("visibility:hidden");
+}
+
+/** The HTML with every hidden element and its contents removed (nested elements of the same name are counted). */
+export function withoutHidden(html: string): string {
+  const re = /<(\/?)([a-zA-Z][\w-]*)([^>]*)>/g;
+  let out = "";
+  let last = 0;
+  let hiddenTag: string | null = null;
+  let depth = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const closing = m[1] === "/";
+    const tag = m[2]!.toLowerCase();
+    const selfClosing = /\/\s*$/.test(m[3] ?? "") || VOID.has(tag);
+    if (hiddenTag === null) {
+      if (!closing && !selfClosing && hiddenByAttrs(m[3] ?? "")) {
+        out += html.slice(last, m.index);
+        hiddenTag = tag;
+        depth = 1;
+      }
+      continue;
+    }
+    if (tag !== hiddenTag || selfClosing) continue;
+    depth += closing ? -1 : 1;
+    if (depth === 0) {
+      hiddenTag = null;
+      last = m.index + m[0].length;
+    }
+  }
+  return hiddenTag === null ? out + html.slice(last) : out;
+}
+
 export function visibleText(html: string): string {
-  const noScripts = html.replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ");
+  const noScripts = withoutHidden(html.replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ").replace(/<!--[\s\S]*?-->/g, " "));
   return decodeEntities(noScripts.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
 }
 

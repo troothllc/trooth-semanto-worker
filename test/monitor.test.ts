@@ -5,6 +5,9 @@
 // (Acme Inc, acme.com) under test/fixtures/monitor. No figure here is a
 // measurement.
 
+import { parity } from "@/monitor/parity";
+import { visibleText, withoutHidden } from "@/monitor/html";
+import type { Fact } from "@/core/semanto";
 import { describe, it, expect, beforeAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { digest } from "@/core/hash";
@@ -645,5 +648,29 @@ describe("runner", () => {
     expect(out.summary.surfaces.find((s) => s.surface === "live_page")?.state).toBe("absent");
     expect(out.summary.pages.checked).toBe(5);
     expect(out.run.indexability.pages.every((p) => p.reasons.includes("not_fetched") || p.reasons.includes("noindex"))).toBe(true);
+  });
+});
+
+describe("parity: signed facts found word for word on their live pages", () => {
+  const fact = (id: string, key: string, value: Fact["value"], url = "https://acme.com/") => ({ id, key, statement: key, value, provenance: "witnessed", evidence: { url, witnessed_at: "2026-10-01T00:00:00Z" } }) as unknown as Fact;
+  const page = (text: string, status = 200) => ({ surface: "live_page", status, text }) as unknown as LivePageRead;
+  it("counts matches, names each fact not found, and keeps pages that were not read apart", () => {
+    const pages = new Map<string, LivePageRead | null>([
+      ["https://acme.com/", page("Acme Inc — call +1 (555) 010-0100. Plans from $49 a month.")],
+      ["https://acme.com/down", page("", 503)],
+    ]);
+    const r = parity(
+      [fact("f1", "identity.name", "Acme Inc"), fact("f2", "contact.phone", "+1 555 010 0100"), fact("f3", "pricing.from", "$59"), fact("f4", "x", "Open late", "https://acme.com/down"), fact("f5", "flag", true)],
+      pages,
+    );
+    expect(r).toMatchObject({ compared: 3, matches: 2, not_read: 1 });
+    expect(r.differs).toEqual([{ fact_id: "f3", key: "pricing.from", value: "$59", url: "https://acme.com/" }]);
+    expect(r.sentence).toBe("Facts that match your pages: 2 of 3. 1 fact's page was not read this time.");
+  });
+  it("leaves out text people cannot see", () => {
+    const html = '<p>Open daily</p><div hidden><p>Closed Sundays</p><div>nested</div></div><span aria-hidden="true">secret</span><p style="display: none">gone</p><p class="not-hidden">shown</p>';
+    const text = visibleText(html);
+    expect(text).toBe("Open daily shown");
+    expect(withoutHidden("<div hidden>a<div>b</div>c</div>d")).toBe("d");
   });
 });
