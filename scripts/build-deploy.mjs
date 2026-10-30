@@ -26,7 +26,7 @@ const files = {
 #
 # Built by scripts/build-deploy.mjs from adapters/cloudflare-worker. Do not edit here.
 # The Deploy to Cloudflare button asks for TROOTH_ID. After it deploys, add a route for
-# your domain in the Worker's Settings, Domains & Routes. Until TROOTH_ID is set, every
+# your domain on the Worker's Domains tab (Add Route). Until TROOTH_ID is set, every
 # request goes to your site unchanged.
 
 name = "trooth-semanto"
@@ -66,9 +66,11 @@ enabled = true
 
 A Worker on your Cloudflare zone. When an AI agent asks for a page, it answers with the signed copy Trooth holds for you. Every other request goes to your site as before. If Trooth is slow or down, your site keeps answering.
 
-1. Press **Deploy to Cloudflare** and paste your Trooth ID when asked.
-2. Open the new Worker, then **Settings**, **Domains & Routes**, **Add**, **Route**. Pick your domain, type your domain followed by \`/*\`, and press **Add route**.
+1. Press **Deploy to Cloudflare**, paste your Trooth ID into **TROOTH_ID**, leave everything else as it is, and press **Deploy**.
+2. When it finishes, open the **Domains** tab and press **Add Route**. For **Zone** pick your domain, for **Route** type your domain followed by \`/*\`, then press **Add Route**.
 3. In Trooth, press **Check my site**.
+
+If the build stops at *could not push contents of source repo to destination repo*, your GitHub organization blocks force pushes on every repository: add the **Cloudflare Workers and Pages** app to that rule's bypass list, then press **Retry build**.
 
 The full guide: https://trooth.co/docs/semanto/install/cloudflare-worker
 
