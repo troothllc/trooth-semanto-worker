@@ -31,6 +31,8 @@ const DEFAULTS = {
 // The conditional origin in the property that points at api.trooth.co.
 const API_ORIGIN = "trooth_api";
 const MANIFEST_TTL_MS = 300000;
+// The manifest call gives up after this long; the stored copy, or the path alone, answers instead.
+const MANIFEST_TIMEOUT_MS = 800;
 
 let manifestState = { manifest: null, etag: null, fetchedAt: 0 };
 
@@ -49,7 +51,7 @@ async function manifest(config) {
   const headers = { Accept: "application/json" };
   if (manifestState.etag) headers["If-None-Match"] = manifestState.etag;
   try {
-    const res = await httpRequest(apiRoot(config) + API_PATHS.manifest, { headers });
+    const res = await httpRequest(apiRoot(config) + API_PATHS.manifest, { headers, timeout: MANIFEST_TIMEOUT_MS });
     if (res.status === 304 && manifestState.manifest) {
       manifestState.fetchedAt = now;
       return manifestState.manifest;
