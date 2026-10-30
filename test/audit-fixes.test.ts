@@ -901,6 +901,17 @@ describe("findings 10 to 18 (medium)", () => {
     expect(w.queued).toEqual(companies.map((c) => ({ kind: "companies", job: "gap", trooth_ids: [c.trooth_id], started_at: w.clock.now.toISOString() })));
   });
 
+  it("ARCH-6: the nightly job re-signs revocation lists on the queue, 100 companies a message, and the consumer signs each", async () => {
+    const companies = Array.from({ length: 250 }, (_, i) => ({ trooth_id: `rv${i}`, proven: true }));
+    const w = await world({ queue: true, companies });
+    await w.pipeline.nightlyCheckpoint();
+    const revs = w.queued.filter((m) => (m as { job?: string }).job === "revocations") as { trooth_ids: string[] }[];
+    expect(revs.map((m) => m.trooth_ids.length)).toEqual([100, 100, 50]);
+    expect(w.store.revocationLists.filter((l) => l.trooth_id !== null)).toHaveLength(0);
+    for (const m of revs) await w.pipeline.jobs().compile(m);
+    expect(new Set(w.store.revocationLists.filter((l) => l.trooth_id !== null).map((l) => l.trooth_id)).size).toBe(250);
+  });
+
   it("finding 13: basic/prove never compiles inside the request; it records the proof and queues the read", async () => {
     const w = await world({ queue: true });
     await w.store.putCompany({ trooth_id: "acme", domain: "acme.com", org: "Acme Inc", tier: "basic", current_version: null, custody: "hosted", domain_proven_at: null, os_company_id: "co-acme" });

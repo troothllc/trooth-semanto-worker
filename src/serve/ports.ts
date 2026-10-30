@@ -40,7 +40,7 @@ export interface CompanyRecord {
 }
 
 /** Thrown when a route needs Trooth's witness key and the deployment has none (src/core/keys.ts); routes answer a 503 witness_key_missing problem. */
-export { WitnessKeyMissingError } from "../core/keys";
+export { CompanyKeyUnavailableError, WitnessKeyMissingError } from "../core/keys";
 
 /** True when the company proved control of its domain. */
 export function isDomainProven(c: Pick<CompanyRecord, "domain_proven_at"> | null | undefined): boolean {

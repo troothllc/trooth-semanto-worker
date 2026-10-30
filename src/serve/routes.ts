@@ -37,7 +37,7 @@ import { checkAgainstRecord, type FirstPublicationDocument, type FirstPublicatio
 import { negotiateRoute } from "./negotiate-route";
 import { buildPageProof, verifyUrl } from "./proof";
 import { factsJsonLd, manifestMarkdown, pageJsonLd, wellKnownSemanto } from "./represent";
-import { isDomainProven, WitnessKeyMissingError, WORKSPACE_ACTIONS, type CompanyRecord, type Ports, type ReceiptInput, type StoredPage, type WorkspaceAction, type WorkspaceAuth, type WorkspaceHandlers, type WorkspaceRead, type WorkspaceResult, type WorkspaceSession } from "./ports";
+import { isDomainProven, CompanyKeyUnavailableError, WitnessKeyMissingError, WORKSPACE_ACTIONS, type CompanyRecord, type Ports, type ReceiptInput, type StoredPage, type WorkspaceAction, type WorkspaceAuth, type WorkspaceHandlers, type WorkspaceRead, type WorkspaceResult, type WorkspaceSession } from "./ports";
 import { problemJson, SessionUnavailable } from "./errors";
 import { isAuthorized } from "../commerce/sellers";
 import { verifyCatalog } from "../commerce/nested";
@@ -155,10 +155,29 @@ export function createApp(deps: RouteDeps): ServeApp {
 
   // ------------------------------------------------------------ helpers
 
-  async function signerFor(company: CompanyRecord | null): Promise<Signer> {
+  const keyAlerted = new Map<string, number>();
+  /** `trooth`: the answer is Trooth's own (a workspace answer or a problem), so the witness may sign it when the company key is unavailable. */
+  async function signerFor(company: CompanyRecord | null, opts: { trooth?: boolean } = {}): Promise<Signer> {
     if (company && company.custody === "hosted") {
-      const k = await ports.keys.getCompanySigningKey(company.trooth_id);
+      // Fail closed (ARCH-10): a hosted company's content is signed with its own key or not served; never the witness key.
+      let k: Awaited<ReturnType<typeof ports.keys.getCompanySigningKey>> = null;
+      try {
+        k = await ports.keys.getCompanySigningKey(company.trooth_id);
+      } catch {
+        k = null;
+      }
       if (k) return { key: k, by: "company" };
+      // Before the first signature there is no company key and nothing published in the company's name; the
+      // workspace answers stay witness-signed. Once a version is signed, the key must be there.
+      if (company.current_version !== null && !opts.trooth) {
+        // One alert line per company per isolate every ten minutes, so an outage does not flood the logs.
+        const last = keyAlerted.get(company.trooth_id) ?? 0;
+        if (Date.now() - last > 600_000) {
+          keyAlerted.set(company.trooth_id, Date.now());
+          console.error(JSON.stringify({ alert: "company_key_unavailable", trooth_id: company.trooth_id }));
+        }
+        throw new CompanyKeyUnavailableError(company.trooth_id);
+      }
     }
     return { key: await ports.keys.getWitnessKey(), by: "witness" };
   }
@@ -271,7 +290,7 @@ export function createApp(deps: RouteDeps): ServeApp {
       version_id: file ? versionId(file.root_hash) : null,
       content_signals: settings?.content_signals ?? null,
       links: company ? links(company, file) : {},
-      signer: await signerFor(company),
+      signer: await signerFor(company, { trooth: true }),
       retry_after_seconds: p.retry_after ?? null,
     });
   }
@@ -294,6 +313,14 @@ export function createApp(deps: RouteDeps): ServeApp {
 
   app.onError(async (err, c) => {
     // No witness key: nothing can be signed, so this one answer goes out unsigned, and says why.
+    if (err instanceof CompanyKeyUnavailableError) {
+      try {
+        return await sendProblem(c, null, null, "company_key_unavailable", { retry_after: 120 });
+      } catch (e) {
+        // The witness key is missing too: answer that, unsigned, below.
+        if (e instanceof WitnessKeyMissingError) err = e;
+      }
+    }
     if (err instanceof WitnessKeyMissingError) {
       const p = problem("witness_key_missing", { instance: new URL(c.req.url).pathname });
       return new Response(problemJson(p), { status: p.status, headers: { "Content-Type": "application/problem+json", "Cache-Control": "no-store", "Retry-After": "300", "Access-Control-Allow-Origin": "*", "Access-Control-Expose-Headers": EXPOSED_HEADERS.join(", "), [REQUEST_ID_HEADER]: requestIdOf(c) } });
@@ -439,7 +466,7 @@ export function createApp(deps: RouteDeps): ServeApp {
       body: json(answer),
       version_id: file ? versionId(file.root_hash) : null,
       links: company ? links(company, file) : {},
-      signer: await signerFor(company),
+      signer: await signerFor(company, { trooth: true }),
     });
   });
 
@@ -580,7 +607,7 @@ export function createApp(deps: RouteDeps): ServeApp {
       body: json({ object: "semanto.versions", trooth_id, current: company.current_version, versions: list }),
       version_id: file ? versionId(file.root_hash) : null,
       links: links(company, file),
-      signer: await signerFor(company),
+      signer: await signerFor(company, { trooth: true }),
     });
   });
 
@@ -741,7 +768,7 @@ export function createApp(deps: RouteDeps): ServeApp {
     if (!company) return sendProblem(c, null, null, "semanto_not_found");
     const file = await ports.versions.getCurrent(trooth_id);
     const jwks = await ports.keys.getCompanyJwks(trooth_id);
-    return send(c, { status: 200, rep: "json", body: json(jwks), version_id: file ? versionId(file.root_hash) : null, links: links(company, file), signer: await signerFor(company) });
+    return send(c, { status: 200, rep: "json", body: json(jwks), version_id: file ? versionId(file.root_hash) : null, links: links(company, file), signer: await signerFor(company, { trooth: true }) });
   }
   app.get(`${apiPrefix}/:trooth_id/keys`, serveKeys);
   // The adapters fetch /keys.json and serve it as /.well-known/trooth-keys.json (adapters/shared/semanto-adapter.mjs API_PATHS.keys).
@@ -802,7 +829,7 @@ export function createApp(deps: RouteDeps): ServeApp {
     const page = file ? await ports.versions.getPageByUrl(trooth_id, `https://${company.domain}${basePath}`) : null;
     const resolution = resolveDelivery(settings, { path, accept, page_signed: Boolean(page), live: page?.live ?? "unknown" });
     const body = json({ object: "semanto.resolution", trooth_id, path, ...resolution, page_id: page?.entry.id ?? null, page_url: page ? `${base}/${trooth_id}/pages/${page.entry.id}` : null });
-    return send(c, { status: 200, rep: "json", body, version_id: file ? versionId(file.root_hash) : null, content_signals: settings.content_signals, links: links(company, file), signer: await signerFor(company) });
+    return send(c, { status: 200, rep: "json", body, version_id: file ? versionId(file.root_hash) : null, content_signals: settings.content_signals, links: links(company, file), signer: await signerFor(company, { trooth: true }) });
   });
 
   // ------------------------------------------------------------ workspace: settings (section D)
@@ -865,7 +892,7 @@ export function createApp(deps: RouteDeps): ServeApp {
     if (!company) return sendProblem(c, null, null, "semanto_not_found");
     const settings = await settingsFor(trooth_id);
     const file = await ports.versions.getCurrent(trooth_id);
-    return send(c, { status: 200, rep: "json", body: json(settings), version_id: file ? versionId(file.root_hash) : null, signer: await signerFor(company) });
+    return send(c, { status: 200, rep: "json", body: json(settings), version_id: file ? versionId(file.root_hash) : null, signer: await signerFor(company, { trooth: true }) });
   });
 
   app.post(`${osPrefix}/:trooth_id/settings`, async (c) => {
@@ -882,9 +909,9 @@ export function createApp(deps: RouteDeps): ServeApp {
     const merged = withDefaults((input ?? {}) as Partial<DeliverySettings>);
     const issues = validateSettings(merged);
     const file = await ports.versions.getCurrent(trooth_id);
-    if (issues.length) return send(c, { status: 422, rep: "json", body: json({ object: "semanto.settings_issues", issues }), version_id: file ? versionId(file.root_hash) : null, signer: await signerFor(company) });
+    if (issues.length) return send(c, { status: 422, rep: "json", body: json({ object: "semanto.settings_issues", issues }), version_id: file ? versionId(file.root_hash) : null, signer: await signerFor(company, { trooth: true }) });
     await ports.settings.put(trooth_id, merged);
-    return send(c, { status: 200, rep: "json", body: json(merged), version_id: file ? versionId(file.root_hash) : null, signer: await signerFor(company) });
+    return send(c, { status: 200, rep: "json", body: json(merged), version_id: file ? versionId(file.root_hash) : null, signer: await signerFor(company, { trooth: true }) });
   });
 
 
@@ -894,8 +921,8 @@ export function createApp(deps: RouteDeps): ServeApp {
     const company = await ports.versions.getCompany(trooth_id);
     const file = company ? await ports.versions.getCurrent(trooth_id) : null;
     if (result.problem) return sendProblem(c, company, file, result.problem.code, { detail: result.problem.detail, ...(result.problem.extensions ? { extensions: result.problem.extensions } : {}), ...(result.headers?.["Retry-After"] ? { retry_after: Number(result.headers["Retry-After"]) } : {}) });
-    if (result.raw) return send(c, { status: result.status, rep: "csv", body: utf8(result.raw.text), version_id: file ? versionId(file.root_hash) : null, signer: await signerFor(company), ...(result.headers ? { extra: result.headers } : {}) });
-    return send(c, { status: result.status, rep: "json", body: json(result.body ?? null), version_id: file ? versionId(file.root_hash) : null, links: company ? links(company, file) : {}, signer: await signerFor(company), ...(result.headers ? { extra: result.headers } : {}) });
+    if (result.raw) return send(c, { status: result.status, rep: "csv", body: utf8(result.raw.text), version_id: file ? versionId(file.root_hash) : null, signer: await signerFor(company, { trooth: true }), ...(result.headers ? { extra: result.headers } : {}) });
+    return send(c, { status: result.status, rep: "json", body: json(result.body ?? null), version_id: file ? versionId(file.root_hash) : null, links: company ? links(company, file) : {}, signer: await signerFor(company, { trooth: true }), ...(result.headers ? { extra: result.headers } : {}) });
   }
 
   /** The body as JSON, read up to 5 MB. undefined when it is not JSON; "too_large" when it is over the cap. */
@@ -993,7 +1020,7 @@ export function createApp(deps: RouteDeps): ServeApp {
     const extra: Record<string, string> = {};
     if (!isProblem && r.headers["Cache-Control"]) extra["Cache-Control"] = r.headers["Cache-Control"];
     const settings = company ? await settingsFor(trooth_id) : null;
-    return send(c, { status: out.status, rep, body: utf8(out.body), version_id: file ? versionId(file.root_hash) : null, content_signals: settings?.content_signals ?? null, links: company ? links(company, file) : {}, signer: await signerFor(company), extra });
+    return send(c, { status: out.status, rep, body: utf8(out.body), version_id: file ? versionId(file.root_hash) : null, content_signals: settings?.content_signals ?? null, links: company ? links(company, file) : {}, signer: await signerFor(company, { trooth: isProblem }), extra });
   }
 
   const commerceRoute = (path: string, handler: (store: CommerceStore, trooth_id: string, c: Context<Vars>) => Promise<CommerceResponse>) =>

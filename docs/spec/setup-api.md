@@ -333,4 +333,5 @@ The program contract of 23 October 2026 changed several of these (keys, keys/{ki
 | `passkey_cancelled` | 400 | no assertion was sent (the device step did not finish); nothing was signed |
 | `passkey_invalid` | 422 | the passkey answer does not check out (another site's passkey, no user verification, a bad signature, another version's challenge, someone else's passkey) |
 | `passkey_counter` | 422 | the passkey's sign count did not go up, which can mean it was copied; the key is not released |
+| `company_key_unavailable` | 503 | a signed company's hosted key could not be read, so nothing is served in the company's name; the witness signs this problem as Trooth's own statement and never signs the company's content instead. `Retry-After: 120`. |
 | `witness_key_missing` | 503 | this deployment has no witness key yet; routes that sign or witness answer this, the rest keep working. This answer cannot carry a signature, because the key that signs answers is the missing one. |

@@ -109,6 +109,18 @@ export function parseDnsKeyRecords(txt: string[]): string[] {
   return kids;
 }
 
+/**
+ * A hosted company's signing key could not be read (missing or unsealable). Company content is never signed with the
+ * witness key instead: the answer is a 503 company_key_unavailable problem, signed by the witness as Trooth's own
+ * statement, and an alert line goes to the Worker logs (blueprint ARCH-10, 2026-10-29).
+ */
+export class CompanyKeyUnavailableError extends Error {
+  constructor(readonly trooth_id: string) {
+    super(`The hosted signing key for ${trooth_id} could not be read.`);
+    this.name = "CompanyKeyUnavailableError";
+  }
+}
+
 /** Thrown when Trooth's witness key is needed and the deployment has none; the Worker answers a 503 problem instead of failing to start. */
 export class WitnessKeyMissingError extends Error {
   constructor() {

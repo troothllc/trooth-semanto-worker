@@ -81,7 +81,7 @@ export interface CompileJob {
 export interface CompaniesMessage {
   kind: "companies";
   /** "proof" was the hourly pending-proof sweep, retired with one signup: a message of that kind still in the queue is acknowledged and dropped. */
-  job: "changes" | "gap" | "proof";
+  job: "changes" | "gap" | "proof" | "revocations";
   trooth_ids: string[];
   /** A gap job: when the run started. A retried message skips each kind already reported since then, so it never asks twice. */
   started_at?: string;

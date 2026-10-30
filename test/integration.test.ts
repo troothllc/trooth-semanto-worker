@@ -888,6 +888,25 @@ describe("4. signing paths, keys and the workspace actions", () => {
     expect((await post(w, "/acme/gap-report", { queue: true })).status).toBe(202);
   });
 
+  it("fails closed when a signed company's hosted key cannot be read: 503 company_key_unavailable, never the witness key", async () => {
+    const w = await world();
+    await buildAndSign(w);
+    expect((await get(w, "/acme")).status).toBe(200);
+    w.versions.companies.get("acme")!.hostedKey = null;
+    const r = await get(w, "/acme");
+    expect(r.status).toBe(503);
+    expect(r.headers.get("retry-after")).toBe("120");
+    const body = await json(r);
+    expect(body.code).toBe("company_key_unavailable");
+    // The problem is Trooth's own statement, so the witness signs it; the company's file is not served at all.
+    expect(r.headers.get("trooth-semanto-version") ?? "none").not.toMatch(/^smv_/);
+    // Public keys, verify and the adapter's routing answer are Trooth's own statements: they keep answering.
+    expect((await get(w, "/acme/keys.json")).status).toBe(200);
+    expect((await get(w, "/verify?url=https%3A%2F%2Facme.com%2F")).status).not.toBe(503);
+    // The owner's workspace still answers.
+    expect((await w.app.request(`${OS}/acme/keys`, { headers: { authorization: "Bearer owner-token" } })).status).toBe(200);
+  });
+
   it("with Watch what AI says off (production), no report, competitor report, weekly job or queued message asks a provider", async () => {
     const w = await world({ queue: true });
     await post(w, "/acme/build", {});

@@ -97,6 +97,8 @@ export type { WebBotAuthResult };
 export const CONNECTOR_TAG = "trooth-connector";
 /** The crons fan out one queue message per this many companies. */
 export const COMPANIES_PER_MESSAGE = 25;
+/** Companies whose revocation lists one queue message re-signs each night (one signature and two writes each). */
+export const REVOCATIONS_PER_MESSAGE = 100;
 /** The Watch page's Ask now queues a gap report at most once in this window after the newest report. */
 export const GAP_ASK_NOW_GAP_MS = 10 * 60 * 1000;
 /** The answer while Watch what AI says is off (PipelineDeps.gapReports). */
@@ -409,6 +411,7 @@ export class Pipeline implements WorkspaceHandlers {
       const m = message as unknown as CompaniesMessage;
       if (m.job === "changes") await this.checkCompanyChanges(m.trooth_ids);
       else if (m.job === "gap" && this.d.gapReports) await this.gapReportsFor(m.trooth_ids, m.started_at);
+      else if (m.job === "revocations") await this.resignRevocationsFor(m.trooth_ids);
       // Any other job (the retired "proof" job of a message queued before one signup) is acknowledged and dropped.
       return;
     }
@@ -424,6 +427,8 @@ export class Pipeline implements WorkspaceHandlers {
   async consumeFailed(message: unknown, e: unknown): Promise<void> {
     if (isRecord(message) && this.d.consumeOsFailed && (await this.d.consumeOsFailed(message, e))) return;
     if (isRecord(message) && message.kind === "stage" && typeof message.build_id === "string") await this.failBuild(message.build_id, e);
+    // A per-company job that used every attempt (its companies' revocation lists, for one, would expire): say so in the logs.
+    if (isRecord(message) && message.kind === "companies") console.error(JSON.stringify({ alert: "companies_job_failed", job: message.job, companies: Array.isArray(message.trooth_ids) ? message.trooth_ids.length : 0, error: e instanceof Error ? e.message : String(e) }));
   }
 
   // ---------------------------------------------------------------- workspace actions
@@ -1310,8 +1315,17 @@ export class Pipeline implements WorkspaceHandlers {
     }
     const entries = await this.d.store.revocations(null);
     await this.resignRevocations(null);
-    for (const trooth_id of new Set((await this.d.store.listCompanies("all")).map((c) => c.trooth_id))) await this.resignRevocations(trooth_id);
+    // Each company's 24-hour list is re-signed on the queue, 100 companies a message (ARCH-6): one cron call no longer
+    // signs every list, so the nightly job stays inside a Worker's limits at any number of companies.
+    const ids = [...new Set((await this.d.store.listCompanies("all")).map((c) => c.trooth_id))];
+    await this.fanOut("revocations", ids, (chunk) => this.resignRevocationsFor(chunk), REVOCATIONS_PER_MESSAGE);
     return { tree_head: head, timestamp, revocations: entries.length };
+  }
+
+  /** Re-sign the revocation lists of these companies (a queued "revocations" message, or inline without a queue). */
+  async resignRevocationsFor(trooth_ids: string[]): Promise<string[]> {
+    for (const trooth_id of trooth_ids) await this.resignRevocations(trooth_id);
+    return trooth_ids;
   }
 
   /** Sign and store the revocation list for one company (or everyone with null), 24 hours valid. */

@@ -38,6 +38,7 @@ export type ProblemCode =
   | "representation_not_offered"
   | "internal_error"
   | "witness_key_missing"
+  | "company_key_unavailable"
   | "passkey_missing"
   | "passkey_challenge_expired"
   | "passkey_origin_mismatch"
@@ -365,6 +366,14 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
     terminal: true,
     what_happened: "The seller list is not signed by a key this company held when the list was issued, or the signature does not match the list. Nothing was stored.",
     what_to_do: "Sign the exact list with your current signing key (typ seller-list) and send it again.",
+  },
+  company_key_unavailable: {
+    status: 503,
+    title: "This company's signing key is not available right now",
+    retryable: true,
+    terminal: false,
+    what_happened: "Trooth holds this company's signing key and could not read it just now, so nothing was signed in the company's name. Trooth never signs a company's content with its own key instead.",
+    what_to_do: "Try again in a few minutes. Trooth has been alerted.",
   },
   witness_key_missing: {
     status: 503,
