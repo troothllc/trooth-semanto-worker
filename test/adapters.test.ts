@@ -21,6 +21,11 @@ import {
   configFromEnv,
   TROOTH_HEADERS,
   WELL_KNOWN_FILES,
+  createStaleStore,
+  createBreaker,
+  signatureExpiry,
+  DELIVERY_HEADER,
+  SIGNATURE_HEADERS,
   findPage,
   MODES,
   OFFERED,
@@ -229,7 +234,8 @@ describe("adapters/shared copyHeaders", () => {
     expect(out.has("Server")).toBe(false);
     expect(out.has("Set-Cookie")).toBe(false);
     expect(out.has("CF-Ray")).toBe(false);
-    expect(out.has("Cache-Control")).toBe(false);
+    // Cache-Control is forwarded so no cache downstream keeps a copy past its signature.
+    expect(out.get("Cache-Control")).toBe("public, max-age=60");
     expect(headerList(out)).toHaveLength(TROOTH_HEADERS.length);
     expect(TROOTH_HEADERS).toEqual(expect.arrayContaining(["Trooth-Signed-By", "Trooth-Semanto-State", "Trooth-Signed-Page-Hash"]));
   });
@@ -269,10 +275,14 @@ describe("adapters/shared manifest cache", () => {
     expect(api.calls).toHaveLength(1);
     t += 61_000;
     expect(await cache.get()).toMatchObject({ header: { version: 7 } });
+    await cache.settle();
     expect(api.calls).toHaveLength(2);
     expect(api.calls[1]!.ifNoneMatch).toBe('"v7"');
     api.bump();
     t += 61_000;
+    // The stored copy answers at once; the new version arrives in the background.
+    expect(await cache.get()).toMatchObject({ header: { version: 7 } });
+    await cache.settle();
     expect(await cache.get()).toMatchObject({ header: { version: 8 } });
     expect(api.calls).toHaveLength(3);
   });
@@ -288,6 +298,29 @@ describe("adapters/shared manifest cache", () => {
     fail = true;
     t = 5_000;
     expect(await cache.get()).toMatchObject({ header: { version: 7 } });
+  });
+  it("gives up on a slow first fetch after its deadline and answers by path", async () => {
+    const slow = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+    const cache = createManifestCache({ config, fetchImpl: slow, timeoutMs: 20 });
+    const started = Date.now();
+    expect(await cache.get()).toBeNull();
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+  it("answers from the stored copy without waiting when it is past its ttl", async () => {
+    let calls = 0;
+    let hang = false;
+    const fetchImpl = (async () => {
+      calls++;
+      if (hang) return new Promise<Response>(() => {});
+      return new Response(JSON.stringify(manifestFixture), { status: 200, headers: { ETag: '"v7"' } });
+    }) as typeof fetch;
+    let t = 0;
+    const cache = createManifestCache({ config, fetchImpl, ttlSeconds: 1, now: () => t, timeoutMs: 20 });
+    await cache.get();
+    hang = true;
+    t = 5_000;
+    expect(await cache.get()).toMatchObject({ header: { version: 7 } });
+    expect(calls).toBe(2);
   });
   it("dedupes concurrent first fetches", async () => {
     const api = fakeApi();
@@ -370,6 +403,123 @@ describe("adapters/shared handleRequest", () => {
   });
 });
 
+describe("adapters/shared fail-safe", () => {
+  const signedHeaders = (expires: number) => ({ ...apiHeaders(), "Signature-Input": `sig1=("@status" "content-digest");created=${expires - 3900};expires=${expires};keyid="fixture-kid";alg="ed25519"` });
+  const next = async (req: Request) => new Response(`<html>${new URL(req.url).pathname}</html>`, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+  const md = () => new Request("https://acme.com/pricing.md");
+  function api(expires: number) {
+    let mode: "ok" | "down" | "500" | "hang" = "ok";
+    let calls = 0;
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      calls++;
+      if (!String(input).startsWith(ROOT)) return new Response("no", { status: 404 });
+      if (mode === "down") throw new Error("unreachable");
+      if (mode === "500") return new Response("boom", { status: 503 });
+      if (mode === "hang") return new Promise<Response>(() => {});
+      return new Response("# Pricing\n", { status: 200, headers: signedHeaders(expires) });
+    }) as typeof fetch;
+    return { fetchImpl, set: (m: typeof mode) => (mode = m), calls: () => calls };
+  }
+  const nowS = Math.floor(Date.now() / 1000);
+
+  it("marks a live answer trooth", async () => {
+    const a = api(nowS + 3600);
+    const res = await handleRequest({ request: md(), config, manifestCache: null, fetchImpl: a.fetchImpl, next, staleStore: createStaleStore(), breaker: createBreaker() });
+    expect(res.headers.get(DELIVERY_HEADER)).toBe("trooth");
+    expect(await res.text()).toBe("# Pricing\n");
+  });
+  for (const failure of ["down", "500", "hang"] as const) {
+    it(`serves the last good copy, still signed, when the API is ${failure}`, async () => {
+      const a = api(nowS + 3600);
+      const staleStore = createStaleStore();
+      const opts = { config, manifestCache: null, fetchImpl: a.fetchImpl, next, staleStore, breaker: createBreaker(), timeoutMs: 30 };
+      await (await handleRequest({ ...opts, request: md() })).text();
+      a.set(failure);
+      const res = await handleRequest({ ...opts, request: md() });
+      expect(res.status).toBe(200);
+      expect(res.headers.get(DELIVERY_HEADER)).toBe("stale");
+      expect(res.headers.get("Signature")).toBe(apiHeaders().Signature);
+      expect(res.headers.get("Cache-Control")).toBe("no-store");
+      expect(await res.text()).toBe("# Pricing\n");
+    });
+  }
+  it("strips the signature from a stored copy whose signature has expired", async () => {
+    const a = api(nowS - 10);
+    const staleStore = createStaleStore();
+    const opts = { config, manifestCache: null, fetchImpl: a.fetchImpl, next, staleStore, breaker: createBreaker() };
+    await (await handleRequest({ ...opts, request: md() })).text();
+    a.set("down");
+    const res = await handleRequest({ ...opts, request: md() });
+    expect(res.headers.get(DELIVERY_HEADER)).toBe("stale-unsigned");
+    for (const h of SIGNATURE_HEADERS) expect(res.headers.has(h)).toBe(false);
+    expect(res.headers.get("Content-Digest")).toBe(apiHeaders()["Content-Digest"]);
+  });
+  it("answers with the host's own page, never a 5xx, when there is no stored copy", async () => {
+    const a = api(nowS + 3600);
+    a.set("500");
+    const res = await handleRequest({ request: new Request("https://acme.com/pricing", { headers: { Accept: "text/markdown" } }), config, manifestCache: null, fetchImpl: a.fetchImpl, next, staleStore: createStaleStore(), breaker: createBreaker() });
+    expect(res.status).toBe(200);
+    expect(res.headers.get(DELIVERY_HEADER)).toBe("host");
+    expect(res.headers.get("Vary")).toContain("Accept");
+    expect(await res.text()).toBe("<html>/pricing</html>");
+  });
+  it("passes the API's 4xx through; only 5xx and failures fall back", async () => {
+    const fetchImpl = (async () => new Response("# Not found\n", { status: 404, headers: { "Content-Type": "text/markdown; charset=utf-8" } })) as typeof fetch;
+    const res = await handleRequest({ request: md(), config, manifestCache: null, fetchImpl, next, staleStore: createStaleStore(), breaker: createBreaker() });
+    expect(res.status).toBe(404);
+    expect(res.headers.get(DELIVERY_HEADER)).toBe("trooth");
+  });
+  it("stops asking the API after 3 failures in 30 seconds, then lets one request through", async () => {
+    let t = 0;
+    const breaker = createBreaker({ now: () => t });
+    const a = api(nowS + 3600);
+    a.set("down");
+    const opts = { config, manifestCache: null, fetchImpl: a.fetchImpl, next, staleStore: createStaleStore(), breaker };
+    for (let i = 0; i < 3; i++) await handleRequest({ ...opts, request: md() });
+    expect(a.calls()).toBe(3);
+    expect(breaker.isOpen()).toBe(true);
+    await handleRequest({ ...opts, request: md() });
+    expect(a.calls()).toBe(3);
+    t = 31_000;
+    a.set("ok");
+    const res = await handleRequest({ ...opts, request: md() });
+    expect(a.calls()).toBe(4);
+    expect(res.headers.get(DELIVERY_HEADER)).toBe("trooth");
+    expect(breaker.isOpen()).toBe(false);
+  });
+  it("a failed probe opens the breaker again for a full window", () => {
+    let t = 0;
+    const b = createBreaker({ now: () => t });
+    b.failure();
+    b.failure();
+    b.failure();
+    t = 31_000;
+    expect(b.allow()).toBe(true);
+    expect(b.allow()).toBe(false);
+    b.failure();
+    t = 40_000;
+    expect(b.allow()).toBe(false);
+    t = 62_000;
+    expect(b.allow()).toBe(true);
+  });
+  it("reads a signature's expiry from expires=, else created plus 3900 seconds", () => {
+    expect(signatureExpiry(new Headers({ "Signature-Input": 'sig1=();created=100;expires=200', Signature: "sig1=:A:" }))).toBe(200);
+    expect(signatureExpiry(new Headers({ "Signature-Input": "sig1=();created=100", Signature: "sig1=:A:" }))).toBe(4000);
+    expect(signatureExpiry(new Headers({ "Signature-Input": "sig1=();created=100" }))).toBe(0);
+    expect(signatureExpiry(new Headers())).toBe(0);
+  });
+  it("keeps a markdown copy apart from a JSON-LD copy of the same url, and bounds its size", () => {
+    const store = createStaleStore({ maxEntries: 2, maxBytes: 4 });
+    store.put("a", { body: new ArrayBuffer(4), headers: [], storedAt: 0 });
+    store.put("b", { body: new ArrayBuffer(5), headers: [], storedAt: 0 });
+    store.put("c", { body: new ArrayBuffer(1), headers: [], storedAt: 0 });
+    store.put("d", { body: new ArrayBuffer(1), headers: [], storedAt: 0 });
+    expect(store.get("a")).toBeNull();
+    expect(store.get("b")).toBeNull();
+    expect(store.size()).toBe(2);
+  });
+});
+
 describe("adapters/shared sign-request", () => {
   it("signs a POST the API verifies with src/core/httpsig", async () => {
     const { publicJwk, privateJwk } = await generateConnectorKey();
@@ -406,3 +556,4 @@ describe("adapters/shared sign-request", () => {
     expect(seen!.headers.get("Signature")).toMatch(/^sig1=:/);
   });
 });
+

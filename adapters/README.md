@@ -25,7 +25,22 @@ These outcomes are the ones Cloudflare's Markdown for Agents documents (changelo
 
 ## Headers forwarded from the API
 
-`Content-Type`, `ETag`, `Vary`, `Content-Digest`, `Signature-Input`, `Signature`, `Trooth-Contract`, `Trooth-Semanto-Version`, `Trooth-Page-Hash`, `Trooth-Signed-Page-Hash`, `Trooth-Signed-By`, `Trooth-Semanto-State`, `Location`, `Link`, `Content-Signal`, `x-markdown-tokens`, `x-original-tokens`. Nothing else (no cookies, no server banners). No header carries an `X-` prefix (RFC 6648). Every answer, including errors and HTML passed to a browser, carries `Vary: Accept`, merged into any `Vary` already present.
+`Content-Type`, `ETag`, `Vary`, `Content-Digest`, `Signature-Input`, `Signature`, `Trooth-Contract`, `Trooth-Semanto-Version`, `Trooth-Page-Hash`, `Trooth-Signed-Page-Hash`, `Trooth-Signed-By`, `Trooth-Semanto-State`, `Location`, `Link`, `Content-Signal`, `x-markdown-tokens`, `x-original-tokens`, `Cache-Control`. Nothing else (no cookies, no server banners). No header carries an `X-` prefix (RFC 6648). Every answer, including errors and HTML passed to a browser, carries `Vary: Accept`, merged into any `Vary` already present.
+
+## Fail safe
+
+An adapter never takes a site down.
+
+| Rule | Value |
+| --- | --- |
+| Deadline for a file | 1.5 seconds |
+| Deadline for the manifest | 0.8 seconds; a stored manifest answers at once and a fresh one is fetched in the background |
+| API slow, unreachable or 5xx | the last good copy, signed while its signature is valid (`Trooth-Delivery: stale`), the same copy without its signature after that (`stale-unsigned`), else the site's own page (`host`) |
+| Breaker | after 3 failures in 30 seconds the adapter stops asking for 30 seconds, then lets one request through |
+| The adapter's own status codes | never 5xx; the API's 4xx pass through unchanged |
+| Stored copies | at most 24 hours old, sent with `Cache-Control: no-store` |
+
+Every answer the adapter serves says where its bytes came from in `Trooth-Delivery`: `trooth`, `stale`, `stale-unsigned` or `host`. nginx and Apache carry the same rules in their own terms (timeouts, `proxy_cache_use_stale`, an error page that is the site's own). The Vercel build step never writes `Signature` or `Signature-Input` into `vercel.json`, because a response signature lasts about an hour and a static header would outlive it.
 
 ## JSON-LD mapping
 

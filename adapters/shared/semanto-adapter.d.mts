@@ -73,6 +73,7 @@ export interface ManifestStore {
 export interface ManifestCache {
   get(): Promise<Manifest | null>;
   peek(): Promise<Manifest | null>;
+  settle(): Promise<void>;
 }
 export function createManifestCache(options: {
   config: AdapterConfig;
@@ -80,7 +81,53 @@ export function createManifestCache(options: {
   store?: ManifestStore;
   ttlSeconds?: number;
   now?: () => number;
+  timeoutMs?: number;
+  waitUntil?: ((p: Promise<unknown>) => void) | null;
 }): ManifestCache;
+export function withDeadline<T, F>(promise: Promise<T> | T, ms: number, fallback: F): Promise<T | F>;
+
+export const DELIVERY_HEADER: string;
+export const CONTENT_TIMEOUT_MS: number;
+export const MANIFEST_TIMEOUT_MS: number;
+export const BREAKER_FAILURES: number;
+export const BREAKER_WINDOW_MS: number;
+export const STALE_MAX_AGE_MS: number;
+export const STALE_MAX_ENTRIES: number;
+export const STALE_MAX_BYTES: number;
+export const SIGNATURE_HEADERS: readonly string[];
+export const SIGNATURE_DEFAULT_LIFETIME_S: number;
+export interface StaleEntry {
+  body: ArrayBuffer;
+  headers: [string, string][];
+  storedAt: number;
+}
+export interface StaleStore {
+  get(key: string): StaleEntry | null;
+  put(key: string, entry: StaleEntry): void;
+  size(): number;
+}
+export interface Breaker {
+  allow(): boolean;
+  success(): void;
+  failure(): void;
+  isOpen(): boolean;
+}
+export function signatureExpiry(headers: Headers): number;
+export function createStaleStore(options?: { maxEntries?: number; maxBytes?: number }): StaleStore;
+export function createBreaker(options?: { failures?: number; windowMs?: number; now?: () => number }): Breaker;
+export function fetchWithDeadline(fetchImpl: typeof fetch, url: string, init: RequestInit, ms: number): Promise<Response>;
+export function serveWithFallback(options: {
+  decision: Extract<Decision, { serve: true }>;
+  request: Request;
+  config: AdapterConfig;
+  fetchImpl?: typeof fetch;
+  fetchInit?: RequestInit;
+  next?: ((request: Request) => Promise<Response>) | null;
+  staleStore?: StaleStore;
+  breaker?: Breaker;
+  timeoutMs?: number;
+  now?: () => number;
+}): Promise<Response>;
 export function memoryStore(): ManifestStore;
 
 export function mergeVary(existing: string | null | undefined): string;
@@ -95,5 +142,8 @@ export function handleRequest(options: {
   fetchImpl?: typeof fetch;
   next: (request: Request) => Promise<Response>;
   fetchInit?: RequestInit;
+  staleStore?: StaleStore;
+  breaker?: Breaker;
+  timeoutMs?: number;
 }): Promise<Response>;
 export function configFromEnv(env?: Record<string, string | undefined>): AdapterConfig;

@@ -14,6 +14,16 @@
 //   handleRequest(options)                  -> the whole adapter in one call for
 //                                              hosts with a Fetch API
 //
+// The adapter never takes a site down. Every call to the API has a deadline
+// (1.5 seconds for a file, 0.8 seconds for the manifest), a stored manifest is
+// used at once while a fresh one is fetched in the background, and when the API
+// is slow, unreachable or answers 5xx the reader gets the last good copy while
+// its signature is still valid, the same copy without its signature after that,
+// or else the host's own page. After 3 failures in 30 seconds the adapter stops
+// asking for 30 seconds. The adapter itself never answers 5xx. Every answer it
+// gives a reader says where the bytes came from in Trooth-Delivery: "trooth",
+// "stale", "stale-unsigned" or "host".
+//
 // A reader that signed its request (Web Bot Auth) reaches the API with its
 // Signature fields unchanged, and, when the adapter holds a connector key
 // (TROOTH_CONNECTOR_KEY), with Trooth-Forwarded-Authority and
@@ -53,7 +63,31 @@ export const TROOTH_HEADERS = [
   "Content-Signal",
   "x-markdown-tokens",
   "x-original-tokens",
+  // The API's freshness rule, so no cache keeps a copy past its signature.
+  "Cache-Control",
 ];
+
+/** Where the bytes of an answer came from: "trooth", "stale", "stale-unsigned" or "host". */
+export const DELIVERY_HEADER = "Trooth-Delivery";
+
+/** Deadlines for calls to the API, in milliseconds. */
+export const CONTENT_TIMEOUT_MS = 1500;
+export const MANIFEST_TIMEOUT_MS = 800;
+
+/** After this many failures inside the window, the adapter stops asking the API for the window. */
+export const BREAKER_FAILURES = 3;
+export const BREAKER_WINDOW_MS = 30_000;
+
+/** How long a last good copy may stand in for the API, and how many are kept per instance. */
+export const STALE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const STALE_MAX_ENTRIES = 200;
+export const STALE_MAX_BYTES = 1024 * 1024;
+
+/** The headers removed from a stored copy whose signature has expired. */
+export const SIGNATURE_HEADERS = ["Signature-Input", "Signature", "Trooth-Signed-Page-Hash", "Trooth-Signed-By"];
+
+/** A signature's last valid second: expires= when present, else created plus 300 + 3600 (docs/spec/response-signatures.md). */
+export const SIGNATURE_DEFAULT_LIFETIME_S = 3900;
 
 /** The request headers an adapter passes to the API. Never User-Agent. */
 export const FORWARDED_REQUEST_HEADERS = ["Accept", "Accept-Language", "If-None-Match", "Signature-Input", "Signature", "Signature-Agent"];
@@ -351,7 +385,7 @@ export function withProofHeaders(response, manifest, pathname, config) {
  * Worker wraps the Cache API, Netlify and Vercel use memory plus the host's
  * fetch cache, Fastly and Akamai use memory per instance.
  */
-export function createManifestCache({ config, fetchImpl = globalThis.fetch, store = memoryStore(), ttlSeconds = 300, now = () => Date.now() } = {}) {
+export function createManifestCache({ config, fetchImpl = globalThis.fetch, store = memoryStore(), ttlSeconds = 300, now = () => Date.now(), timeoutMs = MANIFEST_TIMEOUT_MS, waitUntil = null } = {}) {
   const key = `${apiRoot(config)}${API_PATHS.manifest}#manifest`;
   let inflight = null;
 
@@ -379,18 +413,56 @@ export function createManifestCache({ config, fetchImpl = globalThis.fetch, stor
     return manifest;
   }
 
+  function start(cached) {
+    if (!inflight) {
+      inflight = refresh(cached)
+        .catch(() => (cached ? cached.manifest : null))
+        .finally(() => (inflight = null));
+      if (typeof waitUntil === "function") {
+        try {
+          waitUntil(inflight);
+        } catch {
+          // A host without waitUntil still finishes the refresh while the instance lives.
+        }
+      }
+    }
+    return inflight;
+  }
+
   return {
     async get() {
-      const cached = await store.get(key);
+      let cached = null;
+      try {
+        cached = await store.get(key);
+      } catch {
+        cached = null;
+      }
       if (cached && now() - cached.fetchedAt < ttlSeconds * 1000) return cached.manifest;
-      if (!inflight) inflight = refresh(cached).finally(() => (inflight = null));
-      return inflight;
+      // A stored copy answers now; the fresh one arrives in the background.
+      if (cached) {
+        start(cached);
+        return cached.manifest;
+      }
+      return withDeadline(start(null), timeoutMs, null);
     },
     async peek() {
       const cached = await store.get(key);
       return cached ? cached.manifest : null;
     },
+    /** Resolves when any background refresh has finished (tests and build scripts). */
+    async settle() {
+      if (inflight) await inflight;
+    },
   };
+}
+
+/** The promise's value, or `fallback` once `ms` has passed. Never rejects. */
+export function withDeadline(promise, ms, fallback) {
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+  return Promise.race([Promise.resolve(promise).catch(() => fallback), deadline]).finally(() => clearTimeout(timer));
 }
 
 export function memoryStore() {
@@ -468,11 +540,184 @@ export async function fetchSigned(decision, request, fetchImpl = globalThis.fetc
   return new Response(res.status === 304 || request.method === "HEAD" ? null : res.body, { status: res.status, headers: out });
 }
 
+// ---------------------------------------------------------------- fail-safe
+
+/** The last valid second of the signature in these headers, or 0 when there is none. */
+export function signatureExpiry(headers) {
+  const input = headers.get("Signature-Input");
+  if (!input || !headers.get("Signature")) return 0;
+  const exp = /;\s*expires=(\d+)/.exec(input);
+  if (exp) return Number(exp[1]);
+  const created = /;\s*created=(\d+)/.exec(input);
+  return created ? Number(created[1]) + SIGNATURE_DEFAULT_LIFETIME_S : 0;
+}
+
+/**
+ * The last good copy of each answer, kept in memory per instance: the bytes,
+ * the listed headers and when it was stored. Keyed by the API url and the
+ * representation, so a markdown copy never answers a JSON-LD request. Oldest
+ * first out past STALE_MAX_ENTRIES.
+ */
+export function createStaleStore({ maxEntries = STALE_MAX_ENTRIES, maxBytes = STALE_MAX_BYTES } = {}) {
+  const m = new Map();
+  return {
+    get(key) {
+      return m.has(key) ? m.get(key) : null;
+    },
+    put(key, entry) {
+      if (!entry || !entry.body || entry.body.byteLength > maxBytes) return;
+      if (m.has(key)) m.delete(key);
+      m.set(key, entry);
+      while (m.size > maxEntries) m.delete(m.keys().next().value);
+    },
+    size() {
+      return m.size;
+    },
+  };
+}
+
+/**
+ * Counts failures per API root. After BREAKER_FAILURES inside BREAKER_WINDOW_MS
+ * it opens: the adapter answers from the stored copy or the host without asking
+ * the API. After the window one request is let through; a success closes it.
+ */
+export function createBreaker({ failures = BREAKER_FAILURES, windowMs = BREAKER_WINDOW_MS, now = () => Date.now() } = {}) {
+  let recent = [];
+  let openedAt = null;
+  let probing = false;
+  return {
+    allow() {
+      if (openedAt === null) return true;
+      if (now() - openedAt < windowMs) return false;
+      if (probing) return false;
+      probing = true;
+      return true;
+    },
+    success() {
+      recent = [];
+      openedAt = null;
+      probing = false;
+    },
+    failure() {
+      const t = now();
+      if (probing) {
+        probing = false;
+        openedAt = t;
+        return;
+      }
+      recent = recent.filter((x) => t - x < windowMs);
+      recent.push(t);
+      if (recent.length >= failures) openedAt = t;
+    },
+    isOpen() {
+      return openedAt !== null && now() - openedAt < windowMs;
+    },
+  };
+}
+
+const defaultStale = createStaleStore();
+const breakers = new Map();
+function breakerFor(config) {
+  const k = apiRoot(config);
+  if (!breakers.has(k)) breakers.set(k, createBreaker());
+  return breakers.get(k);
+}
+
+/** fetch with a deadline: aborts the request and rejects once `ms` has passed, even when fetchImpl ignores the signal. */
+export async function fetchWithDeadline(fetchImpl, url, init, ms) {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      if (controller) controller.abort();
+      reject(new Error("trooth_api_timeout"));
+    }, ms);
+  });
+  try {
+    return await Promise.race([fetchImpl(url, controller ? { ...init, signal: controller.signal } : init), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function withDelivery(response, value) {
+  const headers = new Headers(response.headers);
+  headers.set(DELIVERY_HEADER, value);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+function staleResponse(entry, request, nowSeconds) {
+  const headers = new Headers(entry.headers);
+  let delivery = "stale";
+  if (signatureExpiry(headers) <= nowSeconds) {
+    for (const h of SIGNATURE_HEADERS) headers.delete(h);
+    delivery = "stale-unsigned";
+  }
+  headers.set(DELIVERY_HEADER, delivery);
+  // A stored copy is never kept by a cache downstream.
+  headers.set("Cache-Control", "no-store");
+  return new Response(request.method === "HEAD" ? null : entry.body, { status: 200, headers });
+}
+
+/**
+ * The served path with every guard: a deadline on the API call, the breaker,
+ * the last good copy, and the host's own answer when there is no copy. Returns
+ * a Response the adapter can hand to the reader; never a 5xx of its own.
+ */
+export async function serveWithFallback({ decision, request, config, fetchImpl = globalThis.fetch, fetchInit = {}, next, staleStore = defaultStale, breaker = breakerFor(config), timeoutMs = CONTENT_TIMEOUT_MS, now = () => Date.now() }) {
+  const key = `${decision.url}#${decision.representation || decision.kind}`;
+  if (breaker.allow()) {
+    try {
+      const signedHeaders = await forwardingHeaders(decision, request, config);
+      const res = await fetchWithDeadline(fetchImpl, decision.url, { method: request.method === "HEAD" ? "HEAD" : "GET", headers: signedHeaders, redirect: "follow", ...fetchInit }, timeoutMs);
+      if (res.status < 500) {
+        breaker.success();
+        const out = copyHeaders(res);
+        out.set("Vary", mergeVary(out.get("Vary")));
+        out.set(DELIVERY_HEADER, "trooth");
+        if (res.status === 304 || request.method === "HEAD") return new Response(null, { status: res.status, headers: out });
+        if (res.status === 200) {
+          const body = await withDeadlineBytes(res, timeoutMs);
+          staleStore.put(key, { body, headers: [...out.entries()].filter(([k]) => k.toLowerCase() !== DELIVERY_HEADER.toLowerCase()), storedAt: now() });
+          return new Response(body, { status: 200, headers: out });
+        }
+        return new Response(res.body, { status: res.status, headers: out });
+      }
+      breaker.failure();
+    } catch {
+      breaker.failure();
+    }
+  }
+  const entry = staleStore.get(key);
+  if (entry && now() - entry.storedAt < STALE_MAX_AGE_MS) return staleResponse(entry, request, Math.floor(now() / 1000));
+  return hostFallback(request, next);
+}
+
+async function withDeadlineBytes(res, ms) {
+  const bytes = await withDeadline(res.arrayBuffer(), ms, null);
+  if (bytes === null) throw new Error("trooth_api_timeout");
+  return bytes;
+}
+
+/** The host's own answer, marked; a host that fails is still the host's answer, but the adapter adds no 5xx of its own. */
+async function hostFallback(request, next) {
+  let res = null;
+  try {
+    res = next ? await next(request) : null;
+  } catch {
+    res = null;
+  }
+  if (!res) return new Response("Not found\n", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", Vary: "Accept", [DELIVERY_HEADER]: "host" } });
+  const out = withDelivery(res, "host");
+  out.headers.set("Vary", mergeVary(out.headers.get("Vary")));
+  return out;
+}
+
 /**
  * The whole adapter for a host with a Fetch API. `next` returns the host's own
  * response for a request the adapter does not serve.
  */
-export async function handleRequest({ request, config, manifestCache, fetchImpl = globalThis.fetch, next, fetchInit = {} }) {
+export async function handleRequest({ request, config, manifestCache, fetchImpl = globalThis.fetch, next, fetchInit = {}, staleStore, breaker, timeoutMs }) {
   const url = new URL(request.url);
   // The connection test in the dashboard reads which connector key this adapter holds (its kid only, never the key).
   if (url.pathname === CONNECTOR_WELL_KNOWN) {
@@ -480,11 +725,22 @@ export async function handleRequest({ request, config, manifestCache, fetchImpl 
     if (key) return new Response(JSON.stringify({ kid: key.kid, trooth_id: config.troothId ?? null }), { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
   }
   // Every mode reads the manifest: it maps a path to a page id, and its
-  // version goes on the host's HTML. A failed fetch leaves it null and the
-  // adapter still answers by path.
-  const manifest = manifestCache ? await manifestCache.get() : null;
+  // version goes on the host's HTML. A failed or slow fetch leaves it null and
+  // the adapter still answers by path.
+  let manifest = null;
+  try {
+    manifest = manifestCache ? await manifestCache.get() : null;
+  } catch {
+    manifest = null;
+  }
   const decision = decide(url.pathname, request.headers.get("Accept"), manifest, { ...config, method: request.method });
-  if (decision.serve) return fetchSigned(decision, request, fetchImpl, fetchInit, config);
+  if (decision.serve) {
+    const opts = { decision, request, config, fetchImpl, fetchInit, next };
+    if (staleStore) opts.staleStore = staleStore;
+    if (breaker) opts.breaker = breaker;
+    if (timeoutMs) opts.timeoutMs = timeoutMs;
+    return serveWithFallback(opts);
+  }
   const hostResponse = await next(request);
   if (!hostResponse) return hostResponse;
   return withProofHeaders(hostResponse, manifest, url.pathname, config);
