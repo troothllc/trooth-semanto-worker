@@ -8,6 +8,7 @@
 // with). The adapters themselves never import src/core; the tests may.
 
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   decide,
   negotiate as adapterNegotiate,
@@ -557,3 +558,42 @@ describe("adapters/shared sign-request", () => {
   });
 });
 
+describe("adapters: fail-safe settings in every host's files", () => {
+  const read = (p: string) => readFileSync(new URL(`../adapters/${p}`, import.meta.url), "utf8");
+  it("the Vercel build step never writes a response signature into vercel.json", () => {
+    const sync = read("vercel/scripts/semanto-sync.mjs");
+    const list = /const LASTING_HEADERS = \[([^\]]*)\]/.exec(sync)?.[1] ?? "";
+    expect(list).not.toMatch(/"Signature/);
+    expect(list).toContain('"Content-Digest"');
+    expect(read("vercel/vercel.json")).not.toMatch(/Signature/);
+  });
+  it("the Vercel route answers no 5xx of its own and falls back through the middleware bypass", () => {
+    const route = read("vercel/app/semanto/[[...path]]/route.ts");
+    expect(route).not.toMatch(/status: 5\d\d/);
+    expect(route).toContain("serveWithFallback");
+    expect(read("vercel/middleware.ts")).toContain("BYPASS_HEADER");
+  });
+  it("nginx has deadlines, stale copies and the host's own page on a Trooth 5xx", () => {
+    const proxy = read("nginx/semanto-proxy.conf");
+    for (const line of ["proxy_connect_timeout 1s;", "proxy_read_timeout 2s;", "proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;", "error_page 500 502 503 504 = @semanto_host;", "proxy_pass_header Cache-Control;"]) expect(proxy).toContain(line);
+    expect(read("nginx/semanto-maps.conf")).toMatch(/proxy_cache_path [^;]*keys_zone=semanto:[^;]*inactive=1h/);
+    expect(read("nginx/semanto-server.conf")).toContain("location @semanto_host {");
+  });
+  it("Apache has deadlines and the host's own page on a Trooth 5xx", () => {
+    const conf = read("apache/semanto.conf");
+    expect(conf).toContain("ProxySet connectiontimeout=1 timeout=2");
+    expect(conf).toContain("ProxyErrorOverride On 500 502 503 504");
+    expect(conf).toContain("RewriteCond %{ENV:REDIRECT_STATUS} !^$");
+  });
+  it("WordPress waits at most 1.5 seconds and never answers a 5xx of its own", () => {
+    const client = read("wordpress-plugin/trooth-semanto/includes/class-trooth-semanto-client.php");
+    expect(client).toContain("const TIMEOUT = 1.5;");
+    expect(client).toContain("'timeout'     => self::TIMEOUT,");
+    const serve = read("wordpress-plugin/trooth-semanto/includes/class-trooth-semanto-serve.php");
+    expect(serve).not.toMatch(/problem\(\s*5\d\d/);
+    expect(serve).not.toMatch(/status_header\(\s*5\d\d/);
+  });
+  it("Akamai gives the manifest call a deadline", () => {
+    expect(read("akamai-edgeworkers/main.js")).toContain("timeout: MANIFEST_TIMEOUT_MS");
+  });
+});
