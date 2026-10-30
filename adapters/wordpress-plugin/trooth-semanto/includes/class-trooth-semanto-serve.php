@@ -80,7 +80,12 @@ final class Trooth_Semanto_Serve {
 		}
 		$res = $this->client->get( $decision['url'], $request_headers );
 		if ( is_wp_error( $res ) ) {
-			$this->problem( 503, 'The signed copy could not be fetched right now. Try again in a minute.' );
+			// Trooth is slow or down and nothing is stored: WordPress answers with the site's own page, never a 5xx from here.
+			if ( ! headers_sent() ) {
+				header( 'Trooth-Delivery: host', true );
+				header( 'Vary: Accept', false );
+			}
+			return;
 		}
 		$this->emit( $res['status'], $res['headers'], 'HEAD' === self::method() ? '' : $res['body'] );
 	}
@@ -106,32 +111,6 @@ final class Trooth_Semanto_Serve {
 		}
 		// phpcs:ignore WordPress.Security.EscapeOutput -- bytes from the signed copy, printed as received.
 		echo $body;
-		exit;
-	}
-
-	/** An RFC 9457 problem in the form the reader asked for. */
-	private function problem( int $status, string $detail ): void {
-		$rep = Trooth_Semanto_Negotiate::negotiate( self::accept() );
-		status_header( $status );
-		header( 'Vary: Accept', true );
-		if ( 'markdown' === $rep ) {
-			header( 'Content-Type: text/markdown; charset=utf-8', true );
-			echo "# Not available\n\n" . esc_html( $detail ) . "\n";
-		} else {
-			header( 'Content-Type: application/problem+json', true );
-			echo wp_json_encode(
-				array(
-					'type'        => 'https://trooth.co/problems/upstream-unavailable',
-					'title'       => 'Not available',
-					'status'      => $status,
-					'detail'      => $detail,
-					'code'        => 'upstream_unavailable',
-					'retryable'   => true,
-					'next_action' => 'Retry after a minute, or read the copy on the Trooth Network.',
-					'terminal'    => false,
-				)
-			);
-		}
 		exit;
 	}
 

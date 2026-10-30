@@ -34,6 +34,7 @@ final class Trooth_Semanto_Negotiate {
 		'Content-Signal',
 		'x-markdown-tokens',
 		'x-original-tokens',
+		'Cache-Control',
 	);
 
 	/** Path on this site => [ api path relative to the company root, group ]. */

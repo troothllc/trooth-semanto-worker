@@ -20,6 +20,15 @@ final class Trooth_Semanto_Client {
 	/** Pages above this size are streamed through without being stored. */
 	const MAX_CACHED_BYTES = 1048576;
 
+	/** Seconds a call to the API may take before the stored copy, or the site's own page, answers. */
+	const TIMEOUT = 1.5;
+
+	/** A signature's lifetime when Signature-Input names no expires (docs/spec/response-signatures.md). */
+	const SIGNATURE_DEFAULT_LIFETIME = 3900;
+
+	/** Headers removed from a stored copy whose signature has expired. */
+	const SIGNATURE_HEADERS = array( 'Signature-Input', 'Signature', 'Trooth-Signed-Page-Hash', 'Trooth-Signed-By' );
+
 	private string $api_root;
 
 	public function __construct( string $api_root ) {
@@ -69,7 +78,7 @@ final class Trooth_Semanto_Client {
 		$res = wp_remote_get(
 			$url,
 			array(
-				'timeout'     => 10,
+				'timeout'     => self::TIMEOUT,
 				'redirection' => 3,
 				'headers'     => $headers,
 				// The default WordPress user agent names the site; the API does not need it.
@@ -77,12 +86,13 @@ final class Trooth_Semanto_Client {
 			)
 		);
 		if ( is_wp_error( $res ) ) {
-			if ( is_array( $cached ) ) {
-				return $this->answer_from( $cached, $request_headers );
-			}
-			return $res;
+			return $this->stale_or_error( $cached, $request_headers, $res );
 		}
 		$status = (int) wp_remote_retrieve_response_code( $res );
+		// A 5xx is Trooth's problem, never the site's: the stored copy answers, or the site's own page does.
+		if ( $status >= 500 ) {
+			return $this->stale_or_error( $cached, $request_headers, new WP_Error( 'trooth_upstream', 'Trooth answered ' . $status ) );
+		}
 		if ( 304 === $status && is_array( $cached ) ) {
 			$cached['fetched'] = time();
 			set_transient( $key, $cached, DAY_IN_SECONDS );
@@ -109,7 +119,49 @@ final class Trooth_Semanto_Client {
 		if ( $status >= 200 && $status < 400 && strlen( $body ) <= self::MAX_CACHED_BYTES ) {
 			set_transient( $key, $entry, DAY_IN_SECONDS );
 		}
-		return $this->answer_from( $entry, $request_headers, false );
+		$answer                              = $this->answer_from( $entry, $request_headers, false );
+		$answer['headers']['Trooth-Delivery'] = 'trooth';
+		return $answer;
+	}
+
+	/**
+	 * The stored copy when the API failed: still signed while its signature is valid, without the signature after that.
+	 *
+	 * @param mixed    $cached          The stored entry, if any.
+	 * @param array    $request_headers The reader's headers.
+	 * @param WP_Error $error           What went wrong.
+	 * @return array|WP_Error
+	 */
+	private function stale_or_error( $cached, array $request_headers, WP_Error $error ) {
+		if ( ! is_array( $cached ) || ( time() - (int) ( $cached['fetched'] ?? 0 ) ) > DAY_IN_SECONDS ) {
+			return $error;
+		}
+		$answer   = $this->answer_from( $cached, $request_headers );
+		$delivery = 'stale';
+		if ( self::signature_expiry( $answer['headers'] ) <= time() ) {
+			foreach ( self::SIGNATURE_HEADERS as $h ) {
+				unset( $answer['headers'][ $h ] );
+			}
+			$delivery = 'stale-unsigned';
+		}
+		$answer['headers']['Trooth-Delivery'] = $delivery;
+		$answer['headers']['Cache-Control']   = 'no-store';
+		return $answer;
+	}
+
+	/** The last valid second of the signature in these headers, or 0. */
+	public static function signature_expiry( array $headers ): int {
+		$input = $headers['Signature-Input'] ?? '';
+		if ( '' === $input || empty( $headers['Signature'] ) ) {
+			return 0;
+		}
+		if ( preg_match( '/;\s*expires=(\d+)/', $input, $m ) ) {
+			return (int) $m[1];
+		}
+		if ( preg_match( '/;\s*created=(\d+)/', $input, $m ) ) {
+			return (int) $m[1] + self::SIGNATURE_DEFAULT_LIFETIME;
+		}
+		return 0;
 	}
 
 	/** Honour the reader's own If-None-Match against the stored ETag. */
