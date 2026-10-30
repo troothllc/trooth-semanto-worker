@@ -769,6 +769,30 @@ describe("finding 6: withdraw and revoke, logged, served, re-signed, and read by
     expect(list.list.issued_at).toBe(w.clock.now.toISOString());
     expect(list.list.revocations.map((e: any) => e.kind)).toEqual(["key"]);
   });
+
+  it("erases a company: owner only, typed domain, versions and keys revoked and logged, an erasure leaf, every row and object gone", async () => {
+    const w = await signedWorld();
+    const kid = (await w.store.keys("acme"))[0]!.public_jwk.kid;
+    const versionIds = (await w.versions.listVersions("acme")).map((v) => v.version_id);
+    expect(versionIds.length).toBeGreaterThan(0);
+    expect((await call(w, "POST", "/acme/erase", "Bearer cy", { confirm: "acme.com" })).status).toBe(403);
+    const wrong = await json(await call(w, "POST", "/acme/erase", "Bearer ada", { confirm: "acme.co" }));
+    expect(wrong.code).toBe("invalid_request");
+    expect(await w.store.getCompany("acme")).not.toBeNull();
+    const r = await json(await call(w, "POST", "/acme/erase", "Bearer ada", { confirm: "ACME.com" }));
+    expect(r).toMatchObject({ object: "semanto.erased", trooth_id: "acme", live: "Removed from Trooth's live systems within 24 hours.", backups: "Removed from backups within 30 days." });
+    expect(await w.store.getCompany("acme")).toBeNull();
+    expect(await w.store.keys("acme")).toEqual([]);
+    expect([...w.store.blobs.keys()].filter((k) => k.startsWith("semanto/acme/") && !k.includes("/revocations/"))).toEqual([]);
+    expect([...w.store.privateKeys.keys()]).not.toContain(kid);
+    const leaf = await json(await pub(w, `/log/leaves/${r.log_index}`));
+    expect(leaf.leaf).toMatchObject({ kind: "erasure", trooth_id: "acme", ref: "acme" });
+    const served = await json(await pub(w, "/acme/revocations"));
+    const refs = served.list.revocations.map((e: any) => e.ref);
+    for (const id of versionIds) expect(refs).toContain(id);
+    expect(refs).toContain(kid);
+    expect((await pub(w, "/acme")).status).toBeGreaterThanOrEqual(400);
+  });
 });
 
 // ------------------------------------------------------------------------ finding 8

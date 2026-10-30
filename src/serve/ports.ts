@@ -258,6 +258,7 @@ export const WORKSPACE_ACTIONS = [
   "first-publication",
   "connectors",
   "withdraw",
+  "erase",
   "detect",
   "competitor-report",
   "setup/look-again",

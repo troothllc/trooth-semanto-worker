@@ -502,7 +502,8 @@ export function createApp(deps: RouteDeps): ServeApp {
   app.get(`${apiPrefix}/:trooth_id/revocations`, async (c) => {
     const trooth_id = c.req.param("trooth_id");
     if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");
-    if (!(await ports.versions.getCompany(trooth_id))) return sendProblem(c, null, null, "semanto_not_found");
+    // No company check: an erased company's list is still served, so a copy of its file kept elsewhere checks as
+    // revoked. An id that never had a list answers semanto_not_found below.
     return serveRevocations(c, trooth_id);
   });
 

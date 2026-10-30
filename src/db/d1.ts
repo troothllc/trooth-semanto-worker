@@ -1011,6 +1011,87 @@ export class D1PipelineStore implements PipelineStore {
   async putBlob(key: string, bytes: Uint8Array, contentType: string): Promise<void> {
     await r2Put(this.store, key, bytes, contentType);
   }
+
+  async eraseCompany(trooth_id: string): Promise<{ rows: number; objects: number }> {
+    let objects = 0;
+    const builds = await this.db.prepare("SELECT build_id FROM semanto_builds WHERE trooth_id = ?1").bind(trooth_id).all<{ build_id: string }>();
+    const buildIds = builds.results.map((b) => b.build_id);
+    for (const id of buildIds) objects += await r2DeletePrefix(this.store, `semanto/builds/${id}/`);
+    objects += await r2DeletePrefix(this.store, `semanto/${trooth_id}/`);
+    // The sealed private keys: once these go, nothing signed with them can be signed again (crypto-shredding).
+    objects += await r2DeletePrefix(this.store, `keys/${trooth_id}/`);
+    const statements: D1PreparedStatement[] = [];
+    for (const id of buildIds) for (const t of ERASE_BUILD_TABLES) statements.push(this.db.prepare(`DELETE FROM ${t} WHERE build_id = ?1`).bind(id));
+    for (const t of ERASE_COMPANY_TABLES) statements.push(this.db.prepare(`DELETE FROM ${t} WHERE trooth_id = ?1`).bind(trooth_id));
+    let rows = 0;
+    for (let i = 0; i < statements.length; i += 50) {
+      const res = await this.db.batch(statements.slice(i, i + 50));
+      for (const r of res) rows += r.meta?.changes ?? 0;
+    }
+    return { rows, objects };
+  }
+}
+
+/**
+ * The tables an erasure empties for a company, children before parents. Kept: semanto_log (the append-only
+ * transparency log; deleting a leaf would break every later proof), semanto_revocations and
+ * semanto_revocation_lists (ids and hashes, so copies elsewhere still check as revoked). test/erasure.test.ts
+ * holds this list against the migrations: a new table with trooth_id must be named here or in ERASE_KEPT.
+ */
+export const ERASE_COMPANY_TABLES = [
+  "semanto_writeback_items",
+  "semanto_writeback_runs",
+  "semanto_recall_events",
+  "semanto_seller_lists",
+  "semanto_credentials",
+  "semanto_connect_sessions",
+  "semanto_google_connections",
+  "semanto_google_states",
+  "semanto_alert_addresses",
+  "semanto_key_rotations",
+  "semanto_audit",
+  "semanto_webauthn_challenges",
+  "semanto_passkeys",
+  "semanto_builds",
+  "semanto_setup",
+  "semanto_basic",
+  "semanto_connector_keys",
+  "semanto_pending_signatures",
+  "semanto_authorizations",
+  "semanto_company_config",
+  "semanto_change_state",
+  "semanto_first_publications",
+  "semanto_gap_reports",
+  "semanto_recalls",
+  "semanto_sellers",
+  "semanto_offers",
+  "semanto_products",
+  "semanto_alerts",
+  "semanto_monitor_runs",
+  "semanto_read_receipts",
+  "semanto_host_detection",
+  "semanto_settings",
+  "semanto_facts",
+  "semanto_pages",
+  "semanto_versions",
+  "semanto_keys",
+  "semanto_companies",
+] as const;
+export const ERASE_BUILD_TABLES = ["semanto_build_fetched", "semanto_build_items", "semanto_build_rendered"] as const;
+export const ERASE_KEPT = ["semanto_log", "semanto_revocations", "semanto_revocation_lists"] as const;
+
+/** Delete every object under a prefix, 1000 at a time; returns how many went. */
+async function r2DeletePrefix(store: R2Bucket, prefix: string): Promise<number> {
+  let n = 0;
+  let cursor: string | undefined;
+  do {
+    const page = await store.list({ prefix, ...(cursor ? { cursor } : {}) });
+    const keys = page.objects.map((o) => o.key);
+    if (keys.length) await store.delete(keys);
+    n += keys.length;
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  return n;
 }
 
 // ------------------------------------------------------------ a build in queue messages (src/compiler/stream.ts)

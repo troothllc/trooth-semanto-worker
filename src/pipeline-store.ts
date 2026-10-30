@@ -161,6 +161,12 @@ export interface PipelineStore extends BodyPort {
   saveAssembled(trooth_id: string, file: SemantoFile, files: VersionFiles): Promise<void>;
   /** Withdraw a version: state withdrawn, withdrawn_at set; when it was current, the newest earlier signed version that is not withdrawn becomes current, or none. */
   withdrawVersion(trooth_id: string, version: number, at: string): Promise<void>;
+  /**
+   * Erase a company: every row about it and every stored object under its prefix, its builds included. The
+   * transparency log, the revocation entries and the signed revocation lists stay: they hold hashes and ids only, and
+   * copies of the company's file elsewhere must still check as revoked. Returns how much went.
+   */
+  eraseCompany(trooth_id: string): Promise<{ rows: number; objects: number }>;
   /** Append a revocation entry with its log leaf index. */
   putRevocation(trooth_id: string, entry: RevocationEntry, log_index: number): Promise<void>;
   /** The newest signed revocation list for a company (or for everyone with null). */
@@ -568,6 +574,43 @@ export class MemoryPipelineStore implements PipelineStore {
     return this.firstPublications.find((r) => r.record.id === record_id) ?? null;
   }
 
+  async eraseCompany(trooth_id: string): Promise<{ rows: number; objects: number }> {
+    let rows = 0;
+    let objects = 0;
+    // Private keys are kept by kid: drop this company's first (crypto-shredding).
+    for (const k of this.companyKeys.get(trooth_id) ?? []) if (this.privateKeys.delete(k.public_jwk.kid)) objects++;
+    const mine = (k: unknown) => typeof k === "string" && (k === trooth_id || k.startsWith(`${trooth_id}/`) || k.startsWith(`${trooth_id}:`) || k.startsWith(`${trooth_id}#`));
+    const keep = new Set<unknown>([this.revocationEntries, this.revocationLists]);
+    for (const holder of [this as unknown as Record<string, unknown>, this.versions as unknown as Record<string, unknown>]) {
+      for (const v of Object.values(holder)) {
+        if (keep.has(v) || v === this.blobs) continue;
+        if (v instanceof Map) {
+          for (const [k, row] of [...v.entries()]) {
+            const owner = row && typeof row === "object" && "trooth_id" in row ? (row as { trooth_id: unknown }).trooth_id : undefined;
+            if (mine(k) || owner === trooth_id) {
+              v.delete(k);
+              rows++;
+            }
+          }
+        } else if (Array.isArray(v)) {
+          for (let i = v.length - 1; i >= 0; i--) {
+            const row = v[i] as { trooth_id?: unknown } | null;
+            if (row && typeof row === "object" && row.trooth_id === trooth_id) {
+              v.splice(i, 1);
+              rows++;
+            }
+          }
+        }
+      }
+    }
+    for (const k of [...this.blobs.keys()]) {
+      if (k.startsWith(`semanto/${trooth_id}/`)) {
+        this.blobs.delete(k);
+        objects++;
+      }
+    }
+    return { rows, objects };
+  }
   async putBlob(key: string, bytes: Uint8Array, contentType: string): Promise<void> {
     this.blobs.set(key, { bytes, contentType });
   }

@@ -24,7 +24,8 @@ export type LeafKind =
   | "recall"
   | "first_publication"
   | "revocation"
-  | "key";
+  | "key"
+  | "erasure";
 
 export interface LogLeaf {
   kind: LeafKind;
@@ -49,6 +50,7 @@ export const LEAF_KINDS: readonly LeafKind[] = [
   "first_publication",
   "revocation",
   "key",
+  "erasure",
 ];
 
 /** The canonical bytes of a leaf: RFC 8785 JSON. The leaf hash is RFC 6962 SHA-256(0x00 || bytes). */

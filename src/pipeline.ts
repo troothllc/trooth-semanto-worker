@@ -487,6 +487,8 @@ export class Pipeline implements WorkspaceHandlers {
           return await this.addConnector(ws, trooth_id, body);
         case "withdraw":
           return await this.withdraw(ws, trooth_id, body);
+        case "erase":
+          return await this.erase(ws, trooth_id, body);
         case "detect":
           if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
           return await this.detect(trooth_id);
@@ -973,6 +975,57 @@ export class Pipeline implements WorkspaceHandlers {
     await this.resignRevocations(trooth_id);
     await this.resignRevocations(null);
     return ok(200, { object: "semanto.withdrawn", trooth_id, version, version_id: entry.ref, revoked_at: at, log_index: leaf.index, revocations_url: `${this.d.config.public_api_base}/${trooth_id}/revocations` });
+  }
+
+  /**
+   * POST /os/semanto/{id}/erase { confirm: "<the company's domain>" }: owner only. Every version and every key is
+   * revoked and logged first, so a copy kept anywhere checks as revoked; then an erasure leaf is logged and every row
+   * and stored object about the company is deleted, the sealed private keys included. What stays: the log's hashes and
+   * the revocation entries. Database backups age out within 30 days (Cloudflare D1 Time Travel).
+   */
+  private async erase(ws: WorkspaceAuth, trooth_id: string, body: Record<string, unknown>): Promise<WorkspaceResult> {
+    if (ws.role !== "owner") return problem("forbidden", "Only the owner can erase the company's Semanto.");
+    const company = await this.d.store.getCompany(trooth_id);
+    if (!company) return problem("conflict", "This company has no record to erase.");
+    const confirm = str(body.confirm)?.trim().toLowerCase();
+    if (confirm !== company.domain.toLowerCase()) return problem("invalid_request", `Type ${company.domain} as confirm to erase. Nothing was changed.`);
+    try {
+      const at = iso(this.d.now());
+      const reason = "The company erased its Semanto record.";
+      let revoked = 0;
+      for (const v of await this.d.versions.listVersions(trooth_id)) {
+        if (v.withdrawn_at) continue;
+        const entry: RevocationEntry = { kind: "version", ref: v.version_id, reason, revoked_at: at };
+        const leaf = await this.d.log.append(await revocationLeaf(entry, trooth_id));
+        await this.d.store.putRevocation(trooth_id, entry, leaf.index);
+        revoked++;
+      }
+      for (const k of await this.d.store.keys(trooth_id)) {
+        if (k.public_jwk.revoked_at) continue;
+        const entry: RevocationEntry = { kind: "key", ref: k.public_jwk.kid, reason, revoked_at: at };
+        const leaf = await this.d.log.append(await revocationLeaf(entry, trooth_id));
+        await this.d.store.putRevocation(trooth_id, entry, leaf.index);
+        revoked++;
+      }
+      const erasure = { trooth_id, domain_hash: await digest(utf8(company.domain.toLowerCase())), erased_at: at };
+      const leaf = await this.d.log.append({ kind: "erasure", trooth_id, ref: trooth_id, hash: await digest(canonicalize(erasure)), at });
+      const gone = await this.d.store.eraseCompany(trooth_id);
+      await this.resignRevocations(trooth_id);
+      await this.resignRevocations(null);
+      console.log(JSON.stringify({ event: "company_erased", trooth_id, rows: gone.rows, objects: gone.objects, revoked, log_index: leaf.index }));
+      return ok(200, {
+        object: "semanto.erased",
+        trooth_id,
+        erased_at: at,
+        revoked,
+        log_index: leaf.index,
+        live: "Removed from Trooth's live systems within 24 hours.",
+        backups: "Removed from backups within 30 days.",
+        kept: "The public log keeps the hashes and the revocations, so any copy kept elsewhere checks as revoked.",
+      });
+    } catch (e) {
+      return this.failed("erase", e);
+    }
   }
 
   /** POST /os/semanto/{id}/keys/{kid}/revoke: revoked_at set (backdated to compromised_at when given), logged, list re-signed. */
