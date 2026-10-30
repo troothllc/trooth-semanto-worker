@@ -1,24 +1,52 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Trooth, LLC
+#
+# The one Python distribution Trooth publishes, as `trooth` on PyPI. Released by
+# .github/workflows/publish-pypi.yml through PyPI Trusted Publishing (no token is
+# stored anywhere), with PEP 740 attestations. Framework integrations are extras,
+# so the base install needs only `cryptography`.
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "trooth-semanto-verify"
-version = "0.2.0"
-description = "Check a Semanto by Trooth file, page proof, signed response or public log, offline."
+name = "trooth"
+version = "0.1.0"
+description = "Read a company's Semanto signed copy and check it: signatures, keys, DNS binding, page proofs and the public log."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Trooth, LLC" }]
+keywords = ["semanto", "trooth", "signatures", "rfc9421", "web-bot-auth", "transparency-log", "ai-agents"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Security :: Cryptography",
+]
 dependencies = ["cryptography>=41"]
+
+[project.optional-dependencies]
+langchain = ["langchain-core>=0.3"]
+llama-index = ["llama-index-core>=0.12"]
+openai-agents = ["openai-agents>=0.2"]
+
+[project.urls]
+Homepage = "https://trooth.co/docs/semanto"
+Documentation = "https://trooth.co/docs/semanto"
+Source = "https://github.com/troothllc/trooth-semanto-worker/tree/main/verifier/python"
+Issues = "https://github.com/troothllc/trooth-semanto-worker/issues"
+Changelog = "https://github.com/troothllc/trooth-semanto-worker/releases"
 
 [project.scripts]
 semanto-verify = "trooth_semanto_verify.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["trooth_semanto_verify*"]
+include = ["trooth_semanto_verify*", "trooth*"]
 
 [tool.pytest.ini_options]
 testpaths = ["."]

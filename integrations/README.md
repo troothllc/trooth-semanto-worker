@@ -3,13 +3,11 @@
 
 # Semanto integrations
 
-Small packages that let an agent framework read a company's signed copy and know whether it checked out. Each one wraps `SemantoClient` from `verifier/` (JavaScript, Python) and adds nothing else.
+One package per registry, so there is one thing to install, update and trust.
 
-| Package | Framework | What it adds |
+| Registry | Package | What it holds |
 | --- | --- | --- |
-| `langchain-semanto` | LangChain | `SemantoLoader`, a document loader; each Document carries `semanto_ok`, the version, the signer, the key and the DNS result in its metadata |
-| `llama-index-readers-semanto` | LlamaIndex | `SemantoReader`, the same as a reader |
-| `openai-agents-semanto` | OpenAI Agents SDK | `semanto_read_tool()`, a function tool that reads a URL and says whether the copy checked out |
-| `semanto-mcp` | Model Context Protocol | an MCP server with `semanto_read` and `semanto_facts` |
+| PyPI | `trooth` (`verifier/python`) | `SemantoClient`, the checks, and the LangChain loader, LlamaIndex reader and OpenAI Agents tool as extras: `trooth[langchain]`, `trooth[llama-index]`, `trooth[openai-agents]` |
+| npm | `semanto-mcp` (this folder) | an MCP server with `semanto_read` and `semanto_facts` |
 
-None is published yet. Each runs its own tests with `python3 -m pytest` (or `node --test` for `semanto-mcp`) with `verifier/python` (or `verifier/js`) beside it.
+`semanto-mcp` runs its own tests with `node --test --test-reporter=tap`; the Python package's are in `verifier/python/test_integrations.py`.

@@ -1,14 +1,18 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Copyright (c) 2026 Trooth, LLC -->
 
-# trooth-semanto-verify (Python)
+# trooth (Python)
 
-Check a Semanto by Trooth file, a page proof, a signed response or the public log, offline. Standard library plus `cryptography` (for Ed25519). Python 3.11 or newer.
+Read a company's Semanto signed copy and check it: the file, a page proof, a signed response or the public log, offline. Standard library plus `cryptography` (for Ed25519). Python 3.11 or newer.
 
 ```
-pip install cryptography
-pip install .            # from this folder; gives the semanto-verify command
+pip install trooth                    # the checks, SemantoClient and the semanto-verify command
+pip install "trooth[langchain]"       # plus trooth.integrations.langchain.SemantoLoader
+pip install "trooth[llama-index]"     # plus trooth.integrations.llama_index.SemantoReader
+pip install "trooth[openai-agents]"   # plus trooth.integrations.openai_agents.semanto_read_tool
 ```
+
+Every release is built and published by GitHub Actions through PyPI Trusted Publishing, with no stored token, and carries PEP 740 attestations that tie each file to the workflow run that built it.
 
 Without installing: `PYTHONPATH=verifier/python python3 -m trooth_semanto_verify file verifier/test-vectors/v1/semanto.json --pages verifier/test-vectors/v1/pages`
 

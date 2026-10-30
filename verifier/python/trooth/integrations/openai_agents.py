@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Trooth, LLC
-"""A function tool for the OpenAI Agents SDK that reads a Semanto signed copy."""
+"""A function tool for the OpenAI Agents SDK (pip install "trooth[openai-agents]")."""
 from __future__ import annotations
 
 import json
@@ -14,7 +14,6 @@ def read_as_json(client: Any, url: str, max_chars: int = 20_000) -> str:
     """The tool's answer: whether the copy checked out, and the text, as one JSON string."""
     r = client.read(url)
     text = r["text"]
-    cut = len(text) > max_chars
     return json.dumps({
         "url": url,
         "ok": bool(r["ok"]),
@@ -23,7 +22,7 @@ def read_as_json(client: Any, url: str, max_chars: int = 20_000) -> str:
         "signed_by": r.get("signed_by") or ("company" if r.get("keyid") else None),
         "dns": r.get("dns"),
         "text": text[:max_chars],
-        "cut": cut,
+        "cut": len(text) > max_chars,
     })
 
 
