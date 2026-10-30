@@ -17,6 +17,8 @@ import { handleRequest, createManifestCache, configFromEnv, type ManifestCache }
 declare const Netlify: { env: { get(name: string): string | undefined } };
 
 let manifestCache: ManifestCache | null = null;
+// The cache outlives one request; its background refresh is kept alive by whichever request started it.
+let current: Context | null = null;
 
 export default async function semanto(request: Request, context: Context): Promise<Response> {
   const config = configFromEnv({
@@ -26,7 +28,8 @@ export default async function semanto(request: Request, context: Context): Promi
     TROOTH_CONNECTOR_KEY: Netlify.env.get("TROOTH_CONNECTOR_KEY"),
   });
   if (!config.troothId) return context.next();
-  if (!manifestCache) manifestCache = createManifestCache({ config, ttlSeconds: 300, waitUntil: (p) => context.waitUntil(p) });
+  current = context;
+  if (!manifestCache) manifestCache = createManifestCache({ config, ttlSeconds: 300, waitUntil: (p) => current?.waitUntil(p) });
   return handleRequest({
     request,
     config: { ...config, clientAddress: context.ip },

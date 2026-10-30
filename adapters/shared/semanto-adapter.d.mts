@@ -104,6 +104,7 @@ export interface StaleEntry {
 export interface StaleStore {
   get(key: string): StaleEntry | null;
   put(key: string, entry: StaleEntry): void;
+  delete?(key: string): void;
   size(): number;
 }
 export interface Breaker {

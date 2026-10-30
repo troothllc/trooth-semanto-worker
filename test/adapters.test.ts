@@ -444,6 +444,30 @@ describe("adapters/shared fail-safe", () => {
       expect(await res.text()).toBe("# Pricing\n");
     });
   }
+  it("forgets a stored copy when the API answers 404 or 410, so a withdrawn page is never served stale", async () => {
+    let mode: "ok" | "gone" | "down" = "ok";
+    const fetchImpl = (async () => {
+      if (mode === "down") throw new Error("down");
+      if (mode === "gone") return new Response("gone", { status: 410 });
+      return new Response("# Pricing\n", { status: 200, headers: signedHeaders(nowS + 3600) });
+    }) as typeof fetch;
+    const staleStore = createStaleStore();
+    const opts = { config, manifestCache: null, fetchImpl, next, staleStore, breaker: createBreaker() };
+    await (await handleRequest({ ...opts, request: md() })).text();
+    mode = "gone";
+    expect((await handleRequest({ ...opts, request: md() })).status).toBe(410);
+    mode = "down";
+    const res = await handleRequest({ ...opts, request: md() });
+    expect(res.headers.get(DELIVERY_HEADER)).toBe("host");
+  });
+  it("streams a body larger than the store through without keeping it", async () => {
+    const big = "x".repeat(10);
+    const fetchImpl = (async () => new Response(big, { status: 200, headers: { ...signedHeaders(nowS + 3600), "Content-Length": String(2 * 1024 * 1024) } })) as typeof fetch;
+    const staleStore = createStaleStore();
+    const res = await handleRequest({ request: md(), config, manifestCache: null, fetchImpl, next, staleStore, breaker: createBreaker() });
+    expect(await res.text()).toBe(big);
+    expect(staleStore.size()).toBe(0);
+  });
   it("strips the signature from a stored copy whose signature has expired", async () => {
     const a = api(nowS - 10);
     const staleStore = createStaleStore();

@@ -418,9 +418,10 @@ export function createManifestCache({ config, fetchImpl = globalThis.fetch, stor
       inflight = refresh(cached)
         .catch(() => (cached ? cached.manifest : null))
         .finally(() => (inflight = null));
-      if (typeof waitUntil === "function") {
+      const keepAlive = typeof waitUntil === "function" ? waitUntil : null;
+      if (keepAlive) {
         try {
-          waitUntil(inflight);
+          keepAlive(inflight);
         } catch {
           // A host without waitUntil still finishes the refresh while the instance lives.
         }
@@ -564,6 +565,9 @@ export function createStaleStore({ maxEntries = STALE_MAX_ENTRIES, maxBytes = ST
     get(key) {
       return m.has(key) ? m.get(key) : null;
     },
+    delete(key) {
+      m.delete(key);
+    },
     put(key, entry) {
       if (!entry || !entry.body || entry.body.byteLength > maxBytes) return;
       if (m.has(key)) m.delete(key);
@@ -668,16 +672,23 @@ export async function serveWithFallback({ decision, request, config, fetchImpl =
   const key = `${decision.url}#${decision.representation || decision.kind}`;
   if (breaker.allow()) {
     try {
+      const started = now();
       const signedHeaders = await forwardingHeaders(decision, request, config);
       const res = await fetchWithDeadline(fetchImpl, decision.url, { method: request.method === "HEAD" ? "HEAD" : "GET", headers: signedHeaders, redirect: "follow", ...fetchInit }, timeoutMs);
+      // Withdrawn or gone at the API: no stored copy may stand in for it later.
+      if (res.status === 404 || res.status === 410) staleStore.delete?.(key);
       if (res.status < 500) {
         breaker.success();
         const out = copyHeaders(res);
         out.set("Vary", mergeVary(out.get("Vary")));
         out.set(DELIVERY_HEADER, "trooth");
         if (res.status === 304 || request.method === "HEAD") return new Response(null, { status: res.status, headers: out });
+        // A body larger than the store keeps streams through as it comes, and is not kept.
+        const length = Number(res.headers.get("Content-Length") ?? "0");
+        if (res.status === 200 && length > STALE_MAX_BYTES) return new Response(res.body, { status: 200, headers: out });
         if (res.status === 200) {
-          const body = await withDeadlineBytes(res, timeoutMs);
+          // One deadline for the whole answer: the body gets what is left of it.
+          const body = await withDeadlineBytes(res, Math.max(1, timeoutMs - (now() - started)));
           staleStore.put(key, { body, headers: [...out.entries()].filter(([k]) => k.toLowerCase() !== DELIVERY_HEADER.toLowerCase()), storedAt: now() });
           return new Response(body, { status: 200, headers: out });
         }
