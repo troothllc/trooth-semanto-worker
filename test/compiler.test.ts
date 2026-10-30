@@ -13,7 +13,7 @@ import { readProgress } from "@/setup/state";
 import { discover, parseRobots, robotsAllows, parseSitemap, exclusionReason, extractLinks } from "@/compiler/discover";
 import { extract, pageBlocks, detectChrome, sentencesOf, parseFrontMatter, splitBlocks } from "@/compiler/extract";
 import { parseHtml, textOf, decodeEntities } from "@/compiler/html";
-import { factCandidates, extractFacts, sinceIsAboutTheCompany } from "@/compiler/facts";
+import { factCandidates, extractFacts, sinceIsAboutTheCompany, isRoleEmail } from "@/compiler/facts";
 import { generateJsonLd, jsonLdScriptTag, markdownLinkTag, headTagsFor } from "@/compiler/jsonld";
 import { buildLlmsTxt, buildLlmsFull, buildSitemapMd } from "@/compiler/llms";
 import { buildVersion, type BuildInput, type FetchedPage } from "@/compiler/build";
@@ -524,6 +524,22 @@ describe("facts", () => {
     expect(sinceIsAboutTheCompany("the time in milliseconds since 1970", "the time in milliseconds ".length)).toBe(false);
     expect(sinceIsAboutTheCompany("Unix time counts from since 1970", 22)).toBe(false);
     expect(sinceIsAboutTheCompany("Trusted by families since 1970", "Trusted by families ".length)).toBe(true);
+  });
+
+  it("publishes no person's name or personal email the company did not enter itself (founder, 2026-10-29)", () => {
+    const ld = { "@context": "https://schema.org", "@graph": [
+      { "@type": "Organization", name: "Acme Inc", contactPoint: [{ "@type": "ContactPoint", contactType: "sales", email: "sales@acme.com" }, { "@type": "ContactPoint", contactType: "press", email: "jane.doe@acme.com" }] },
+      { "@type": "BlogPosting", headline: "Our new store", author: { "@type": "Person", name: "Jane Doe" }, datePublished: "2026-10-01" },
+    ] };
+    const htmlDoc = `<html><head><script type="application/ld+json">${JSON.stringify(ld)}</script></head><body><p>Hi</p></body></html>`;
+    const facts = factCandidates({ url: "https://acme.com/blog/new-store", witnessed_at: WITNESSED, html: htmlDoc, body: "Hi" });
+    expect(facts.some((f) => /\.author$/.test(f.key))).toBe(false);
+    expect(JSON.stringify(facts)).not.toContain("Jane");
+    expect(JSON.stringify(facts)).not.toContain("jane.doe@acme.com");
+    expect(facts.find((f) => f.value === "sales@acme.com")).toBeDefined();
+    expect(facts.find((f) => /headline$/.test(f.key))?.value).toBe("Our new store");
+    expect(isRoleEmail("Support+EU@acme.com")).toBe(true);
+    expect(isRoleEmail("mailto:jane@acme.com")).toBe(false);
   });
 
   it("finds text patterns with the exact sentence as anchor and never a placeholder", () => {

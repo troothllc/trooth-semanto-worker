@@ -289,8 +289,6 @@ export function generateJsonLd(file: SemantoFile, opts: JsonLdOptions = {}): Jso
     if (pub) t.set(node, path, "datePublished", str(pub), pub.id);
     const mod = first(keys, `${base}.date_modified`);
     if (mod) t.set(node, path, "dateModified", str(mod), mod.id);
-    const author = first(keys, `${base}.author`);
-    if (author) t.set(node, path, "author", { "@type": "Person", name: str(author) }, author.id);
     const entry: PageEntry | undefined = file.header.pages_manifest.find((p) => p.url === hf.evidence.url);
     t.set(node, path, "mainEntityOfPage", hf.evidence.url, entry ? `page:${entry.id}` : hf.id);
     node["publisher"] = { "@id": org["@id"] };

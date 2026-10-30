@@ -201,7 +201,9 @@ function structuredFacts(nodes: Node[], ctx: { url: string; witnessed_at: string
       const kind = clean(o["contactType"]);
       const keyBase = kind ? `contact.${slug(kind)}` : "contact";
       const tel = clean(o["telephone"]);
-      const email = clean(o["email"]);
+      const raw = clean(o["email"]);
+      // A role address (sales@, support@) is the company's; a person's address is left out, like any name Trooth did not get from the company.
+      const email = raw && isRoleEmail(raw) ? raw : null;
       const a = `${anchor}/contactPoint/${i}`;
       if (tel) push(`${keyBase}.telephone`, `${orgName ?? "The company"} lists ${kind ? `${kind} ` : ""}telephone ${tel}`, tel, `${a}/telephone`, { type: "ContactPoint", property: "telephone" });
       if (email) push(`${keyBase}.email`, `${orgName ?? "The company"} lists ${kind ? `${kind} ` : ""}email ${email}`, email, `${a}/email`, { type: "ContactPoint", property: "email" });
@@ -312,8 +314,7 @@ function structuredFacts(nodes: Node[], ctx: { url: string; witnessed_at: string
         if (published) push(`${k}.date_published`, `${headline} was published ${published}`, published, `${a}/datePublished`, { type: "Article", property: "datePublished" });
         const modified = clean(p["dateModified"]);
         if (modified) push(`${k}.date_modified`, `${headline} was last changed ${modified}`, modified, `${a}/dateModified`, { type: "Article", property: "dateModified" });
-        const author = textValue(p["author"]);
-        if (author) push(`${k}.author`, `${headline} is by ${author}`, author, `${a}/author`, { type: "Article", property: "author" });
+        // No author: Trooth publishes a person's name only when the company entered it itself (founder, 2026-10-29).
       }
     }
   });
@@ -331,6 +332,15 @@ const DAY = "(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)(?:[a-z]*)\\.?";
 const TIME = "\\d{1,2}(?::\\d{2})?\\s*(?:[ap]\\.?m)?";
 const HOURS_RE = new RegExp(`\\b(${DAY}(?:\\s*(?:-|\\u2013|to|through|thru)\\s*${DAY})?)\\s*[:,]?\\s*(${TIME})\\s*(?:-|\\u2013|to|until)\\s*(${TIME})`, "gi");
 const FOUNDED_RE = /\b(?:founded|established|started|incorporated|in business|operating|serving [A-Za-z ]+)\s+(?:in\s+)?((?:18|19|20)\d{2})\b|\b(?:since|est\.?)\s+((?:18|19|20)\d{2})\b/gi;
+/** Mailbox names that belong to a function, not a person. */
+export const ROLE_MAILBOXES = new Set(["info", "hello", "hi", "contact", "sales", "support", "help", "helpdesk", "service", "customerservice", "customer-service", "care", "press", "media", "pr", "news", "team", "office", "admin", "billing", "accounts", "finance", "invoices", "orders", "shop", "store", "privacy", "dpo", "gdpr", "security", "abuse", "legal", "compliance", "careers", "jobs", "hr", "recruiting", "talent", "partners", "partnerships", "marketing", "events", "enquiries", "inquiries", "general", "reception", "bookings", "reservations", "feedback", "webmaster", "noreply", "no-reply", "investors", "ir"]);
+
+/** True when the address's mailbox is a function (sales@, support+eu@), not a person. */
+export function isRoleEmail(address: string): boolean {
+  const local = address.trim().toLowerCase().replace(/^mailto:/, "").split("@")[0] ?? "";
+  return ROLE_MAILBOXES.has(local.split("+")[0] ?? "");
+}
+
 const NUMBER_CLAIM_RE = /(?:[$\u20ac\u00a3\u00a5]\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:k|m|bn|million|billion))?|\b\d[\d,]*(?:\.\d+)?\s?(?:%|percent|\+|k\b|x\b|million|billion|thousand|customers|clients|users|members|countries|cities|locations|offices|employees|people|staff|teams|years|months|weeks|days|hours|minutes|seconds|uptime|reviews|downloads|projects|products|orders|stores|partners|languages|awards|patents|seats|tons|kg|lbs|miles|km|sq ft|square feet|GB|TB|MB|ms))/g;
 
 /**
