@@ -10,6 +10,7 @@
 // runs the same route the dashboard uses, through this Worker's own app, so roles, rate limits, the audit trail
 // and the signed answers are the same for an agent as for a person.
 
+import { GROUP_ICONS, SERVER_ICONS } from "./icons.generated";
 import { SEMANTO_TOOLS, toolByName, type SemantoTool } from "./catalog";
 import { CLOUDFLARE_COMPATIBILITY_DATE, CLOUDFLARE_WORKER_JS, CLOUDFLARE_WORKER_SHA256 } from "./cloudflare-worker.generated";
 import { authorizeAgentKey, bearerAgentKey, type AgentKeyStore } from "../os/agent-keys";
@@ -17,7 +18,15 @@ import { authorizeAgentKey, bearerAgentKey, type AgentKeyStore } from "../os/age
 export const MCP_URL = "https://api.trooth.co/os/semanto/mcp";
 const ORIGIN = "https://api.trooth.co";
 const SUPPORTED = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"];
-const SERVER_INFO = { name: "semanto", title: "Semanto by Trooth", version: "1.0.0", websiteUrl: "https://trooth.co/docs/semanto#mcp" };
+const SERVER_INFO = {
+  name: "semanto",
+  title: "Semanto by Trooth",
+  version: "1.0.0",
+  description: "Set up, sign, publish and check Semanto, a company's signed website file for AI agents.",
+  websiteUrl: "https://trooth.co/docs/semanto#mcp",
+  // The Trooth mark, light and dark, as GitHub's server sends the Invertocat (src/mcp/icons.generated.ts).
+  icons: SERVER_ICONS,
+};
 const MAX_TEXT = 200_000;
 
 export interface McpDeps {
@@ -53,6 +62,7 @@ function toolDescriptor(t: SemantoTool) {
     description: `${t.description} ${access}`,
     inputSchema: { type: "object", properties: props, ...(t.required?.length ? { required: t.required } : {}), additionalProperties: false },
     annotations: { title: t.title, ...t.hints },
+    icons: GROUP_ICONS[t.category],
     _meta: { "co.trooth/category": t.category, "co.trooth/access": t.access },
   };
 }

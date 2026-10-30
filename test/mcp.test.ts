@@ -8,6 +8,8 @@
 import { describe, it, expect } from "vitest";
 import { SEMANTO_TOOLS } from "@/mcp/catalog";
 import { CLOUDFLARE_WORKER_SHA256 } from "@/mcp/cloudflare-worker.generated";
+import { GROUP_ICONS, SERVER_ICONS } from "@/mcp/icons.generated";
+import { readFileSync } from "node:fs";
 import { OS, buildAndSign, json, osWorld, post, get, type OsWorld } from "./helpers/os-world";
 import { BANNED_WORDS, ELLIPSIS } from "./helpers/house-rules";
 
@@ -57,6 +59,16 @@ describe("the tool catalog", () => {
   });
 });
 
+describe("the MCP Registry entry", () => {
+  it("names the live server and its agent key header", () => {
+    const entry = JSON.parse(readFileSync("server.json", "utf8"));
+    expect(entry.name).toBe("co.trooth/semanto");
+    expect(entry.description.length).toBeLessThanOrEqual(100);
+    expect(entry.remotes).toEqual([expect.objectContaining({ type: "streamable-http", url: "https://api.trooth.co/os/semanto/mcp" })]);
+    expect(entry.remotes[0].headers[0]).toMatchObject({ name: "Authorization", isSecret: true });
+  });
+});
+
 describe("the MCP transport", () => {
   it("initializes with the asked protocol version when it is supported, and instructions", async () => {
     const w = await osWorld();
@@ -65,7 +77,24 @@ describe("the MCP transport", () => {
     expect(r.body.result.protocolVersion).toBe("2025-11-25");
     expect(r.body.result.serverInfo.name).toBe("semanto");
     expect(r.body.result.instructions).toMatch(/semanto_status/);
+    expect(r.body.result.serverInfo.icons).toEqual(SERVER_ICONS);
+    expect(SERVER_ICONS.map((i) => i.theme)).toEqual(["light", "dark"]);
     expect((await call(w, "initialize", { protocolVersion: "1999-01-01" })).body.result.protocolVersion).toBe("2026-07-28");
+  });
+
+  it("draws every icon as GitHub's server does: a 24 pixel PNG data URI with a clear background, light and dark, no sizes", async () => {
+    const w = await osWorld();
+    const list = (await call(w, "tools/list")).body.result.tools as Array<Record<string, any>>;
+    expect(new Set(SEMANTO_TOOLS.map((t) => t.category))).toEqual(new Set(Object.keys(GROUP_ICONS)));
+    for (const t of list) expect(t.icons).toEqual(GROUP_ICONS[t._meta["co.trooth/category"]]);
+    for (const icon of [...SERVER_ICONS, ...Object.values(GROUP_ICONS).flat()]) {
+      expect(icon).not.toHaveProperty("sizes");
+      expect(icon.mimeType).toBe("image/png");
+      const png = Buffer.from(icon.src.replace(/^data:image\/png;base64,/, ""), "base64");
+      expect(png.subarray(1, 4).toString()).toBe("PNG");
+      expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([24, 24]);
+      expect(png[25]).toBe(6); // RGBA: the background is clear
+    }
   });
 
   it("lists every tool with its annotations and answers 202 to a notification and 405 to GET", async () => {

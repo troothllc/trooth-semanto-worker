@@ -22,3 +22,7 @@ The server address narrows a session, as Supabase's `read_only` and `features` a
 ## Prompts
 
 `set_up_semanto` and `check_semanto`.
+
+## Logo and listing
+
+The icons follow GitHub's MCP server exactly (github/github-mcp-server, `script/fetch-icons` and `pkg/octicons`). `serverInfo.icons` is the brand mark, as GitHub's is the Invertocat: the Trooth disc with the figure cut out, one color, drawn 22 pixels wide in a 24 by 24 PNG with a clear background, once in Trooth's ink for a light theme and once in white for a dark theme, sent as data URIs with no `sizes` field. Every tool carries its group's icon the same way, as GitHub's tools carry their toolset's Octicon; the group icons come from Lucide, the set trooth.co uses. `scripts/build-icons.mjs` makes them into `src/mcp/icons.generated.ts`. AI tools that show server icons (VS Code today) show them beside the server and each tool. `server.json` at the root of this repository is the entry for the MCP Registry (schema 2025-12-11) under `co.trooth/semanto` with the agent key header and, like GitHub's, no icons; publishing it asks for proof of trooth.co, which the domain's owner gives.

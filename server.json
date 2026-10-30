@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "co.trooth/semanto",
+  "title": "Semanto by Trooth",
+  "description": "Set up, sign, publish and check Semanto, a company's signed website file for AI agents.",
+  "version": "1.0.0",
+  "websiteUrl": "https://trooth.co/docs/semanto#mcp",
+  "repository": {
+    "url": "https://github.com/troothllc/trooth-semanto-worker",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.trooth.co/os/semanto/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer and the company's agent key (tsk_), made under Company at https://trooth.co/dashboard/semanto/company",
+          "isSecret": true,
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}
