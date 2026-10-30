@@ -102,7 +102,7 @@ export const REVOCATIONS_PER_MESSAGE = 100;
 /** The Watch page's Ask now queues a gap report at most once in this window after the newest report. */
 export const GAP_ASK_NOW_GAP_MS = 10 * 60 * 1000;
 /** The answer while Watch what AI says is off (PipelineDeps.gapReports). */
-export const GAP_REPORTS_OFF = "Watch what AI says is not available yet. It will return as a paid feature.";
+export const GAP_REPORTS_OFF = "This action was removed from Semanto. Nothing was run.";
 /** Ask now: at most this many reports per company in any 24 hours, weekly ones included (the spending cap). */
 export const GAP_REPORTS_PER_DAY = 6;
 /** The most questions one report asks (built-in and the owner's own together): the spending cap per report. */

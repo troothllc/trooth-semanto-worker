@@ -548,7 +548,7 @@ describe("alerts", () => {
     live.set("https://acme.com/pricing", await readLivePageFrom("https://acme.com/pricing", { status: 200, headers: {}, body: read("fixture-page-pricing.html") }, NOW));
     const report = indexabilityReport(record.pages.filter((p) => p.url === "https://acme.com/pricing"), live);
     const alerts = await alertsFrom("acme", { mismatches: [], indexability: report, record }, NOW);
-    expect(alerts[0]!.message).toBe("Your Pricing page tells search engines not to index it, so it cannot appear in AI answers.");
+    expect(alerts[0]!.message).toBe("Your Pricing page tells search engines not to index it, so Google cannot show it in Search or its AI features.");
     expect(isSemantoId(alerts[0]!.id, "sma")).toBe(true);
     expect(dayWords("2026-10-20T10:00:00.000Z")).toBe("20 October");
     const price: Mismatch = Object.assign({}, phoneMismatch, { key: "product.KET-100.price", surface: "merchant_center" as const, signed_value: { amount: "49.00", currency: "USD" }, surface_value: { amount: "45.00", currency: "USD" } });

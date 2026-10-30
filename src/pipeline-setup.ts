@@ -560,7 +560,7 @@ export async function setupAction(p: Pipeline, action: WorkspaceAction, ws: Work
     case "setup/monitoring": {
       if (!mayAdminister(ws)) return problem("forbidden", "Only an owner or admin can start monitoring.");
       // Off (production): nothing is saved, no questions and no other companies' domains (blueprint A2).
-      if (!p.d.gapReports) return problem("feature_unavailable", "Watch what AI says is not available yet. Setup is complete once the three install checks pass.");
+      if (!p.d.gapReports) return problem("feature_unavailable", "This step was removed from Semanto. Setup is complete once the three install checks pass.");
       const questions = Array.isArray(body.questions) ? body.questions : [];
       const competitorsIn = Array.isArray(body.competitors) ? body.competitors : [];
       if (questions.length > 10 || questions.some((q) => typeof q !== "string" || !q.trim() || q.length > 300)) return problem("invalid_request", "Send at most 10 questions, each a sentence under 300 characters.");

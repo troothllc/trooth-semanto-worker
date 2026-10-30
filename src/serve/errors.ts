@@ -373,7 +373,7 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
     title: "This feature is not available",
     retryable: false,
     terminal: true,
-    what_happened: "Watch what AI says is not part of Semanto right now. Nothing was asked of any AI assistant and nothing was stored.",
+    what_happened: "This action was removed from Semanto. Nothing was asked of any AI assistant and nothing was stored.",
     what_to_do: "Nothing to do. Your signed record, install checks and settings work as before.",
   },
   company_key_unavailable: {

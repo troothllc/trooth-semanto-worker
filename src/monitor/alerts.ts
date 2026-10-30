@@ -146,10 +146,11 @@ export function messagesForIndexability(report: IndexabilityReport, record?: Sig
     const first = p.reasons[0];
     if (!first || first === "not_fetched") continue;
     let message: string;
-    if (first === "non_200") message = `Your ${title} did not load (it answered ${p.status ?? "nothing"}), so it cannot appear in AI answers.`;
-    else if (first === "soft_404") message = `Your ${title} loads but looks like a not found page, so it may not appear in AI answers.`;
-    else if (first === "canonical_elsewhere") message = `Your ${title} points search engines to a different address, so this address will not appear in AI answers.`;
-    else message = `Your ${title} ${reasonInWords(first)}, so it cannot appear in AI answers.`;
+    // Say what Google does with the page, not what any AI will say (Google Search Central: AI features use the same index).
+    if (first === "non_200") message = `Your ${title} did not load (it answered ${p.status ?? "nothing"}), so search engines and AI agents cannot read it.`;
+    else if (first === "soft_404") message = `Your ${title} loads but looks like a not found page, so search engines may leave it out.`;
+    else if (first === "canonical_elsewhere") message = `Your ${title} points search engines to a different address, so they show that address instead of this one.`;
+    else message = `Your ${title} ${reasonInWords(first)}, so Google cannot show it in Search or its AI features.`;
     out.push({ kind: "not_indexable", key: p.url, message, url: p.url, severity: "visibility" });
   }
   return out;
