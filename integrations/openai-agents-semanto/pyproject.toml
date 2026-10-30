@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Trooth, LLC
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openai-agents-semanto"
+version = "0.1.0"
+description = "A function tool for the OpenAI Agents SDK that reads a company's Semanto signed copy and says whether it checked out."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = ["openai-agents>=0.2", "trooth-semanto-verify>=0.2"]
+
+[tool.setuptools.packages.find]
+include = ["openai_agents_semanto*"]

@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Trooth, LLC
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langchain-semanto"
+version = "0.1.0"
+description = "LangChain document loader for Semanto: a company's signed copy of its website, checked as it loads."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = ["langchain-core>=0.3", "trooth-semanto-verify>=0.2"]
+
+[tool.setuptools.packages.find]
+include = ["langchain_semanto*"]

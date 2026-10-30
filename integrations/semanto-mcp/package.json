@@ -1,0 +1,16 @@
+{
+  "name": "semanto-mcp",
+  "version": "0.1.0",
+  "description": "An MCP server that reads a company's Semanto signed copy and says whether it checked out.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": { "semanto-mcp": "./server.mjs" },
+  "files": ["server.mjs", "tools.mjs", "README.md"],
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "@trooth/semanto-verify": "^1.1.0",
+    "zod": "^3.25.0"
+  },
+  "scripts": { "test": "node --test --test-reporter=tap" }
+}
