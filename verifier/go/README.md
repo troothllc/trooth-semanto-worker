@@ -1,12 +1,12 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Copyright (c) 2026 Trooth, LLC -->
 
-# trooth-semanto-verify (Go)
+# semanto-verify (Go)
 
 Check a Semanto by Trooth file, a page proof, a signed response or the public log, offline, with the Go standard library only (`crypto/ed25519`, `crypto/sha256`, `encoding/json`, `encoding/base64`). Go 1.22 or newer.
 
 ```
-go install github.com/troothllc/trooth-semanto-verify/cmd/semanto-verify@latest
+go install github.com/troothllc/trooth-semanto-worker/verifier/go/cmd/semanto-verify@latest
 ```
 
 or from this folder: `go run ./cmd/semanto-verify file ../test-vectors/v1/semanto.json`
@@ -25,7 +25,7 @@ semanto-verify log -from <n> -to <m> [-log <url>] [-keys <keys.json>]
 ## Library
 
 ```go
-import "github.com/troothllc/trooth-semanto-verify/semanto"
+import "github.com/troothllc/trooth-semanto-worker/verifier/go/semanto"
 
 var file map[string]any
 semanto.DecodeJSON(fileBytes, &file)           // keeps numbers exact

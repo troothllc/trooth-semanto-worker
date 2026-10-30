@@ -9,7 +9,7 @@ Anyone can check a Semanto without an account, offline, with the published keys:
 | --- | --- | --- |
 | `js/` | `verify.mjs` (ES module, WebCrypto, no dependencies) and `cli.mjs` | Node 20+ or a browser |
 | `python/` | the `trooth` distribution on PyPI: package `trooth_semanto_verify`, `SemantoClient`, the `semanto-verify` command and the framework extras | Python 3.11+, `pip install trooth` |
-| `go/` | module `github.com/troothllc/trooth-semanto-verify`, package `semanto`, `cmd/semanto-verify` | Go 1.22+, standard library only |
+| `go/` | module `github.com/troothllc/trooth-semanto-worker/verifier/go`, package `semanto`, `cmd/semanto-verify` | Go 1.22+, standard library only |
 | `test-vectors/v1/` | the shared vectors, positive and negative, with a README that says what each must conclude | nothing |
 
 What a verifier checks, in this order, and what each step proves:

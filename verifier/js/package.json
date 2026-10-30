@@ -11,6 +11,7 @@
   "bin": { "semanto-verify": "./cli.mjs" },
   "files": ["verify.mjs", "verify.d.mts", "client.mjs", "client.d.mts", "cli.mjs", "README.md"],
   "engines": { "node": ">=20" },
-  "repository": { "type": "git", "url": "https://github.com/troothllc/semanto-verify" },
+  "repository": { "type": "git", "url": "git+https://github.com/troothllc/trooth-semanto-worker.git", "directory": "verifier/js" },
+  "bugs": "https://github.com/troothllc/trooth-semanto-worker/issues",
   "homepage": "https://trooth.co/docs/semanto"
 }

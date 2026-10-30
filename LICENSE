@@ -1,0 +1,8 @@
+Copyright (c) 2026 Trooth, LLC. All rights reserved.
+
+The files in the verifier directory are licensed under the Apache License,
+Version 2.0. The full text is in verifier/LICENSE.
+
+Everything else in this repository, including the Semanto Worker, is
+proprietary to Trooth, LLC. No license is granted to use, copy, modify or
+distribute it without written permission from Trooth, LLC.

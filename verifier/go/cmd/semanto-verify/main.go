@@ -31,7 +31,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/troothllc/trooth-semanto-verify/semanto"
+	"github.com/troothllc/trooth-semanto-worker/verifier/go/semanto"
 )
 
 const troothAPI = "https://api.trooth.co"

@@ -29,11 +29,11 @@ print(r["ok"], r["reason"])
 
 ## Readers
 
-| Reader | Path | Needs |
+| Reader | Path | Install |
 | --- | --- | --- |
 | Python | [`verifier/python`](verifier/python) | `pip install trooth` |
-| JavaScript | [`verifier/js`](verifier/js) | Node 20 or newer, no dependencies |
-| Go | [`verifier/go`](verifier/go) | Go 1.22 or newer, standard library only |
+| JavaScript | [`verifier/js`](verifier/js) | Copy `verify.mjs`; Node 20 or newer, no dependencies |
+| Go | [`verifier/go`](verifier/go) | `go install github.com/troothllc/trooth-semanto-worker/verifier/go/cmd/semanto-verify@latest` |
 
 All three share the same functions, reason codes and the vectors in [`verifier/test-vectors/v1`](verifier/test-vectors/v1). Framework extras: `trooth[langchain]`, `trooth[llama-index]` and `trooth[openai-agents]`.
 
