@@ -8,7 +8,6 @@ Every panel takes plain data and callbacks. None fetches, so the parent page own
 | --- | --- | --- |
 | `DeliverySettingsPanel` | Where the Semanto is served, the host, the formats, the markdown source (three modes; the proof-only mode shows a warning), what happens when a page changes, the AI use switches | `DeliverySettingsData`, `onChange(next)`, `onSave()` |
 | `ConsistencyMonitorPanel` | Mismatches between the signed record and each public surface, grouped by severity, each with the signed value, the surface value and one action | `Mismatch[]`, `last_run_at`, `surfaces_checked` |
-| `GapReportPanel` | Per provider: set up or not, counts by classification; the corrections with a link to the signed source; a before-and-after strip | `ProviderSummary[]`, `Correction[]`, `before_after` |
 | `ReadReceiptsPanel` | Reads by day; named agents only when their request signature checked out, otherwise "unproven reader"; Trooth's own hourly checks in their own column; a CSV link | `ReadReceiptDay[]`, `csv_href`, `total_reads` |
 | `KeyBindingPanel` | JWK Set served, DNS record, LEI match, the binding level, one rotate action | `KeyBindingData`, `onRotate()` |
 | `BasicUpgradeCard` | What Basic has and lacks, one action | `has[]`, `lacks[]`, `action` |

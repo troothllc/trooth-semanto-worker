@@ -379,7 +379,7 @@ describe("setup: the six-screen backend over docs/spec/setup-api.md", () => {
     const s0 = await json(r);
     expect(s0).toMatchObject({ trooth_id: "acme", org: "Acme Inc", domain: "acme.com", step: "read", basic: true, read: { status: "queued", held: false }, next_action: { label: "Wait for the read", method: "GET" } });
     expect(s0.proof).toEqual({ source: "trooth_domain_claim", status: "confirmed", confirmed_at: CONFIRMED_AT, confirm_url: "https://trooth.co/dashboard/public-page?tab=domain", pointer: { record_name: "_trooth.acme.com", record_value: null } });
-    expect(s0.timings.steps.map((x: any) => x.id)).toEqual(["sign_in", "company", "prove_domain", "read_site", "review", "sign", "install", "check", "monitoring"]);
+    expect(s0.timings.steps.map((x: any) => x.id)).toEqual(["sign_in", "company", "prove_domain", "read_site", "review", "sign", "install", "check"]);
     expect(s0.timings.steps[0].spent_seconds).toBe(0);
     expect(s0.timings.steps[1].spent_seconds).toBe(20);
     // A domain confirmed before setup began costs setup no time.

@@ -766,7 +766,7 @@ describe("4. signing paths, keys and the workspace actions", () => {
     expect(body.body.method).toBe("trooth_domain_claim");
     expect(body.body.read.status).toBe("done");
     expect(body.body.read.read).toBeGreaterThan(3);
-    expect(body.body.setup.steps.map((s: any) => s.id)).toEqual(["sign_in", "company", "prove_domain", "read_site", "review", "sign", "install", "check", "monitoring"]);
+    expect(body.body.setup.steps.map((s: any) => s.id)).toEqual(["sign_in", "company", "prove_domain", "read_site", "review", "sign", "install", "check"]);
     expect(body.body.setup.basic.spent_seconds).toBeNull();
 
     // Review finding 15: the Basic build is witnessed (Trooth's witness statement and a "witness" log leaf), never signed by the company.

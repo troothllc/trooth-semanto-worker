@@ -60,7 +60,7 @@ Tests: `npx vitest run test/verifier.test.ts` (25 pass), `cd verifier/python && 
 
 ### F. Dashboard components (`web/`)
 
-`semanto/delivery-settings-panel.tsx`, `consistency-monitor-panel.tsx`, `gap-report-panel.tsx`, `read-receipts-panel.tsx`, `key-binding-panel.tsx`, `basic-upgrade-card.tsx`, `format.ts`, `index.ts`
+`semanto/delivery-settings-panel.tsx`, `consistency-monitor-panel.tsx`, `read-receipts-panel.tsx`, `key-binding-panel.tsx`, `basic-upgrade-card.tsx`, `format.ts`, `index.ts`
 : React 19 TypeScript, `"use client"`, lucide-react icons, the token classes from `semanto-record-panel.tsx`, blue (`btn-primary`) once per panel on the action, plain words throughout. Props are plain data and callbacks; nothing fetches. The data shapes mirror the modules they display: `DeliverySettings` and `HostKind` from `src/settings/delivery.ts` (three markdown-source modes with the proof-only warning, three when-changed choices, the AI use switches, the locked always-on rows), `Mismatch`, `MismatchKind` and `Severity` (`trust`, `visibility`, `note`) from `src/monitor/types.ts`, `Classification` and the provider summary from `src/gap/compare.ts` and `report.ts`, proven and unproven readers with Trooth's own checks in their own column from `src/readers/receipts.ts`, binding levels from `src/identity/keys.ts`.
 
 `types/react-shim.d.ts`, `tsconfig.json`, `README.md`

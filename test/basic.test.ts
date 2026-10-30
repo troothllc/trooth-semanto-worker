@@ -109,9 +109,9 @@ describe("Semanto Basic state machine", () => {
     for (const s of [...BASIC_ENTITLEMENTS.serves, ...BASIC_ENTITLEMENTS.does_not]) expect(s.words).not.toMatch(BANNED_WORDS);
   });
   it("has nine setup steps: Basic steps 1 to 4 within 600 seconds, the full path 1 to 9 within 900, measured from timestamps", () => {
-    expect(SETUP_STEPS.map((x) => x.id)).toEqual(["sign_in", "company", "prove_domain", "read_site", "review", "sign", "install", "check", "monitoring"]);
+    expect(SETUP_STEPS.map((x) => x.id)).toEqual(["sign_in", "company", "prove_domain", "read_site", "review", "sign", "install", "check"]);
     expect(SETUP_STEPS.reduce((n, x) => n + (x.basic_seconds ?? 0), 0)).toBe(570);
-    expect(SETUP_STEPS.reduce((n, x) => n + x.full_seconds, 0)).toBe(855);
+    expect(SETUP_STEPS.reduce((n, x) => n + x.full_seconds, 0)).toBe(825);
     const t = (sec: number) => new Date(NOW.getTime() + sec * 1000).toISOString();
     const basic = measureSetup(NOW.toISOString(), { sign_in: t(0), company: t(25), prove_domain: t(300), read_site: t(420) });
     expect(basic.steps.slice(0, 4).map((x) => x.spent_seconds)).toEqual([0, 25, 275, 120]);
@@ -121,11 +121,11 @@ describe("Semanto Basic state machine", () => {
     // A read that overlaps the proof costs nothing extra: step 4 is measured from the latest earlier completion.
     const overlapped = measureSetup(NOW.toISOString(), { sign_in: t(0), company: t(20), read_site: t(200), prove_domain: t(250) });
     expect(overlapped.steps[3]!.spent_seconds).toBe(0);
-    const full = measureSetup(NOW.toISOString(), { sign_in: t(0), company: t(30), prove_domain: t(300), read_site: t(540), review: t(600), sign: t(650), install: t(780), check: t(820), monitoring: t(910) });
+    const full = measureSetup(NOW.toISOString(), { sign_in: t(0), company: t(30), prove_domain: t(300), read_site: t(540), review: t(600), sign: t(650), install: t(780), check: t(910) });
     expect(full.full).toEqual({ target_seconds: 900, spent_seconds: 910, within_target: false });
     const partial = measureSetup(NOW.toISOString(), { sign_in: t(0), company: t(20) });
     expect(partial.basic.spent_seconds).toBeNull();
-    expect(partial.not_started).toHaveLength(7);
+    expect(partial.not_started).toHaveLength(6);
   });
   it("cleans a pasted website to its domain", () => {
     expect(cleanDomain("https://www.Acme.com/about?x=1")).toBe("acme.com");

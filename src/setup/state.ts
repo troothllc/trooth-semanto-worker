@@ -25,7 +25,7 @@ export interface SetupRecord {
   started_at: string;
   /** The address setup emails go to: the session that started setup. */
   owner_email: string | null;
-  /** When each of the nine steps finished. */
+  /** When each of the eight steps finished. */
   steps: Partial<Record<SetupStepId, string>>;
   /** The proof value, trooth-domain-challenge= and 48 hex. */
   challenge: string;

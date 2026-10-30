@@ -190,9 +190,9 @@ export function basicHeaders(): Record<string, string> {
   return { "Trooth-Record-State": "read", "Trooth-Witnessed-By": "Trooth", "Trooth-Signed-By-Company": "no" };
 }
 
-// ------------------------------------------------------------------ the setup: nine steps, measured
+// ------------------------------------------------------------------ the setup: eight steps, measured
 
-export type SetupStepId = "sign_in" | "company" | "prove_domain" | "read_site" | "review" | "sign" | "install" | "check" | "monitoring";
+export type SetupStepId = "sign_in" | "company" | "prove_domain" | "read_site" | "review" | "sign" | "install" | "check";
 
 export interface SetupStep {
   n: number;
@@ -205,7 +205,7 @@ export interface SetupStep {
   full_seconds: number;
 }
 
-/** docs/audit/workflow-research.md section 5. Basic steps 1 to 4 sum to 570 (target 600); full steps 1 to 9 to 855 (target 900). */
+/** docs/audit/workflow-research.md section 5. Basic steps 1 to 4 sum to 570 (target 600); full steps 1 to 8 to 825 (target 900). */
 export const SETUP_STEPS: SetupStep[] = [
   { n: 1, id: "sign_in", words: "Sign in", who: "owner", basic_seconds: 30, full_seconds: 30 },
   { n: 2, id: "company", words: "Name your company and website", who: "owner", basic_seconds: 30, full_seconds: 30 },
@@ -215,7 +215,6 @@ export const SETUP_STEPS: SetupStep[] = [
   { n: 6, id: "sign", words: "Sign the version", who: "owner", basic_seconds: null, full_seconds: 45 },
   { n: 7, id: "install", words: "Put it on your site", who: "owner", basic_seconds: null, full_seconds: 120 },
   { n: 8, id: "check", words: "Trooth checks it works", who: "trooth", basic_seconds: null, full_seconds: 30 },
-  { n: 9, id: "monitoring", words: "Start monitoring", who: "trooth_then_owner", basic_seconds: null, full_seconds: 30 },
 ];
 
 export const BASIC_TARGET_SECONDS = 600;
