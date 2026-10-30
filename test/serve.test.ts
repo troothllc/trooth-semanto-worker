@@ -423,6 +423,18 @@ describe("receipts and background handlers", () => {
     await new Promise((r) => setTimeout(r, 5));
     expect(estate.ports.receipts.recorded[before]).toMatchObject({ representation: "jsonld", proof: "web_bot_auth", agent_key_url: "https://agent.example/keys" });
   });
+  it("serves the public benchmark at /benchmarks, before the company routes, cached an hour", async () => {
+    let asked: [string, string] | null = null;
+    const withRows = createApp({ ports: estate.ports, benchmarkRows: async (from, to) => ((asked = [from, to]), [{ agent_key_url: "https://agent.example/d", proof: "web_bot_auth", representation: "markdown", reads: 40, companies: 22 }]) });
+    const res = await withRows.request(`${BASE}/benchmarks`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    const body = (await res.json()) as { object: string; cells: { reader: string }[]; license: { name: string } };
+    expect(body.object).toBe("semanto.benchmark");
+    expect(body.cells.map((c) => c.reader)).toEqual(["agent.example"]);
+    expect(asked![1]).toBe(`${FIXED_NOW.toISOString().slice(0, 10)}T00:00:00.000Z`);
+    expect((await app.request(`${BASE}/benchmarks`)).status).toBe(404);
+  });
   it("routes crons and queue messages to the job port", async () => {
     await runScheduled(estate.ports, "15 * * * *");
     await runScheduled(estate.ports, "30 1 * * *");

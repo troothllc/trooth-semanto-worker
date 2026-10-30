@@ -49,6 +49,8 @@ import { resolve as resolveDelivery, validateSettings, withDefaults, DEFAULT_SET
 import { registerOsRoutes } from "./os-routes";
 import type { OsService } from "../os/service";
 import type { LimitGroup } from "../readers/rate-limit";
+import type { AggregateRow } from "../readers/ports";
+import { benchmark } from "../readers/receipts";
 import { newestValidSellerList, sellerListAuthorization } from "../os/sellers";
 
 type Vars = { Variables: { receipt?: ReceiptInput; requestId?: string } };
@@ -128,6 +130,8 @@ export interface RouteDeps {
   firstPublications?: { get(record_id: string): Promise<FirstPublicationRecord | null> };
   /** The newest signed revocation list for a company, or for everyone with null. */
   revocations?: (trooth_id: string | null) => Promise<{ jws: string; issued_at: string } | null>;
+  /** Reads across the network for the public benchmark (src/readers/receipts.ts benchmark). */
+  benchmarkRows?: (fromIso: string, toIso: string) => Promise<AggregateRow[]>;
   /** Origins allowed to call /os from a browser; DASHBOARD_ORIGINS by default (src/index.ts adds http://localhost in development). */
   dashboardOrigins?: readonly string[];
   /** The workspace contract of 23 October 2026 (src/os/service.ts, routes in src/serve/os-routes.ts). */
@@ -499,6 +503,15 @@ export function createApp(deps: RouteDeps): ServeApp {
     return send(c, { status: 200, rep: "json", body: json({ object: "semanto.revocation_list", trooth_id, jws: list.jws, list: payload }), version_id: null, links: {}, signer: await witnessSigner() });
   }
   app.get(`${apiPrefix}/revocations`, (c) => serveRevocations(c, null));
+  // The public benchmark: the last 30 full UTC days of reads across the network, cells under 20 companies left out.
+  app.get(`${apiPrefix}/benchmarks`, async (c) => {
+    if (!deps.benchmarkRows) return sendProblem(c, null, null, "semanto_not_found", { detail: "The benchmark is not published from this deployment." });
+    const today = new Date(`${ports.now().toISOString().slice(0, 10)}T00:00:00.000Z`);
+    const from = new Date(today.getTime() - 30 * 86_400_000).toISOString();
+    const to = today.toISOString();
+    const body = benchmark(await deps.benchmarkRows(from, to), from, to);
+    return send(c, { status: 200, rep: "json", body: json(body), version_id: null, links: {}, signer: await witnessSigner(), extra: { "Cache-Control": "public, max-age=3600" } });
+  });
   app.get(`${apiPrefix}/:trooth_id/revocations`, async (c) => {
     const trooth_id = c.req.param("trooth_id");
     if (!isTroothId(trooth_id)) return sendProblem(c, null, null, "invalid_trooth_id");

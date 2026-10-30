@@ -207,6 +207,7 @@ export function wire(env: Env): Wired {
     commerce,
     firstPublications: { get: (id) => store.getFirstPublication(id) },
     revocations: (trooth_id) => store.getRevocationList(trooth_id),
+    benchmarkRows: (from, to) => receiptStore.aggregate(from, to),
     ...(rate ? { rateLimit: durableRateLimit(rate), limit: durableKeyedLimit(rate) } : {}),
     os,
     // The dashboard on trooth.co and www.trooth.co; http://localhost too in development.

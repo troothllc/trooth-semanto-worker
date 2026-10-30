@@ -117,3 +117,7 @@ Server-side events, one row each, never computed on the client: `semanto.preview
 ## What is never shown
 
 A number or grade that judges the company, a rank, a percentage of "truth", a prediction that AI will prefer or trust the company, a comparison that ranks companies, or a figure Trooth did not measure. Fixture numbers appear only in files named as fixtures and never on a product surface.
+
+## The public benchmark
+
+`GET /public/semanto/benchmarks` publishes reads across the network for the last 30 full UTC days: one cell per reader and format, with the reads and the number of companies read. A reader is named, by its key directory's host, only when its requests carried a Web Bot Auth signature that checked; every other read is counted under "unproven readers", whatever user agent it claimed. A cell with fewer than 20 companies is left out, and the answer says how many cells and reads were left out. Licensed CC BY 4.0, attribution "Semanto read receipts, Trooth (trooth.co)". Copies an adapter served from its own store never reach Trooth and are not counted.

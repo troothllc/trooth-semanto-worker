@@ -22,7 +22,7 @@ import { semantoId } from "@/core/ids";
 import { JWS_TYPES, signObject, verifyJws } from "@/core/jws";
 import type { PrivateJwk, PublicJwk } from "@/core/keys";
 import type { Representation } from "@/core/negotiate";
-import type { ReceiptRow, ReceiptStore } from "./ports";
+import type { AggregateRow, ReceiptRow, ReceiptStore } from "./ports";
 import { directoryDisplayName, proofFromResult, type WebBotAuthResult } from "./webbotauth";
 
 export type Receipt = ReceiptRow;
@@ -200,6 +200,76 @@ export function dashboardRows(receipts: Receipt[], known?: Record<string, string
   return [...rows.values()]
     .map(({ pageSet, ...rest }) => ({ ...rest, pages: pageSet.size }))
     .sort((a, b) => b.reads - a.reads);
+}
+
+// ---------------------------------------------------------------- the public benchmark
+
+/** A cell is printed only when at least this many companies' reads are in it, so no company can be picked out. */
+export const BENCHMARK_MIN_COMPANIES = 20;
+export const BENCHMARK_LICENSE = { name: "CC BY 4.0", url: "https://creativecommons.org/licenses/by/4.0/" } as const;
+
+export interface BenchmarkCell {
+  /** The reader: its key directory's host when it signed its requests (Web Bot Auth), else "unproven readers". */
+  reader: string;
+  agent_key_url: string | null;
+  proof: "web_bot_auth" | "none";
+  representation: string;
+  reads: number;
+  companies: number;
+}
+
+export interface Benchmark {
+  object: "semanto.benchmark";
+  from: string;
+  to: string;
+  min_companies: number;
+  definitions: Record<string, string>;
+  cells: BenchmarkCell[];
+  /** How many cells were left out for having too few companies, and their reads together. */
+  suppressed: { cells: number; reads: number };
+  license: typeof BENCHMARK_LICENSE;
+  attribution: string;
+}
+
+/** The public view of reads across the network: only cells with at least BENCHMARK_MIN_COMPANIES companies. */
+export function benchmark(rows: AggregateRow[], from: string, to: string, minCompanies = BENCHMARK_MIN_COMPANIES): Benchmark {
+  const kept: BenchmarkCell[] = [];
+  let sCells = 0;
+  let sReads = 0;
+  for (const r of rows) {
+    if (r.companies < minCompanies) {
+      sCells++;
+      sReads += r.reads;
+      continue;
+    }
+    const proven = r.proof === "web_bot_auth" && r.agent_key_url !== null;
+    let reader = "unproven readers";
+    if (proven) {
+      try {
+        reader = new URL(r.agent_key_url!).host;
+      } catch {
+        reader = r.agent_key_url!;
+      }
+    }
+    kept.push({ reader, agent_key_url: proven ? r.agent_key_url : null, proof: proven ? "web_bot_auth" : "none", representation: r.representation, reads: r.reads, companies: r.companies });
+  }
+  kept.sort((a, b) => b.reads - a.reads || a.reader.localeCompare(b.reader) || a.representation.localeCompare(b.representation));
+  return {
+    object: "semanto.benchmark",
+    from,
+    to,
+    min_companies: minCompanies,
+    definitions: {
+      reads: "Answers Trooth served with status 200 or 304 for a company's signed file, a page, its facts, its llms files or its sitemap. Copies an adapter served from its own store are not counted.",
+      companies: "Distinct companies whose files the reader read in the window.",
+      reader: "A reader is named only when it signed its requests with Web Bot Auth and the signature checked against its key directory; every other read is counted under unproven readers.",
+      representation: "The format served: markdown, json, jsonld or text.",
+    },
+    cells: kept,
+    suppressed: { cells: sCells, reads: sReads },
+    license: BENCHMARK_LICENSE,
+    attribution: "Semanto read receipts, Trooth (trooth.co)",
+  };
 }
 
 // ---------------------------------------------------------------- CSV export

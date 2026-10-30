@@ -210,6 +210,16 @@ export interface ReceiptStore {
   list(troothId: string, fromIso: string, toIso: string): Promise<ReceiptRow[]>;
   /** Delete receipts read before this instant, at most `limit` of them; returns how many went. */
   prune?(beforeIso: string, limit: number): Promise<number>;
+  /** Reads across every company in [from, to), one row per reader key directory (null for unproven) and representation. */
+  aggregate?(fromIso: string, toIso: string): Promise<AggregateRow[]>;
+}
+
+export interface AggregateRow {
+  agent_key_url: string | null;
+  proof: "web_bot_auth" | "none";
+  representation: string;
+  reads: number;
+  companies: number;
 }
 
 export class MemoryReceiptStore implements ReceiptStore {
@@ -219,6 +229,19 @@ export class MemoryReceiptStore implements ReceiptStore {
   }
   async list(troothId: string, fromIso: string, toIso: string): Promise<ReceiptRow[]> {
     return this.rows.filter((r) => r.trooth_id === troothId && r.read_at >= fromIso && r.read_at < toIso);
+  }
+  async aggregate(fromIso: string, toIso: string): Promise<AggregateRow[]> {
+    const cells = new Map<string, AggregateRow & { set: Set<string> }>();
+    for (const r of this.rows) {
+      if (r.read_at < fromIso || r.read_at >= toIso) continue;
+      const url = r.proof === "web_bot_auth" ? r.agent_key_url : null;
+      const k = `${url ?? ""}|${r.representation}`;
+      const c = cells.get(k) ?? { agent_key_url: url, proof: url ? "web_bot_auth" : "none", representation: r.representation, reads: 0, companies: 0, set: new Set<string>() };
+      c.reads += r.count ?? 1;
+      c.set.add(r.trooth_id);
+      cells.set(k, c);
+    }
+    return [...cells.values()].map(({ set, ...c }) => ({ ...c, companies: set.size }));
   }
   async prune(beforeIso: string, limit: number): Promise<number> {
     let n = 0;
@@ -260,6 +283,15 @@ export class D1ReceiptStore implements ReceiptStore {
       .prepare("SELECT id, trooth_id, version, page_id, representation, agent_key_url, agent_keyid AS keyid, proof, read_at, ip_hash, count FROM semanto_read_receipts WHERE trooth_id = ?1 AND read_at >= ?2 AND read_at < ?3 ORDER BY read_at")
       .bind(troothId, fromIso, toIso)
       .all<ReceiptRow>();
+    return res.results;
+  }
+  async aggregate(fromIso: string, toIso: string): Promise<AggregateRow[]> {
+    const res = await this.db
+      .prepare(
+        "SELECT CASE WHEN proof = 'web_bot_auth' THEN agent_key_url END AS agent_key_url, CASE WHEN proof = 'web_bot_auth' AND agent_key_url IS NOT NULL THEN 'web_bot_auth' ELSE 'none' END AS proof, representation, SUM(count) AS reads, COUNT(DISTINCT trooth_id) AS companies FROM semanto_read_receipts WHERE read_at >= ?1 AND read_at < ?2 GROUP BY 1, 2, 3",
+      )
+      .bind(fromIso, toIso)
+      .all<AggregateRow>();
     return res.results;
   }
   async prune(beforeIso: string, limit: number): Promise<number> {

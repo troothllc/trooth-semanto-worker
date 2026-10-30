@@ -12,7 +12,7 @@ import { signMessage, contentDigest } from "@/core/httpsig";
 import { verifyJws, JWS_TYPES } from "@/core/jws";
 import { MemoryHttp, MemoryKeyCache, MemoryNonceStore, MemoryReceiptStore } from "@/readers/ports";
 import { verifyWebBotAuth, parseSignatureAgent, directoryUrl, directoryDisplayName, fetchDirectory, DIRECTORY_PATH, type WebBotAuthDeps } from "@/readers/webbotauth";
-import { makeReceipt, recordRead, hashIp, ipHashSalt, utcDay, signDailyDigest, verifyDailyDigest, summarize, dashboardRows, receiptsCsv, RECEIPT_RETENTION_DAYS, type Receipt } from "@/readers/receipts";
+import { makeReceipt, recordRead, hashIp, ipHashSalt, utcDay, signDailyDigest, verifyDailyDigest, summarize, dashboardRows, receiptsCsv, RECEIPT_RETENTION_DAYS, benchmark, BENCHMARK_MIN_COMPANIES, type Receipt } from "@/readers/receipts";
 
 const NOW_S = 1_792_000_000; // a fixed unix time
 const AGENT = "https://agent.fixtureagent.com";
@@ -244,5 +244,23 @@ describe("read receipts", () => {
     expect(await store.prune("2026-09-22T00:00:00.000Z", 1)).toBe(1);
     expect(await store.prune("2026-09-22T00:00:00.000Z", 10)).toBe(1);
     expect(store.rows.map((r) => r.id)).toEqual(["smd_fresh"]);
+  });
+
+  it("publishes the network benchmark only for cells with at least 20 companies, naming proven readers by host", async () => {
+    const store = new MemoryReceiptStore();
+    const base = (await sample())[0]!;
+    for (let i = 0; i < 25; i++) await store.put({ ...base, id: `smd_p${i}`, trooth_id: `co${i}`, proof: "web_bot_auth", agent_key_url: "https://agent.example/.well-known/http-message-signatures-directory", representation: "markdown", read_at: "2026-10-10T00:00:00.000Z", count: 2 });
+    for (let i = 0; i < 3; i++) await store.put({ ...base, id: `smd_r${i}`, trooth_id: `co${i}`, proof: "web_bot_auth", agent_key_url: "https://rare.example/dir", representation: "markdown", read_at: "2026-10-10T00:00:00.000Z" });
+    for (let i = 0; i < 21; i++) await store.put({ ...base, id: `smd_u${i}`, trooth_id: `co${i}`, proof: "none", agent_key_url: "https://claimed.example/", representation: "jsonld", read_at: "2026-10-10T00:00:00.000Z" });
+    const b = benchmark(await store.aggregate("2026-10-01T00:00:00.000Z", "2026-10-31T00:00:00.000Z"), "2026-10-01T00:00:00.000Z", "2026-10-31T00:00:00.000Z");
+    expect(BENCHMARK_MIN_COMPANIES).toBe(20);
+    expect(b.cells).toEqual([
+      { reader: "agent.example", agent_key_url: "https://agent.example/.well-known/http-message-signatures-directory", proof: "web_bot_auth", representation: "markdown", reads: 50, companies: 25 },
+      { reader: "unproven readers", agent_key_url: null, proof: "none", representation: "jsonld", reads: 21, companies: 21 },
+    ]);
+    expect(b.suppressed).toEqual({ cells: 1, reads: 3 });
+    expect(b.license.name).toBe("CC BY 4.0");
+    expect(JSON.stringify(b)).not.toContain("claimed.example");
+    expect(JSON.stringify(b)).not.toContain("rare.example");
   });
 });

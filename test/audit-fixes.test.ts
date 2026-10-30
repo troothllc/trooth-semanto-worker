@@ -862,6 +862,19 @@ describe("finding 8: rate limits, receipts counted per minute, directory fetch l
     expect(await store.prune("2026-09-22T00:00:00.000Z", 10)).toBe(1);
     expect((d1.db.prepare("SELECT id FROM semanto_read_receipts").all() as { id: string }[]).map((r) => r.id)).toEqual(["smd_c"]);
   });
+  it("aggregates D1 receipts across companies for the benchmark, unproven reads under one null reader", async () => {
+    const d1 = new FixtureD1();
+    const store = new D1ReceiptStore(d1.asD1());
+    const base = { version: 1, page_id: null, representation: "markdown" as const, keyid: null, ip_hash: "0".repeat(64), count: 2, read_at: "2026-10-10T00:00:00.000Z" };
+    await store.put({ ...base, id: "smd_a", trooth_id: "a", agent_key_url: "https://agent.example/d", proof: "web_bot_auth" });
+    await store.put({ ...base, id: "smd_b", trooth_id: "b", agent_key_url: "https://agent.example/d", proof: "web_bot_auth" });
+    await store.put({ ...base, id: "smd_c", trooth_id: "a", agent_key_url: "https://claimed.example/", proof: "none" });
+    const rows = await store.aggregate("2026-10-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z");
+    expect(rows.sort((x, y) => String(x.agent_key_url).localeCompare(String(y.agent_key_url)))).toEqual([
+      { agent_key_url: "https://agent.example/d", proof: "web_bot_auth", representation: "markdown", reads: 4, companies: 2 },
+      { agent_key_url: null, proof: "none", representation: "markdown", reads: 2, companies: 1 },
+    ]);
+  });
 
   it("does not fetch a Web Bot Auth key directory past the per-origin or per-client limit", async () => {
     const agent = await generateKeyPair();
