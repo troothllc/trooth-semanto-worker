@@ -444,13 +444,20 @@ export async function setupState(p: Pipeline, trooth_id: string, opts: { live: b
     checked_at: last?.checked_at ?? null,
   };
 
-  // monitoring
-  const suggested = questionsFor(config.gap.kinds[0] ?? "b2b", { company: company.org, domain: company.domain, products: config.gap.products })
-    .map((q) => q.text)
-    .slice(0, 10);
-  const monitoring: SetupDoc["monitoring"] = { started_at: setup.monitoring?.started_at ?? null, questions: setup.monitoring?.questions ?? [], competitors: setup.monitoring?.competitors ?? [], suggested_questions: suggested };
+  // monitoring: only while Watch what AI says is on; off (production), setup ends when the three install checks pass.
+  const gapOn = Boolean(p.d.gapReports);
+  const monitoring: SetupDoc["monitoring"] = gapOn
+    ? {
+        started_at: setup.monitoring?.started_at ?? null,
+        questions: setup.monitoring?.questions ?? [],
+        competitors: setup.monitoring?.competitors ?? [],
+        suggested_questions: questionsFor(config.gap.kinds[0] ?? "b2b", { company: company.org, domain: company.domain, products: config.gap.products })
+          .map((q) => q.text)
+          .slice(0, 10),
+      }
+    : null;
 
-  const step = decideStep({ proven, basic: company.tier === "basic", readDone: readStatus === "done", path, confirmed: setup.confirmed !== null, signed: company.current_version !== null, installPassed, monitoringStarted: setup.monitoring !== null });
+  const step = decideStep({ proven, basic: company.tier === "basic", readDone: readStatus === "done", path, confirmed: setup.confirmed !== null, signed: company.current_version !== null, installPassed, monitoringStarted: !gapOn || setup.monitoring !== null });
   return {
     object: "semanto.setup",
     trooth_id,
@@ -552,6 +559,8 @@ export async function setupAction(p: Pipeline, action: WorkspaceAction, ws: Work
     }
     case "setup/monitoring": {
       if (!mayAdminister(ws)) return problem("forbidden", "Only an owner or admin can start monitoring.");
+      // Off (production): nothing is saved, no questions and no other companies' domains (blueprint A2).
+      if (!p.d.gapReports) return problem("feature_unavailable", "Watch what AI says is not available yet. Setup is complete once the three install checks pass.");
       const questions = Array.isArray(body.questions) ? body.questions : [];
       const competitorsIn = Array.isArray(body.competitors) ? body.competitors : [];
       if (questions.length > 10 || questions.some((q) => typeof q !== "string" || !q.trim() || q.length > 300)) return problem("invalid_request", "Send at most 10 questions, each a sentence under 300 characters.");
@@ -567,7 +576,6 @@ export async function setupAction(p: Pipeline, action: WorkspaceAction, ws: Work
       await p.d.store.putConfig(trooth_id, { ...config, gap: { ...config.gap, questions: questions.map((q) => (q as string).trim()), ...(competitors[0] ? { competitor: competitors[0] } : {}) } });
       await p.d.store.putSetup({ ...setup, monitoring: { started_at: now, questions: questions.map((q) => (q as string).trim()), competitors }, steps: { ...setup.steps, monitoring: setup.steps.monitoring ?? now } });
       // The first report starts at once: queued when the queue is bound.
-      if (!p.d.gapReports) return state();
       if (p.d.enqueue) await p.d.enqueue({ kind: "companies", job: "gap", trooth_ids: [trooth_id] });
       else await p.gapReportsFor([trooth_id]);
       return state();

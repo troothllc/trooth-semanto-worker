@@ -917,7 +917,7 @@ describe("4. signing paths, keys and the workspace actions", () => {
     const ada = WORKSPACES["Bearer owner-token"]!;
     for (const [action, body] of [["gap-report", {}], ["gap-report", { queue: true }], ["competitor-report", {}]] as const) {
       const r = await off.handle(action, ada, "acme", body);
-      expect(r.problem?.code).toBe("conflict");
+      expect(r.problem?.code).toBe("feature_unavailable");
       expect(r.problem?.detail).toBe(GAP_REPORTS_OFF);
     }
     expect(await off.weeklyGapReports()).toEqual([]);

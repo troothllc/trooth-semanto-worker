@@ -39,6 +39,7 @@ export type ProblemCode =
   | "internal_error"
   | "witness_key_missing"
   | "company_key_unavailable"
+  | "feature_unavailable"
   | "passkey_missing"
   | "passkey_challenge_expired"
   | "passkey_origin_mismatch"
@@ -366,6 +367,14 @@ export const PROBLEMS: Record<ProblemCode, Catalog> = {
     terminal: true,
     what_happened: "The seller list is not signed by a key this company held when the list was issued, or the signature does not match the list. Nothing was stored.",
     what_to_do: "Sign the exact list with your current signing key (typ seller-list) and send it again.",
+  },
+  feature_unavailable: {
+    status: 410,
+    title: "This feature is not available",
+    retryable: false,
+    terminal: true,
+    what_happened: "Watch what AI says is not part of Semanto right now. Nothing was asked of any AI assistant and nothing was stored.",
+    what_to_do: "Nothing to do. Your signed record, install checks and settings work as before.",
   },
   company_key_unavailable: {
     status: 503,

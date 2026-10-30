@@ -96,8 +96,8 @@ Decided by the server, in this order:
 | `prove` | the domain is not confirmed on trooth.co (and was not proven before one signup) |
 | `read` | the read is not done, or the owner has not chosen a path on the receipt screen (`setup/choose`) |
 | `review` | full path: the newest built version is not confirmed, or not signed |
-| `install` | full path: signed, and the install check has not passed all three checks, or monitoring has not started |
-| `done` | Basic path chosen after the receipt, or full path with all three checks passed and monitoring started |
+| `install` | full path: signed, and the install check has not passed all three checks (or, only while Watch what AI says is on, monitoring has not started) |
+| `done` | Basic path chosen after the receipt, or full path with all three checks passed (and, only while Watch what AI says is on, monitoring started) |
 
 `basic` is true while the company is on Semanto Basic (tier `basic`). `setup/choose` with `path: "full"` makes it false.
 
@@ -199,7 +199,7 @@ Decided by the server, in this order:
 
 ### next_action
 
-The one primary action for the current step, `{ label, method, url }`, or null when the step is `done`. Labels: before a company exists with a confirmed domain, "Read my website" (POST `setup/start`); `prove` "Confirm your domain" (GET `https://trooth.co/dashboard/public-page?tab=domain`); `read` "Finish setup" (POST `setup/choose`) once the read is done, else "Wait for the read" (GET `setup`); `review` "Confirm these facts" (POST `setup/confirm`) until confirmed; then, with hosted custody, "Add a signing passkey" (POST `passkeys/options`) while the signed-in person has none and "Sign with my passkey" (POST `sign/options`) once they have one; with customer custody, "Sign with our own key" (POST `sign`); `install` "Check my site" (POST `setup/install-check`) until it passes, then "Start monitoring" (POST `setup/monitoring`).
+The one primary action for the current step, `{ label, method, url }`, or null when the step is `done`. Labels: before a company exists with a confirmed domain, "Read my website" (POST `setup/start`); `prove` "Confirm your domain" (GET `https://trooth.co/dashboard/public-page?tab=domain`); `read` "Finish setup" (POST `setup/choose`) once the read is done, else "Wait for the read" (GET `setup`); `review` "Confirm these facts" (POST `setup/confirm`) until confirmed; then, with hosted custody, "Add a signing passkey" (POST `passkeys/options`) while the signed-in person has none and "Sign with my passkey" (POST `sign/options`) once they have one; with customer custody, "Sign with our own key" (POST `sign`); `install` "Check my site" (POST `setup/install-check`) until it passes, then, only while Watch what AI says is on, "Start monitoring" (POST `setup/monitoring`). Watch what AI says is off in production (2026-10-29): `monitoring` is null, setup is `done` once the three checks pass, and `setup/monitoring`, `gap-report`, `competitor-report` and `GET reports` answer 410 `feature_unavailable`.
 
 ## Setup routes
 
@@ -216,7 +216,7 @@ The one primary action for the current step, `{ label, method, url }`, or null w
 | `POST /os/semanto/{id}/setup/confirm` | `{ "version": 1, "root_hash": "sha256:<64 hex>" }` | owner or admin | completes step 5. A root hash that is not the newest build is a 409 problem: "This version changed while you were reviewing. Review the changes, then confirm." |
 | `POST /os/semanto/{id}/setup/host` | `{ "host": "webflow" }` | owner or admin | the owner's host choice (the "Change" link) |
 | `POST /os/semanto/{id}/setup/install-check` | `{}` | member and up | `{ "object": "semanto.install_check", "url", "checks", "messages": { "markdown", "signature", "well_known" }, "message", "checked_at", "setup": <setup state> }` |
-| `POST /os/semanto/{id}/setup/monitoring` | `{ "questions"?: string[], "competitors"?: [{ "name", "domain" }] }` (at most 10 questions, 3 competitors) | owner or admin | saves the questions and competitors, starts the first report (queued when the queue is bound) and completes step 9 |
+| `POST /os/semanto/{id}/setup/monitoring` | `{ "questions"?: string[], "competitors"?: [{ "name", "domain" }] }` (at most 10 questions, 3 competitors) | owner or admin | while Watch what AI says is on: saves the questions and competitors, starts the first report (queued when the queue is bound) and completes step 9. Off (production): 410 `feature_unavailable`, nothing saved |
 | `POST /os/semanto/{id}/setup/save-for-later` | `{ "screen"?: "A" to "F" }` | member and up | `saved_for_later: true`; the state is kept on the server |
 | `POST /os/semanto/{id}/setup/resume` | `{}` | member and up | `saved_for_later: false` |
 

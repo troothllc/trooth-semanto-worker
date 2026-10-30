@@ -141,7 +141,7 @@ interface World {
   deps: PipelineDeps;
 }
 
-async function world(opts: { queue?: boolean; probe?: (url: string, headers: Record<string, string>) => Promise<{ status: number; headers: Record<string, string>; body: Uint8Array } | null>; rateLimit?: RouteDeps["rateLimit"]; companies?: { trooth_id: string; proven: boolean; os?: string }[] } = {}): Promise<World> {
+async function world(opts: { queue?: boolean; probe?: (url: string, headers: Record<string, string>) => Promise<{ status: number; headers: Record<string, string>; body: Uint8Array } | null>; rateLimit?: RouteDeps["rateLimit"]; companies?: { trooth_id: string; proven: boolean; os?: string }[]; gapReports?: boolean } = {}): Promise<World> {
   const clock = { now: new Date(NOW) };
   const now = () => new Date(clock.now);
   DOMAINS = defaultDomains();
@@ -175,7 +175,7 @@ async function world(opts: { queue?: boolean; probe?: (url: string, headers: Rec
     setupDns: dns,
     staging,
     gapAdapters: () => [],
-    gapReports: true,
+    gapReports: opts.gapReports ?? true,
     random: (n) => new Uint8Array(n),
     nonces: new MemoryNonceStore(),
     receiptStore: new MemoryReceiptStore(),
@@ -491,6 +491,24 @@ describe("setup: the six-screen backend over docs/spec/setup-api.md", () => {
     expect(started.monitoring).toMatchObject({ questions: ["Does Acme Inc ship to Canada?"], competitors: [{ name: "Beta Ltd", domain: "beta.example" }] });
     expect(started.timings.full.spent_seconds).not.toBeNull();
     expect(started.timings.not_started).toEqual([]);
+  });
+
+  it("with Watch what AI says off (production), setup is done once the three install checks pass, and monitoring is refused", async () => {
+    const w = await world({ gapReports: false });
+    await call(w, "POST", "/setup/start", "Bearer ada", { org: "Acme Inc", domain: "acme.com" });
+    await call(w, "POST", "/acme/setup/choose", "Bearer ada", { path: "full" });
+    const doc = await json(await call(w, "GET", "/acme/setup/review", "Bearer ada"));
+    await call(w, "POST", "/acme/setup/confirm", "Bearer ada", { version: doc.version, root_hash: doc.root_hash });
+    expect((await addPasskey(poster(w), "acme", "Bearer ada", await walletOf(w).for("Bearer ada"))).status).toBe(201);
+    expect((await signHosted(w)).status).toBe(200);
+    const check = await json(await call(w, "POST", "/acme/setup/install-check", "Bearer ada", {}));
+    expect(check.checks).toEqual({ markdown: "pass", signature: "pass", well_known: "pass" });
+    expect(check.setup).toMatchObject({ step: "done", next_action: null, monitoring: null });
+    const refused = await call(w, "POST", "/acme/setup/monitoring", "Bearer ada", { questions: ["Does Acme Inc ship to Canada?"], competitors: [{ name: "Beta Ltd", domain: "beta.example" }] });
+    expect(refused.status).toBe(410);
+    expect(await json(refused)).toMatchObject({ code: "feature_unavailable", retryable: false });
+    expect((await call(w, "GET", "/acme/reports", "Bearer ada")).status).toBe(410);
+    expect((await w.store.getSetup("acme"))!.monitoring ?? null).toBeNull();
   });
 
   it("GET reports answers the newest gap report for the Watch page, and null before the first", async () => {

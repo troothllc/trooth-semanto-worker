@@ -466,7 +466,7 @@ export class Pipeline implements WorkspaceHandlers {
           return await registerPasskey(this, ws, trooth_id, body);
         case "gap-report":
           if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
-          if (!this.d.gapReports) return problem("conflict", GAP_REPORTS_OFF);
+          if (!this.d.gapReports) return problem("feature_unavailable", GAP_REPORTS_OFF);
           return await this.gapReport(trooth_id, body);
         case "monitor/run":
           if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
@@ -492,7 +492,7 @@ export class Pipeline implements WorkspaceHandlers {
           return await this.detect(trooth_id);
         case "competitor-report":
           if (!mayOperate(ws.role)) return problem("forbidden", VIEWER_ONLY);
-          if (!this.d.gapReports) return problem("conflict", GAP_REPORTS_OFF);
+          if (!this.d.gapReports) return problem("feature_unavailable", GAP_REPORTS_OFF);
           return await this.competitorReport(trooth_id, body);
         default:
           return await setupAction(this, action, ws, trooth_id, body);
@@ -518,6 +518,8 @@ export class Pipeline implements WorkspaceHandlers {
         case "receipts.csv":
           return await this.receiptsCsvRead(trooth_id, query.from, query.to);
         case "reports":
+          // Off (production): no stored report is served (blueprint A2/A3).
+          if (!this.d.gapReports) return problem("feature_unavailable", GAP_REPORTS_OFF);
           return ok(200, { object: "semanto.reports", trooth_id, gap: await this.d.store.latestGapReport(trooth_id) });
       }
     } catch (e) {
