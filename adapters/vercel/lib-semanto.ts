@@ -27,5 +27,8 @@ export function semantoManifest(): ManifestCache | null {
   return cache;
 }
 
+/** Sent by the route handler when it falls back to the site's own page; the middleware passes such a request through. */
+export const BYPASS_HEADER = "Trooth-Fallback";
+
 /** The route the middleware rewrites to. */
 export const SEMANTO_ROUTE = "/semanto";

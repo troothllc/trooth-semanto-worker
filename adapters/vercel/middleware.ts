@@ -13,7 +13,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { decide, proofHeaders, mergeVary } from "./shared/semanto-adapter.mjs";
-import { semantoConfig, semantoManifest, SEMANTO_ROUTE } from "./lib-semanto";
+import { semantoConfig, semantoManifest, SEMANTO_ROUTE, BYPASS_HEADER } from "./lib-semanto";
 
 export const config = {
   matcher: ["/((?!_next/|semanto/|\\.well-known/|favicon\\.ico|api/).*)"],
@@ -22,6 +22,8 @@ export const config = {
 export async function middleware(request: NextRequest) {
   const cfg = semantoConfig();
   if (!cfg.troothId) return NextResponse.next();
+  // The route handler's own fallback request for the site's page.
+  if (request.headers.get(BYPASS_HEADER) === "1") return NextResponse.next();
   const manifestCache = semantoManifest();
   const manifest = manifestCache ? await manifestCache.get() : null;
   const { pathname } = request.nextUrl;

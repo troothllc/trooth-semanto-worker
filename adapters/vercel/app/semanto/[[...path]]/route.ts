@@ -7,22 +7,26 @@
 // returns them with only the API's headers. Route handlers follow the Next.js
 // App Router conventions (nextjs.org/docs/app/api-reference/file-conventions/route).
 
-import { decide, fetchSigned } from "../../../shared/semanto-adapter.mjs";
-import { semantoConfig, semantoManifest } from "../../../lib-semanto";
+import { decide, serveWithFallback } from "../../../shared/semanto-adapter.mjs";
+import { semantoConfig, semantoManifest, BYPASS_HEADER } from "../../../lib-semanto";
 
 export const dynamic = "force-dynamic";
 
 async function serve(request: Request): Promise<Response> {
   const cfg = semantoConfig();
-  if (!cfg.troothId) return new Response("TROOTH_ID is not set", { status: 500 });
+  // Never a 5xx from the adapter: without TROOTH_ID there is nothing to serve here.
+  if (!cfg.troothId) return new Response(null, { status: 404 });
   const url = new URL(request.url);
   const original = url.pathname.replace(/^\/semanto/, "") || "/";
   const manifestCache = semantoManifest();
   const manifest = manifestCache ? await manifestCache.get() : null;
   const decision = decide(original, request.headers.get("accept"), manifest, { ...cfg, method: request.method });
   if (!decision.serve) return new Response(null, { status: 404 });
+  // When the API is slow or down and no good copy is stored, the reader gets the site's own page: the middleware lets a
+  // request carrying BYPASS_HEADER through untouched, so this cannot loop.
+  const next = (req: Request) => fetch(new URL(original + url.search, url.origin), { method: req.method, headers: { Accept: "text/html", [BYPASS_HEADER]: "1" }, cache: "no-store" });
   // With TROOTH_CONNECTOR_KEY, a signed reader's request goes on with the host it addressed and its address, signed.
-  return fetchSigned(decision, request, fetch, { cache: "no-store" }, cfg);
+  return serveWithFallback({ decision, request, config: cfg, fetchInit: { cache: "no-store" }, next });
 }
 
 export const GET = serve;
