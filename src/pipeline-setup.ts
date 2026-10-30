@@ -53,7 +53,7 @@ const VIEWER_ONLY = "A workspace viewer can read but cannot change setup. Ask an
 /** Trooth IDs never given: they collide with fixed routes. */
 // Every first path segment a public route or a stored-object prefix uses ("builds" is the build objects' prefix under
 // semanto/, "benchmarks" a public route), so no company can be given one.
-export const RESERVED_TROOTH_IDS = new Set(["setup", "claim", "log", "verify", "first-publication", "keys", "revocations", "well-known", "catalogs", "os", "public", "builds", "benchmarks", "credentials"]);
+export const RESERVED_TROOTH_IDS = new Set(["setup", "claim", "log", "verify", "first-publication", "keys", "revocations", "well-known", "catalogs", "os", "public", "builds", "benchmarks", "credentials", "mcp", "agent-keys"]);
 
 /** The address the emails link to: the Semanto page of the trooth.co dashboard. */
 export const SETUP_PAGE_URL = "https://trooth.co/dashboard/semanto";

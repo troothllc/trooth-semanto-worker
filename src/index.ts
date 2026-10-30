@@ -38,6 +38,7 @@
 // A deployment without TROOTH_WITNESS_KEY still starts: routes that sign or
 // witness answer a 503 witness_key_missing problem and the rest keep working.
 
+import { D1AgentKeys } from "./os/agent-keys";
 import { serpApiPort } from "./gap/serpapi";
 import type { Env, QueueMessage } from "./env";
 import { WitnessKeyMissingError, type PrivateJwk, type PublicJwk } from "./core/keys";
@@ -201,6 +202,7 @@ export function wire(env: Env): Wired {
       { http: readersHttp(), cache: new KvKeyCache(env.CACHE), nonces, resolve, ...(rate ? { limit: durableDirectoryLimit(rate) } : {}) },
       forwardingFromStore(store),
     ),
+    agentKeys: new D1AgentKeys(env.DB),
     authorize: troothOsAuthorize(env.TROOTH_OS, async (os_company_id) => (await store.getCompanyByOsCompany(os_company_id))?.trooth_id ?? null, (trooth_id) => store.ownerUserId(trooth_id)),
     session: troothOsSession(env.TROOTH_OS),
     workspace: pipeline,

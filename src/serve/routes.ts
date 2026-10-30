@@ -46,6 +46,8 @@ import { fromBase64Url } from "../core/encoding";
 import type { CommerceStore } from "../commerce/ports";
 import { feedResponse, offerResponse, offersResponse, problemMarkdown, productResponse, productsResponse, ucpManifestResponse, type PlainResponse as CommerceResponse } from "../commerce/routes";
 import { resolve as resolveDelivery, validateSettings, withDefaults, DEFAULT_SETTINGS, type DeliverySettings } from "../settings/delivery";
+import { authorizeAgentKey, bearerAgentKey, type AgentKeyStore } from "../os/agent-keys";
+import { handleMcp } from "../mcp/server";
 import { registerOsRoutes } from "./os-routes";
 import type { OsService } from "../os/service";
 import type { LimitGroup } from "../readers/rate-limit";
@@ -118,6 +120,8 @@ export interface RouteDeps {
    * hook, every /os call is refused with a 401 problem.
    */
   authorize?: (req: Request, trooth_id: string) => Promise<boolean | WorkspaceAuth | null>;
+  /** Agent keys (secrets starting tsk_): a company's credential for an AI agent, checked here before the session (src/os/agent-keys.ts). */
+  agentKeys?: AgentKeyStore;
   /** The pipeline behind the /os actions (src/pipeline.ts). */
   workspace?: WorkspaceHandlers;
   /** Product records, offers and feeds for the commerce public routes. */
@@ -392,6 +396,21 @@ export function createApp(deps: RouteDeps): ServeApp {
 
   // ------------------------------------------------------------ the workspace contract (src/serve/os-routes.ts), before every other route
 
+  // The Semanto MCP server (src/mcp/server.ts): every tool is one request to this same app.
+  app.on(["GET", "POST", "DELETE"], `${osPrefix}/mcp`, async (c) => {
+    if (deps.rateLimit) {
+      const r = await deps.rateLimit(c.req.raw, "read");
+      if (!r.allowed) return sendProblem(c, null, null, "rate_limited", { retry_after: r.retry_after });
+    }
+    let ctx: ExecutionContext | undefined;
+    try {
+      ctx = c.executionCtx as ExecutionContext;
+    } catch {
+      ctx = undefined;
+    }
+    return handleMcp(c.req.raw, { call: (r) => Promise.resolve(app.fetch(r, c.env, ctx)), ...(deps.agentKeys ? { agentKeys: deps.agentKeys } : {}), now: () => ports.now() });
+  });
+
   if (deps.os) {
     registerOsRoutes(app, {
       osPrefix,
@@ -409,6 +428,7 @@ export function createApp(deps: RouteDeps): ServeApp {
       sendRedirect: async (c, location) => send(c, { status: 302, rep: "markdown", body: new Uint8Array(0), version_id: null, location, links: {}, signer: await witnessSigner() }),
       sendJson: async (c, status, value) => send(c, { status, rep: "json", body: json(value), version_id: null, links: {}, signer: await witnessSigner() }),
       ...(deps.limit ? { limit: deps.limit } : {}),
+      ...(deps.agentKeys ? { agentKeys: deps.agentKeys } : {}),
     }, deps.os);
   }
 
@@ -859,6 +879,14 @@ export function createApp(deps: RouteDeps): ServeApp {
 
   /** Deny by default: no hook, no session or a refused session is a 401 problem; a session for another company is a 403 problem. */
   async function workspaceFor(c: Context<Vars>, trooth_id: string): Promise<WorkspaceAuth | Response> {
+    const agentSecret = bearerAgentKey(c.req.raw);
+    if (agentSecret) {
+      // An agent key answers for itself: it is never sent on to the session service.
+      const agent = deps.agentKeys ? await authorizeAgentKey(deps.agentKeys, agentSecret, deps.ports.now()) : null;
+      if (!agent) return sendProblem(c, null, null, "unauthorized", { detail: "The agent key is unknown, revoked or expired. A person makes a new one in Semanto settings on trooth.co." });
+      if (agent.trooth_id !== trooth_id) return sendProblem(c, null, null, "forbidden", { detail: `This agent key belongs to ${agent.trooth_id}, not ${trooth_id}.` });
+      return agent;
+    }
     if (!deps.authorize) return sendProblem(c, null, null, "unauthorized");
     try {
       const answer = await deps.authorize(c.req.raw, trooth_id);

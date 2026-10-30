@@ -8,6 +8,7 @@
 // HTTPS and the company's own site are fakes named as fixtures; no figure
 // here is a measurement.
 
+import type { AgentKeyRow, AgentKeyStore } from "@/os/agent-keys";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { generateKeyPair, type PrivateJwk, type PublicJwk } from "@/core/keys";
@@ -108,6 +109,34 @@ export interface OsWorld {
   dns: Record<string, string[]>;
   probes: Record<string, { status: number; headers: Record<string, string>; body: Uint8Array }>;
   wallet: PasskeyWallet;
+  agentKeys: MemoryAgentKeys;
+}
+
+/** Agent keys in memory, as semanto_agent_keys holds them. */
+export class MemoryAgentKeys implements AgentKeyStore {
+  rows: (AgentKeyRow & { secret_sha256: string })[] = [];
+  async insert(r: AgentKeyRow & { secret_sha256: string }) {
+    this.rows.push({ ...r });
+  }
+  async list(trooth_id: string) {
+    return this.rows.filter((r) => r.trooth_id === trooth_id).map(({ secret_sha256: _s, ...r }) => r);
+  }
+  async byHash(h: string) {
+    const r = this.rows.find((x) => x.secret_sha256 === h);
+    if (!r) return null;
+    const { secret_sha256: _s, ...row } = r;
+    return row;
+  }
+  async revoke(trooth_id: string, kid: string, at: string) {
+    const r = this.rows.find((x) => x.trooth_id === trooth_id && x.kid === kid && !x.revoked_at);
+    if (!r) return false;
+    r.revoked_at = at;
+    return true;
+  }
+  async touch(kid: string, at: string) {
+    const r = this.rows.find((x) => x.kid === kid);
+    if (r) r.last_used_at = at;
+  }
 }
 
 export async function osWorld(opts: { custody?: "hosted" | "customer"; queue?: boolean; email?: boolean; google?: boolean; workerF?: boolean } = {}): Promise<OsWorld> {
@@ -178,6 +207,7 @@ export async function osWorld(opts: { custody?: "hosted" | "customer"; queue?: b
     assetProbe: async (url) => (probes[url] ? { ...probes[url]!, truncated: false } : null),
   });
   const limiter = new MemoryRateLimiter(() => clock.now.getTime());
+  const agentKeys = new MemoryAgentKeys();
   const app = createApp({
     ports: { ...ports, jobs: pipeline.jobs() },
     // "Bearer session-down": the session service does not answer (QA-12).
@@ -189,8 +219,9 @@ export async function osWorld(opts: { custody?: "hosted" | "customer"; queue?: b
     limit: (key, group) => limiter.take(key, group),
     rateLimit: limiter.hook(),
     revocations: (id) => store.getRevocationList(id),
+    agentKeys,
   });
-  return { clock, witness: w.privateJwk, versions, store, osStore, pipeline, os, app, commerce, google, workerF, emails, queued, receipts, dns, probes, wallet: new PasskeyWallet() };
+  return { agentKeys, clock, witness: w.privateJwk, versions, store, osStore, pipeline, os, app, commerce, google, workerF, emails, queued, receipts, dns, probes, wallet: new PasskeyWallet() };
 }
 
 function sessionDown(): never {

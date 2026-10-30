@@ -1051,6 +1051,7 @@ export class D1PipelineStore implements PipelineStore {
  * holds this list against the migrations: a new table with trooth_id must be named here or in ERASE_KEPT.
  */
 export const ERASE_COMPANY_TABLES = [
+  "semanto_agent_keys",
   "semanto_writeback_items",
   "semanto_writeback_runs",
   "semanto_recall_events",

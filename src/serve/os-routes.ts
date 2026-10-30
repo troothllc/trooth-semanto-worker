@@ -33,6 +33,7 @@ import { listSellerLists, sellerListOptions, submitSellerList } from "../os/sell
 import { listCredentials, publicCredential } from "../os/credentials";
 import { listRecalls, recallOptions, submitRecall } from "../os/recalls";
 import type { WorkspaceAuth, WorkspaceResult, WorkspaceSession } from "./ports";
+import { createAgentKey, listAgentKeys, revokeAgentKey, type AgentKeyStore } from "../os/agent-keys";
 import { namedConnectorKid } from "../pipeline";
 import type { ProblemCode } from "./errors";
 
@@ -52,6 +53,8 @@ export interface RouteKit<V extends { Variables: Record<string, unknown> }> {
   sendJson(c: Context<V>, status: number, value: unknown): Promise<Response>;
   /** A keyed token bucket (src/readers/rate-limit.ts); absent in tests that do not limit. */
   limit?: (key: string, group: LimitGroup) => Promise<{ allowed: boolean; retry_after: number }>;
+  /** Agent keys for AI agents (src/os/agent-keys.ts); absent in tests that do not use them. */
+  agentKeys?: AgentKeyStore;
 }
 
 type Handler = (ws: WorkspaceAuth, trooth_id: string, body: Record<string, unknown>, ctx: RequestContext, kid: string | undefined, run: string | undefined) => Promise<WorkspaceResult>;
@@ -216,6 +219,14 @@ export function registerOsRoutes<V extends { Variables: Record<string, unknown> 
   write("recalls/options", (ws, id, body) => recallOptions(os, ws, id, body));
   write("recalls", (ws, id, body, ctx) => submitRecall(os, ws, id, body, ctx));
   read("recalls", (_ws, id) => listRecalls(os, id));
+
+  // ------------------------------------------------------------ 7. agent keys: a person makes and revokes them; an agent key never can
+  if (kit.agentKeys) {
+    const keys = kit.agentKeys;
+    read("agent-keys", (ws, id) => listAgentKeys(keys, ws, id));
+    write("agent-keys", (ws, id, body, ctx) => createAgentKey(keys, os, ws, id, body, ctx));
+    write("agent-keys/:kid/revoke", (ws, id, _body, ctx, kid) => revokeAgentKey(keys, os, ws, id, kid ?? "", ctx));
+  }
 
   // ------------------------------------------------------------ 6. credentials
   read("credentials", (_ws, id, q) => listCredentials(os, id, q));
