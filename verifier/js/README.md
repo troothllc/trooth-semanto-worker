@@ -28,3 +28,15 @@ In a browser:
 ```
 
 Functions: `verifySemanto(file, pageBytesByUrl, keys, { now, revocations })`, `verifyPageProof(proof, pageBytes, keys, { now })`, `verifyResponse(status, headers, body, keys, { now })`, `verifyWebBotAuthRequest`, `verifyTreeHead`, `verifyInclusionInLog`, `verifyConsistency`, `verifyCheckpoint`, `verifyOffer`, `verifyRevocationList`, `stateOf(version, now, revocations)`, plus `canonicalize` (RFC 8785), `sha256`, the RFC 6962 primitives, `verifyJws` and `verifyMessage` (RFC 9421). Every result is `{ ok, reason, checks: [{ name, ok, detail }] }` with the reason codes listed in `verifier/test-vectors/v1/README.md`. Type declarations are in `verify.d.mts`.
+
+## SemantoClient
+
+`client.mjs` reads a page and checks it in one call: the markdown, both key sets, the response signature and the domain's `_trooth-keys` TXT record over DNS over HTTPS, with key sets and DNS answers kept five minutes.
+
+```js
+import { SemantoClient } from "@trooth/semanto-verify/client";
+const r = await new SemantoClient().read("https://acme.com/pricing");
+if (r.ok) console.log(r.text); else console.log(r.reason, r.checks);
+```
+
+`r.dns` is `true` when the domain's DNS names the signing key, `false` when it names another, `null` when DNS could not be asked.

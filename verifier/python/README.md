@@ -42,3 +42,13 @@ Canonical JSON here supports integers exactly. A non-integer float raises `Canon
 ## Tests
 
 `python3 -m pytest` runs every shared vector in `verifier/test-vectors/v1` (positive and negative), the RFC 6962 known roots, the RFC 8785 cases, the state rules and the command line.
+
+## SemantoClient
+
+```python
+from trooth_semanto_verify.client import SemantoClient
+r = SemantoClient().read("https://acme.com/pricing")
+print(r["ok"], r["dns"], r["reason"])
+```
+
+It fetches with the standard library (pass `fetch=` to use your own), checks the response signature and the domain's `_trooth-keys` TXT record over DNS over HTTPS, and keeps key sets and DNS answers five minutes.

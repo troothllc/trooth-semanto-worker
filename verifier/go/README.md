@@ -41,3 +41,12 @@ Decode JSON with `semanto.DecodeJSON` (it sets `UseNumber`), so a number reaches
 ## Tests
 
 `go test ./semanto/` runs every shared vector in `verifier/test-vectors/v1` (positive and negative), the RFC 6962 known roots, the RFC 8785 cases, the state rules and tampering in each layer.
+
+## Client
+
+```go
+c := semanto.NewClient()
+r, err := c.Read(ctx, "https://acme.com/pricing")
+```
+
+`Read` fetches the page as markdown, checks the response signature against both key sets and the domain's `_trooth-keys` TXT record over DNS over HTTPS, and keeps key sets and DNS answers five minutes. `r.DNS` is nil when DNS could not be asked.

@@ -1,0 +1,16 @@
+{
+  "name": "@trooth/semanto-verify",
+  "version": "1.1.0",
+  "description": "Check a Semanto signed copy, its response signatures and its transparency log proofs. No dependencies.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": { "types": "./verify.d.mts", "default": "./verify.mjs" },
+    "./client": { "types": "./client.d.mts", "default": "./client.mjs" }
+  },
+  "bin": { "semanto-verify": "./cli.mjs" },
+  "files": ["verify.mjs", "verify.d.mts", "client.mjs", "client.d.mts", "cli.mjs", "README.md"],
+  "engines": { "node": ">=20" },
+  "repository": { "type": "git", "url": "https://github.com/troothllc/semanto-verify" },
+  "homepage": "https://trooth.co/docs/semanto"
+}

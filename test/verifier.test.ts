@@ -199,3 +199,31 @@ describe("verifier test vectors (JavaScript)", () => {
     expect(bytes.length).toBeGreaterThan(0);
   });
 });
+
+describe("SemantoClient (verifier/js/client.mjs)", () => {
+  it("reads a page, checks its signature against the published keys and the domain's DNS record, and caches both", async () => {
+    const { SemantoClient } = await import("../verifier/js/client.mjs");
+    const v = readJson("response.json");
+    const k = readJson("keys.json");
+    const calls: string[] = [];
+    const fake = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url === "https://acme.com/security") return new Response(v.response.body, { status: v.response.status, headers: v.response.headers });
+      if (url === "https://acme.com/.well-known/trooth-keys.json") return Response.json(k.company.jwks);
+      if (url === "https://api.trooth.co/public/semanto/.well-known/trooth-keys.json") return Response.json(k.trooth.jwks);
+      if (url.startsWith("https://cloudflare-dns.com/dns-query?name=_trooth-keys.acme.com")) return Response.json({ Answer: [{ type: 16, data: `"${k.company.dns_txt[0]}"` }] });
+      return new Response("no", { status: 404 });
+    }) as typeof fetch;
+    const client = new SemantoClient({ fetch: fake, now: () => v.now_epoch * 1000 });
+    const r = await client.read("https://acme.com/security");
+    expect(r).toMatchObject({ ok: true, status: 200, keyid: v.expect.keyid, dns: true, version: "smv_sf26uv6f5niw6xllfj2i6ru6ym" });
+    expect(r.text).toBe(v.response.body);
+    await client.read("https://acme.com/security");
+    expect(calls.filter((c) => c.includes("trooth-keys.json"))).toHaveLength(2);
+    expect(calls.filter((c) => c.includes("dns-query"))).toHaveLength(1);
+    // A changed body is refused.
+    const bad = new SemantoClient({ fetch: (async (input: RequestInfo | URL) => (String(input) === "https://acme.com/security" ? new Response(v.response.body + " ", { status: 200, headers: v.response.headers }) : fake(input))) as typeof fetch, now: () => v.now_epoch * 1000 });
+    expect((await bad.read("https://acme.com/security")).reason).toBe("content_digest_mismatch");
+  });
+});
