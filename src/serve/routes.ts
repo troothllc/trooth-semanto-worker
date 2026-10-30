@@ -156,6 +156,7 @@ export function createApp(deps: RouteDeps): ServeApp {
   // ------------------------------------------------------------ helpers
 
   const keyAlerted = new Map<string, number>();
+  const receiptLoss = { count: 0, loggedAt: 0 };
   /** `trooth`: the answer is Trooth's own (a workspace answer or a problem), so the witness may sign it when the company key is unavailable. */
   async function signerFor(company: CompanyRecord | null, opts: { trooth?: boolean } = {}): Promise<Signer> {
     if (company && company.custody === "hosted") {
@@ -224,7 +225,15 @@ export function createApp(deps: RouteDeps): ServeApp {
         if (r.via_adapter && r.address) address = r.address;
       }
       await ports.receipts.record({ ...input, agent_key_url, proof: proven ? "web_bot_auth" : "none", ...(keyid ? { keyid } : {}), read_at: ports.now().toISOString(), ...(address ? { address } : {}) });
-    })().catch(() => undefined);
+    })().catch((e: unknown) => {
+      // A lost receipt is counted, never silent: one line a minute per isolate with how many were lost since the last.
+      receiptLoss.count++;
+      if (Date.now() - receiptLoss.loggedAt > 60_000) {
+        console.error(JSON.stringify({ alert: "receipt_write_failed", lost: receiptLoss.count, trooth_id: input.trooth_id, error: e instanceof Error ? e.message.slice(0, 200) : "unknown" }));
+        receiptLoss.loggedAt = Date.now();
+        receiptLoss.count = 0;
+      }
+    });
     try {
       c.executionCtx.waitUntil(work);
     } catch {
