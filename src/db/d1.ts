@@ -16,7 +16,7 @@ import type { Fact, SemantoFile } from "../core/semanto";
 import { versionId } from "../core/semanto";
 import { estimateTokens } from "../core/tokens";
 import { digest } from "../core/hash";
-import { semantoId } from "../core/ids";
+import { isTroothId, semantoId } from "../core/ids";
 import { toPublic, WitnessKeyMissingError, type Jwks, type PrivateJwk, type PublicJwk } from "../core/keys";
 import type { DeliverySettings } from "../settings/delivery";
 import { withDefaults } from "../settings/delivery";
@@ -1012,7 +1012,18 @@ export class D1PipelineStore implements PipelineStore {
     await r2Put(this.store, key, bytes, contentType);
   }
 
+  async wasErased(trooth_id: string): Promise<boolean> {
+    return (await this.db.prepare("SELECT 1 AS x FROM semanto_log WHERE trooth_id = ?1 AND kind = 'erasure' LIMIT 1").bind(trooth_id).first()) !== null;
+  }
+
+  async revokedCompanyIds(): Promise<string[]> {
+    const { results } = await this.db.prepare("SELECT DISTINCT trooth_id FROM semanto_revocations WHERE trooth_id IS NOT NULL").all<{ trooth_id: string }>();
+    return results.map((r) => r.trooth_id);
+  }
+
   async eraseCompany(trooth_id: string): Promise<{ rows: number; objects: number }> {
+    // A reserved id is a shared prefix ("builds" holds every company's build objects): never erase under it.
+    if (!isTroothId(trooth_id) || RESERVED_ERASE_IDS.has(trooth_id)) throw new Error(`eraseCompany: ${trooth_id} is not a company id that can be erased`);
     let objects = 0;
     const builds = await this.db.prepare("SELECT build_id FROM semanto_builds WHERE trooth_id = ?1").bind(trooth_id).all<{ build_id: string }>();
     const buildIds = builds.results.map((b) => b.build_id);
@@ -1020,6 +1031,7 @@ export class D1PipelineStore implements PipelineStore {
     objects += await r2DeletePrefix(this.store, `semanto/${trooth_id}/`);
     // The sealed private keys: once these go, nothing signed with them can be signed again (crypto-shredding).
     objects += await r2DeletePrefix(this.store, `keys/${trooth_id}/`);
+    objects += await r2DeletePrefix(this.store, `credentials/${trooth_id}/`);
     const statements: D1PreparedStatement[] = [];
     for (const id of buildIds) for (const t of ERASE_BUILD_TABLES) statements.push(this.db.prepare(`DELETE FROM ${t} WHERE build_id = ?1`).bind(id));
     for (const t of ERASE_COMPANY_TABLES) statements.push(this.db.prepare(`DELETE FROM ${t} WHERE trooth_id = ?1`).bind(trooth_id));
@@ -1077,6 +1089,8 @@ export const ERASE_COMPANY_TABLES = [
   "semanto_keys",
   "semanto_companies",
 ] as const;
+/** Ids that name a shared prefix or route, never one company's data (src/pipeline-setup.ts RESERVED_TROOTH_IDS). */
+const RESERVED_ERASE_IDS = new Set(["builds", "log", "keys", "revocations", "credentials", "benchmarks", "public", "os"]);
 export const ERASE_BUILD_TABLES = ["semanto_build_fetched", "semanto_build_items", "semanto_build_rendered"] as const;
 export const ERASE_KEPT = ["semanto_log", "semanto_revocations", "semanto_revocation_lists"] as const;
 

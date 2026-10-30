@@ -792,6 +792,12 @@ describe("finding 6: withdraw and revoke, logged, served, re-signed, and read by
     for (const id of versionIds) expect(refs).toContain(id);
     expect(refs).toContain(kid);
     expect((await pub(w, "/acme")).status).toBeGreaterThanOrEqual(400);
+    // The id is never given again, and the erased company's list is still re-signed every night.
+    expect(await w.store.wasErased("acme")).toBe(true);
+    expect(await w.store.revokedCompanyIds()).toContain("acme");
+    advance(w, 86_400_000);
+    await w.pipeline.nightlyCheckpoint();
+    expect((await json(await pub(w, "/acme/revocations"))).list.issued_at).toBe(w.clock.now.toISOString());
   });
 });
 

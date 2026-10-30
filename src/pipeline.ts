@@ -992,16 +992,18 @@ export class Pipeline implements WorkspaceHandlers {
     try {
       const at = iso(this.d.now());
       const reason = "The company erased its Semanto record.";
+      // A retry after a failure halfway logs nothing twice: refs already revoked are skipped.
+      const already = new Set((await this.d.store.revocations(trooth_id)).map((e) => `${e.kind}:${e.ref}`));
       let revoked = 0;
       for (const v of await this.d.versions.listVersions(trooth_id)) {
-        if (v.withdrawn_at) continue;
+        if (v.withdrawn_at || already.has(`version:${v.version_id}`)) continue;
         const entry: RevocationEntry = { kind: "version", ref: v.version_id, reason, revoked_at: at };
         const leaf = await this.d.log.append(await revocationLeaf(entry, trooth_id));
         await this.d.store.putRevocation(trooth_id, entry, leaf.index);
         revoked++;
       }
       for (const k of await this.d.store.keys(trooth_id)) {
-        if (k.public_jwk.revoked_at) continue;
+        if (k.public_jwk.revoked_at || already.has(`key:${k.public_jwk.kid}`)) continue;
         const entry: RevocationEntry = { kind: "key", ref: k.public_jwk.kid, reason, revoked_at: at };
         const leaf = await this.d.log.append(await revocationLeaf(entry, trooth_id));
         await this.d.store.putRevocation(trooth_id, entry, leaf.index);
@@ -1010,8 +1012,15 @@ export class Pipeline implements WorkspaceHandlers {
       const erasure = { trooth_id, domain_hash: await digest(utf8(company.domain.toLowerCase())), erased_at: at };
       const leaf = await this.d.log.append({ kind: "erasure", trooth_id, ref: trooth_id, hash: await digest(canonicalize(erasure)), at });
       const gone = await this.d.store.eraseCompany(trooth_id);
-      await this.resignRevocations(trooth_id);
-      await this.resignRevocations(null);
+      // The data is gone; a list that fails to re-sign now is re-signed by the nightly job (revokedCompanyIds), so
+      // the owner is told the erasure happened rather than shown an error a retry could not fix.
+      for (const id of [trooth_id, null]) {
+        try {
+          await this.resignRevocations(id);
+        } catch (e) {
+          console.error(JSON.stringify({ alert: "erase_resign_failed", trooth_id, list: id ?? "all", error: e instanceof Error ? e.message.slice(0, 200) : "unknown" }));
+        }
+      }
       console.log(JSON.stringify({ event: "company_erased", trooth_id, rows: gone.rows, objects: gone.objects, revoked, log_index: leaf.index }));
       return ok(200, {
         object: "semanto.erased",
@@ -1372,7 +1381,8 @@ export class Pipeline implements WorkspaceHandlers {
     await this.resignRevocations(null);
     // Each company's 24-hour list is re-signed on the queue, 100 companies a message (ARCH-6): one cron call no longer
     // signs every list, so the nightly job stays inside a Worker's limits at any number of companies.
-    const ids = [...new Set((await this.d.store.listCompanies("all")).map((c) => c.trooth_id))];
+    // Erased companies too: their lists stay served, so they are re-signed with everyone else's.
+    const ids = [...new Set([...(await this.d.store.listCompanies("all")).map((c) => c.trooth_id), ...(await this.d.store.revokedCompanyIds())])];
     await this.fanOut("revocations", ids, (chunk) => this.resignRevocationsFor(chunk), REVOCATIONS_PER_MESSAGE);
     return { tree_head: head, timestamp, revocations: entries.length, receipts_pruned: await this.pruneReceipts() };
   }

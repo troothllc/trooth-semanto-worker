@@ -23,21 +23,27 @@ describe("erasure", () => {
     expect(ERASE_KEPT).toEqual(["semanto_log", "semanto_revocations", "semanto_revocation_lists"]);
   });
 
+  it("refuses to erase under a shared prefix such as builds", async () => {
+    const d1 = new FixtureD1();
+    const bucket = { list: async () => ({ objects: [], truncated: false }), delete: async () => undefined } as unknown as R2Bucket;
+    await expect(new D1PipelineStore(d1.asD1(), bucket).eraseCompany("builds")).rejects.toThrow(/cannot|not a company id/);
+  });
+
   it("deletes the company's rows and objects in D1 and R2 and keeps the log and revocations", async () => {
     const d1 = new FixtureD1();
     const db = d1.db;
     db.prepare("INSERT INTO semanto_companies (trooth_id, domain, org, created_at, updated_at) VALUES ('acme', 'acme.com', 'Acme', 'x', 'x'), ('other', 'other.com', 'Other', 'x', 'x')").run();
     db.prepare("INSERT INTO semanto_read_receipts (id, trooth_id, version, page_id, representation, agent_key_url, agent_keyid, proof, read_at, ip_hash) VALUES ('smd_1', 'acme', 1, NULL, 'markdown', NULL, NULL, 'none', '2026-10-22T00:00:00Z', 'x'), ('smd_2', 'other', 1, NULL, 'markdown', NULL, NULL, 'none', '2026-10-22T00:00:00Z', 'x')").run();
     const deleted: string[] = [];
-    const objects = ["semanto/acme/v1/semanto.json", "keys/acme/k1.jwk", "semanto/other/v1/semanto.json"];
+    const objects = ["semanto/acme/v1/semanto.json", "keys/acme/k1.jwk", "credentials/acme/x.c2pa", "semanto/acme-inc/v1/semanto.json", "semanto/other/v1/semanto.json"];
     const bucket = {
       list: async ({ prefix }: { prefix: string }) => ({ objects: objects.filter((k) => k.startsWith(prefix) && !deleted.includes(k)).map((key) => ({ key })), truncated: false }),
       delete: async (keys: string[]) => void deleted.push(...keys),
     } as unknown as R2Bucket;
     const store = new D1PipelineStore(d1.asD1(), bucket);
     const gone = await store.eraseCompany("acme");
-    expect(gone.objects).toBe(2);
-    expect(deleted.sort()).toEqual(["keys/acme/k1.jwk", "semanto/acme/v1/semanto.json"]);
+    expect(gone.objects).toBe(3);
+    expect(deleted.sort()).toEqual(["credentials/acme/x.c2pa", "keys/acme/k1.jwk", "semanto/acme/v1/semanto.json"]);
     expect((db.prepare("SELECT trooth_id FROM semanto_companies").all() as { trooth_id: string }[]).map((r) => r.trooth_id)).toEqual(["other"]);
     expect((db.prepare("SELECT trooth_id FROM semanto_read_receipts").all() as { trooth_id: string }[]).map((r) => r.trooth_id)).toEqual(["other"]);
     expect(gone.rows).toBe(2);

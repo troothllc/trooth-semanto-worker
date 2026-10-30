@@ -51,7 +51,9 @@ const mayOperate = (ws: WorkspaceAuth) => ws.role !== "viewer";
 const VIEWER_ONLY = "A workspace viewer can read but cannot change setup. Ask an owner, admin or member.";
 
 /** Trooth IDs never given: they collide with fixed routes. */
-export const RESERVED_TROOTH_IDS = new Set(["setup", "claim", "log", "verify", "first-publication", "keys", "revocations", "well-known", "catalogs", "os", "public"]);
+// Every first path segment a public route or a stored-object prefix uses ("builds" is the build objects' prefix under
+// semanto/, "benchmarks" a public route), so no company can be given one.
+export const RESERVED_TROOTH_IDS = new Set(["setup", "claim", "log", "verify", "first-publication", "keys", "revocations", "well-known", "catalogs", "os", "public", "builds", "benchmarks", "credentials"]);
 
 /** The address the emails link to: the Semanto page of the trooth.co dashboard. */
 export const SETUP_PAGE_URL = "https://trooth.co/dashboard/semanto";
@@ -179,7 +181,8 @@ export async function stampStep(p: Pipeline, trooth_id: string, step: SetupStepI
 
 /** The Trooth ID for a new company: worker-f's slug when free, else the first label of the registrable domain, else the host with hyphens, then numbered. */
 export async function chooseTroothId(p: Pipeline, domain: string, slug: string | null): Promise<string> {
-  const free = async (id: string) => isTroothId(id) && !RESERVED_TROOTH_IDS.has(id) && !(await p.d.store.getCompany(id));
+  // An erased company's id is never given again: its log entries and revocations stay public under it.
+  const free = async (id: string) => isTroothId(id) && !RESERVED_TROOTH_IDS.has(id) && !(await p.d.store.getCompany(id)) && !(await p.d.store.wasErased(id));
   if (slug && (await free(slug))) return slug;
   const label = registrableDomain(domain).split(".")[0] ?? domain;
   if (await free(label)) return label;

@@ -167,6 +167,10 @@ export interface PipelineStore extends BodyPort {
    * copies of the company's file elsewhere must still check as revoked. Returns how much went.
    */
   eraseCompany(trooth_id: string): Promise<{ rows: number; objects: number }>;
+  /** True when the log holds an erasure leaf for this id, so the id is never given to another company. */
+  wasErased(trooth_id: string): Promise<boolean>;
+  /** Every company id with a revocation entry, erased companies included, for the nightly re-sign. */
+  revokedCompanyIds(): Promise<string[]>;
   /** Append a revocation entry with its log leaf index. */
   putRevocation(trooth_id: string, entry: RevocationEntry, log_index: number): Promise<void>;
   /** The newest signed revocation list for a company (or for everyone with null). */
@@ -574,7 +578,15 @@ export class MemoryPipelineStore implements PipelineStore {
     return this.firstPublications.find((r) => r.record.id === record_id) ?? null;
   }
 
+  readonly erasedIds = new Set<string>();
+  async wasErased(trooth_id: string): Promise<boolean> {
+    return this.erasedIds.has(trooth_id);
+  }
+  async revokedCompanyIds(): Promise<string[]> {
+    return [...new Set(this.revocationEntries.map((e) => e.trooth_id).filter((x): x is string => typeof x === "string"))];
+  }
   async eraseCompany(trooth_id: string): Promise<{ rows: number; objects: number }> {
+    this.erasedIds.add(trooth_id);
     let rows = 0;
     let objects = 0;
     // Private keys are kept by kid: drop this company's first (crypto-shredding).
@@ -604,7 +616,7 @@ export class MemoryPipelineStore implements PipelineStore {
       }
     }
     for (const k of [...this.blobs.keys()]) {
-      if (k.startsWith(`semanto/${trooth_id}/`)) {
+      if (k.startsWith(`semanto/${trooth_id}/`) || k.startsWith(`credentials/${trooth_id}/`)) {
         this.blobs.delete(k);
         objects++;
       }
