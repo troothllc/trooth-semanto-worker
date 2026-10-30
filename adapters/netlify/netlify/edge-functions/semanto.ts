@@ -26,7 +26,7 @@ export default async function semanto(request: Request, context: Context): Promi
     TROOTH_CONNECTOR_KEY: Netlify.env.get("TROOTH_CONNECTOR_KEY"),
   });
   if (!config.troothId) return context.next();
-  if (!manifestCache) manifestCache = createManifestCache({ config, ttlSeconds: 300 });
+  if (!manifestCache) manifestCache = createManifestCache({ config, ttlSeconds: 300, waitUntil: (p) => context.waitUntil(p) });
   return handleRequest({
     request,
     config: { ...config, clientAddress: context.ip },

@@ -44,10 +44,11 @@ function cacheApiStore(): ManifestStore {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: { waitUntil(p: Promise<unknown>): void }): Promise<Response> {
     const config = configFromEnv(env as unknown as Record<string, string | undefined>);
     if (!config.troothId) return fetch(request);
-    const manifestCache = createManifestCache({ config, store: cacheApiStore(), ttlSeconds: 300 });
+    // A stored manifest answers at once; a fresh one is fetched after the response is sent.
+    const manifestCache = createManifestCache({ config, store: cacheApiStore(), ttlSeconds: 300, waitUntil: ctx ? (p) => ctx.waitUntil(p) : null });
     return handleRequest({
       request,
       // CF-Connecting-IP is set by Cloudflare itself on every proxied request; a client cannot set it.
