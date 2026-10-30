@@ -41,3 +41,6 @@ export async function middleware(request: NextRequest) {
   }
   return res;
 }
+
+// Next.js 16 renamed middleware to proxy: the same function under the name the file proxy.ts must export.
+export { middleware as proxy };

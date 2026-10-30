@@ -42,7 +42,9 @@ export const HOST_GUIDES: Record<HostKind, string> = {
   netlify: "netlify-edge",
   fastly: "fastly-compute",
   akamai: "akamai-edgeworkers",
-  gcore: "gcore-fastedge",
+  // Gcore runs JavaScript only as a standalone FastEdge HTTP app; in front of a site (a CDN resource) it runs Proxy-Wasm
+  // apps in Rust or AssemblyScript (docs.gcore.com/fastedge/getting-started). So on Gcore Semanto is the head code.
+  gcore: "head-tag",
   nginx: "nginx-config",
   apache: "apache-config",
   wordpress: "wordpress-plugin",

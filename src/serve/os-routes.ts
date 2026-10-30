@@ -27,12 +27,12 @@ import { previewSettings, saveSettings, settingsView } from "../os/settings";
 import { receiptsCsvRead, receiptsRead } from "../os/receipts";
 import { createConnector, decideConnectSession, describeConnectSession, listConnectors, openConnectSession, pasteConnector, pollConnectSession, revokeConnector, testConnector, uninstallConnector } from "../os/connectors";
 import { connectGoogle, disconnectGoogle, googleCallback, googleStatus } from "../os/google";
-import { companySettings, confirmAlert, editAlerts, editSurfaces, setSigningPolicy } from "../os/company";
+import { companySettings, changesPage, confirmAlert, editAlerts, editSurfaces, setSigningPolicy } from "../os/company";
 import { getRun, listRuns, retryRun, sendWriteback, writebackPreview } from "../os/writeback";
 import { listSellerLists, sellerListOptions, submitSellerList } from "../os/sellers";
 import { listCredentials, publicCredential } from "../os/credentials";
 import { listRecalls, recallOptions, submitRecall } from "../os/recalls";
-import type { WorkspaceAuth, WorkspaceResult, WorkspaceSession } from "./ports";
+import { WORKSPACE_ACTIONS, type WorkspaceAuth, type WorkspaceResult, type WorkspaceSession } from "./ports";
 import { createAgentKey, listAgentKeys, revokeAgentKey, type AgentKeyStore } from "../os/agent-keys";
 import { namedConnectorKid } from "../pipeline";
 import type { ProblemCode } from "./errors";
@@ -80,7 +80,9 @@ export function registerOsRoutes<V extends { Variables: Record<string, unknown> 
   };
 
   /** A workspace write: auth, the os_write group per session subject, a JSON body, the handler (which audits). */
+  const written = new Set<string>();
   const write = (path: string, handler: Handler) =>
+    written.add(path) &&
     app.post(`${osPrefix}/:trooth_id/${path}`, async (c) => {
       const trooth_id = c.req.param("trooth_id") ?? "";
       if (!isTroothId(trooth_id)) return kit.sendProblem(c, "invalid_trooth_id");
@@ -198,6 +200,7 @@ export function registerOsRoutes<V extends { Variables: Record<string, unknown> 
 
   // ------------------------------------------------------------ 2. company settings
   read("company", (_ws, id) => companySettings(os, id));
+  read("company/changes", (_ws, id, q) => changesPage(os, id, q));
   write("company/signing-policy", (ws, id, body, ctx) => setSigningPolicy(os, ws, id, body, ctx));
   write("company/surfaces", (ws, id, body, ctx) => editSurfaces(os, ws, id, body, ctx));
   write("company/alerts", (ws, id, body, ctx) => editAlerts(os, ws, id, body, ctx));
@@ -226,6 +229,21 @@ export function registerOsRoutes<V extends { Variables: Record<string, unknown> 
     read("agent-keys", (ws, id) => listAgentKeys(keys, ws, id));
     write("agent-keys", (ws, id, body, ctx) => createAgentKey(keys, os, ws, id, body, ctx));
     write("agent-keys/:kid/revoke", (ws, id, _body, ctx, kid) => revokeAgentKey(keys, os, ws, id, kid ?? "", ctx));
+  }
+
+  // ------------------------------------------------------------ the other pipeline actions, rate limited and audited
+  // Every other pipeline write (build, the setup steps, detect, the reports, the LEI, Basic) goes through write() too,
+  // so each is counted in the os_write group per company and session or agent key (OWASP API4:2023) and appends an
+  // audit row naming who did it, which "Recent changes" shows (an agent key shows as itself). Erase is left to the
+  // pipeline: it deletes the audit trail with everything else.
+  for (const path of WORKSPACE_ACTIONS) {
+    if (written.has(path) || path === "erase") continue;
+    write(path, async (ws, id, body, ctx) => {
+      const result = await os.p.handle(path, ws, id, body);
+      // A passkey request (the options before a ceremony) changes nothing a person would look for in Recent changes.
+      if (!result.problem && result.status < 300 && !path.endsWith("/options")) await audit(os.store, { trooth_id: id, ws, action: path.replace(/\//g, "."), target: id, after: body, ctx, at: os.now() });
+      return result;
+    });
   }
 
   // ------------------------------------------------------------ 6. credentials

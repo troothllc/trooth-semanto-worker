@@ -47,7 +47,7 @@ describe("the tool catalog", () => {
 
   it("keeps every revoke, withdraw and cancel marked destructive, and nothing that only reads marked as a change", () => {
     for (const t of SEMANTO_TOOLS) {
-      if (/revoke|withdraw|cancel|disconnect/.test(t.name)) expect(t.hints.destructiveHint).toBe(true);
+      if (/revoke|withdraw|cancel|disconnect/.test(t.name) && t.access !== "person") expect(t.hints.destructiveHint).toBe(true);
       if (t.method === "GET") expect(t.hints.readOnlyHint).toBe(true);
     }
   });
@@ -79,7 +79,8 @@ describe("the MCP transport", () => {
     expect(r.body.result.instructions).toMatch(/semanto_status/);
     expect(r.body.result.serverInfo.icons).toEqual(SERVER_ICONS);
     expect(SERVER_ICONS.map((i) => i.theme)).toEqual(["light", "dark"]);
-    expect((await call(w, "initialize", { protocolVersion: "1999-01-01" })).body.result.protocolVersion).toBe("2026-07-28");
+    expect((await call(w, "initialize", { protocolVersion: "1999-01-01" })).body.result.protocolVersion).toBe("2025-11-25");
+    expect((await call(w, "initialize", { protocolVersion: "2026-07-28" })).body.result.protocolVersion).toBe("2025-11-25");
   });
 
   it("draws every icon as GitHub's server does: a 24 pixel PNG data URI with a clear background, light and dark, no sizes", async () => {
@@ -136,6 +137,34 @@ describe("scoping from the server address", () => {
   });
 });
 
+describe("the transport's guards", () => {
+  const raw = (w: OsWorld, headers: Record<string, string>, body: unknown) => w.app.request(MCP, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  it("refuses a web page's Origin and allows none, trooth.co, localhost and app schemes", async () => {
+    const w = await osWorld();
+    const ping = { jsonrpc: "2.0", id: 1, method: "ping" };
+    expect((await raw(w, { origin: "https://evil.example" }, ping)).status).toBe(403);
+    for (const origin of ["https://trooth.co", "http://localhost:6274", "vscode-file://vscode-app"]) expect((await raw(w, { origin }, ping)).status).toBe(200);
+    expect((await raw(w, {}, ping)).status).toBe(200);
+  });
+  it("answers 400 to an MCP-Protocol-Version it does not support", async () => {
+    const w = await osWorld();
+    expect((await raw(w, { "mcp-protocol-version": "1999-01-01" }, { jsonrpc: "2.0", id: 1, method: "ping" })).status).toBe(400);
+    expect((await raw(w, { "mcp-protocol-version": "2025-11-25" }, { jsonrpc: "2.0", id: 1, method: "ping" })).status).toBe(200);
+  });
+  it("answers 401 with WWW-Authenticate to a key that no longer works", async () => {
+    const w = await osWorld();
+    const r = await raw(w, { authorization: "Bearer tsk_" + "b".repeat(43) }, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "semanto_status", arguments: { trooth_id: "acme" } } });
+    expect(r.status).toBe(401);
+    expect(r.headers.get("www-authenticate")).toMatch(/^Bearer realm="semanto", error="invalid_token"/);
+  });
+  it("refuses arguments a tool does not name, and dot segments in a path", async () => {
+    const w = await osWorld();
+    const key = await makeKey(w);
+    expect((await tool(w, "semanto_status", { surprise: 1 }, key)).structuredContent.status).toBe("invalid_request");
+    expect((await tool(w, "semanto_page", { trooth_id: "acme", path: "/../../os/semanto/acme/setup" })).structuredContent.status).toBe("invalid_request");
+  });
+});
+
 describe("agent keys", () => {
   it("are made by a person, show the secret once, and are listed without it", async () => {
     const w = await osWorld();
@@ -154,6 +183,24 @@ describe("agent keys", () => {
     expect((await post(w, "/acme/agent-keys", { name: "x", scope: "write" }, `Bearer ${key}`)).status).toBe(403);
     expect((await get(w, "/other/settings", `Bearer ${key}`)).status).toBe(403);
     expect((await get(w, "/acme/settings", "Bearer tsk_" + "a".repeat(43))).status).toBe(401);
+  });
+
+  it("can never sign, add a passkey, rotate or revoke signing keys, set the signing policy or connect an app", async () => {
+    const w = await osWorld();
+    const key = await makeKey(w);
+    for (const path of ["/acme/passkeys/options", "/acme/passkeys", "/acme/sign/options", "/acme/sign", "/acme/keys/rotate", "/acme/keys/rotation/start", "/acme/keys/rotation/confirm", "/acme/keys/k1/revoke", "/acme/company/signing-policy", "/acme/google/connect", "/acme/sellers/lists", "/acme/recalls", "/acme/connect/s1/approve", "/acme/erase"]) {
+      const r = await post(w, path, { custody: "customer" }, `Bearer ${key}`);
+      expect(r.status, path).toBe(403);
+      expect((await json(r)).detail, path).toMatch(/Only a person can do this/);
+    }
+  });
+
+  it("leave an audit row naming the key for every pipeline write, and are rate limited", async () => {
+    const w = await osWorld();
+    const key = await makeKey(w);
+    await post(w, "/acme/setup/save-for-later", {}, `Bearer ${key}`);
+    expect(JSON.stringify(w.osStore.audit.at(-1))).toMatch(/setup\.save-for-later/);
+    expect(JSON.stringify(w.osStore.audit.at(-1))).toMatch(/agent:ak_/);
   });
 
   it("stop working the moment they are revoked", async () => {

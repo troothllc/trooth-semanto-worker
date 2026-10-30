@@ -17,7 +17,9 @@ import { authorizeAgentKey, bearerAgentKey, type AgentKeyStore } from "../os/age
 
 export const MCP_URL = "https://api.trooth.co/os/semanto/mcp";
 const ORIGIN = "https://api.trooth.co";
-const SUPPORTED = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"];
+// The revisions this server implements in full. 2026-07-28 drops initialize for server/discover and changes every
+// result's shape, so it is offered once those are built, not before; a client asking for it is answered 2025-11-25.
+const SUPPORTED = ["2025-11-25", "2025-06-18", "2025-03-26"];
 const SERVER_INFO = {
   name: "semanto",
   title: "Semanto by Trooth",
@@ -79,11 +81,16 @@ function fillPath(template: string, args: Json, troothId: string | null): { path
       return "";
     }
     v = String(v);
+    // No dot segments: "../" in a path or an id would climb out of the route the tool names.
+    if (/(^|\/)\.\.?(\/|$)|%2e/i.test(v as string)) {
+      missing = `${name}!`;
+      return "";
+    }
     if (name === "path") return (v as string).startsWith("/") ? encodeURI(v as string) : `/${encodeURI(v as string)}`;
     return encodeURIComponent(v as string);
   });
   delete rest.trooth_id;
-  if (missing) return { error: missing === "trooth_id" ? "trooth_id is needed: pass it, or send an agent key so the company is known." : `${missing} is needed.` };
+  if (missing) return { error: (missing as string).endsWith("!") ? `${(missing as string).slice(0, -1)} may not contain . or .. segments.` : missing === "trooth_id" ? "trooth_id is needed: pass it, or send an agent key so the company is known." : `${missing} is needed.` };
   return { path, rest };
 }
 
@@ -128,7 +135,7 @@ const GUIDE = {
   docs: "https://trooth.co/docs/semanto",
 };
 
-const HEAD = (pub: string) => `<link rel="https://trooth.co/rel/semanto" href="${pub}">\n<script type="application/ld+json" src="${pub}/facts.jsonld"></script>`;
+const HEAD = (pub: string) => `<link rel="https://trooth.co/rel/semanto" href="${pub}">\n<link rel="alternate" type="application/ld+json" href="${pub}/facts.jsonld">`;
 
 /** The install for one host, every value filled in. */
 export function installGuide(host: string, troothId: string, domain: string | null): Json {
@@ -167,19 +174,19 @@ export function installGuide(host: string, troothId: string, domain: string | nu
     case "netlify":
       return { host: "Netlify", docs: docs("netlify-edge"), options: [{ option: "Two lines in _redirects (no code)", file: "_redirects", lines: [`/.well-known/trooth.semanto     ${pub}            200!`, `/.well-known/trooth-keys.json   ${pub}/keys.json  200!`] }, { option: "The edge function (full adapter)", package: `${"https://trooth.co"}/downloads/semanto/trooth-semanto-netlify-edge.zip`, env: { TROOTH_ID: troothId } }] };
     case "vercel":
-      return { host: "Vercel", docs: docs("vercel-middleware"), options: [{ option: "Middleware in the project", package: "https://trooth.co/downloads/semanto/trooth-semanto-vercel-middleware.zip", env: { TROOTH_ID: troothId, TROOTH_API_BASE: ORIGIN }, note: "Copied into the existing project and deployed with it; an agent with Vercel's tools sets the environment variables and redeploys." }] };
+      return { host: "Vercel", docs: docs("vercel-middleware"), options: [{ option: "Middleware in the project", package: "https://trooth.co/downloads/semanto/trooth-semanto-vercel-middleware.zip", env: { TROOTH_ID: troothId }, note: "Copied into the existing project (into src when the app folder is there) and deployed with it; on Next.js 16 the file is proxy.ts. An agent with Vercel's tools sets the environment variable and redeploys, and redeploys again after each new signed version so the two well-known files update." }] };
     case "wordpress":
       return { host: "WordPress", docs: docs("wordpress-plugin"), options: [{ option: "Plugin", package: "https://trooth.co/downloads/semanto/trooth-semanto-wordpress-plugin.zip", steps: ["Plugins, Add New Plugin, Upload Plugin, choose the zip, Install Now, Activate", "Settings, Trooth Semanto: paste the Trooth ID, Save"], values: { trooth_id: troothId } }] };
     case "nginx":
-      return { host: "nginx", docs: docs("nginx-config"), options: [{ option: "Configuration", package: "https://trooth.co/downloads/semanto/trooth-semanto-nginx-config.zip", replace: { "example-inc": troothId } }] };
+      return { host: "nginx", docs: docs("nginx-config"), options: [{ option: "Configuration", package: "https://trooth.co/downloads/semanto/trooth-semanto-nginx-config.zip", replace: { "example-inc": troothId }, note: "Three files go in /etc/nginx; semanto-server.conf has its own location /, so the site's existing location / settings move into it." }] };
     case "apache":
       return { host: "Apache", docs: docs("apache-config"), options: [{ option: "Configuration", package: "https://trooth.co/downloads/semanto/trooth-semanto-apache-config.zip", replace: { "example-inc": troothId } }] };
     case "fastly":
-      return { host: "Fastly", docs: docs("fastly-compute"), options: [{ option: "Compute service", package: "https://trooth.co/downloads/semanto/trooth-semanto-fastly-compute.zip", env: { TROOTH_ID: troothId } }] };
+      return { host: "Fastly", docs: docs("fastly-compute"), options: [{ option: "Compute service", package: "https://trooth.co/downloads/semanto/trooth-semanto-fastly-compute.zip", env: { TROOTH_ID: troothId }, note: "The origin backend is the origin server's hostname, never the public domain, which points at Fastly." }] };
     case "akamai":
-      return { host: "Akamai", docs: docs("akamai-edgeworkers"), options: [{ option: "EdgeWorker", package: "https://trooth.co/downloads/semanto/trooth-semanto-akamai-edgeworkers.zip", property_variable: { PMUSER_TROOTH_ID: troothId } }] };
+      return { host: "Akamai", docs: docs("akamai-edgeworkers"), options: [{ option: "EdgeWorker", package: "https://trooth.co/downloads/semanto/trooth-semanto-akamai-edgeworkers.zip", property_variable: { PMUSER_TROOTH_ID: troothId }, note: "Create the EdgeWorker ID first in Akamai Control Center; upload, activate and the property's EdgeWorkers behavior all use it." }] };
     case "gcore":
-      return { host: "Gcore", docs: docs("gcore-fastedge"), options: [{ option: "FastEdge app", package: "https://trooth.co/downloads/semanto/trooth-semanto-gcore-fastedge.zip", env: { TROOTH_ID: troothId } }] };
+      return { host: "Gcore", docs: docs("head-tag"), options: [{ option: "Head code on every page", note: "Gcore runs JavaScript only as a standalone app, not in front of a site, so on Gcore Semanto is the head code.", ...head }] };
     case "shopify":
       return { host: "Shopify", docs: docs("shopify-app"), options: [{ option: "Theme head code", where: "Online Store, Themes, Edit code, theme.liquid, just above the closing head tag", ...head }] };
     case "webflow":
@@ -193,8 +200,31 @@ export function installGuide(host: string, troothId: string, domain: string | nu
   }
 }
 
+/**
+ * The Origin check the Streamable HTTP transport asks of every server (MCP 2025-11-25, basic/transports, security
+ * warning: validate Origin, answer 403 when it is not allowed). No Origin is a desktop or server client; trooth.co is
+ * the dashboard; localhost is a developer's own tool, such as the MCP Inspector; an app scheme (vscode-file:, app:) is
+ * a desktop client. Any other web origin is refused, so a page a person visits cannot drive their agent key.
+ */
+export function originAllowed(origin: string | null): boolean {
+  if (!origin || origin === "null") return true;
+  let u: URL;
+  try {
+    u = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return true;
+  if (u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]") return true;
+  return u.protocol === "https:" && (u.hostname === "trooth.co" || u.hostname.endsWith(".trooth.co"));
+}
+
 export async function handleMcp(req: Request, deps: McpDeps): Promise<Response> {
-  const headers = { "Content-Type": "application/json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*", "Access-Control-Expose-Headers": "Mcp-Protocol-Version" };
+  const headers: Record<string, string> = { "Content-Type": "application/json", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*", "Access-Control-Expose-Headers": "Mcp-Protocol-Version, WWW-Authenticate" };
+  if (!originAllowed(req.headers.get("origin"))) return new Response(JSON.stringify(rpcError(null, -32000, "This Origin may not call the Semanto MCP server.")), { status: 403, headers });
+  const headerVersion = req.headers.get("mcp-protocol-version");
+  if (headerVersion && !SUPPORTED.includes(headerVersion)) return new Response(JSON.stringify(rpcError(null, -32600, `MCP-Protocol-Version ${headerVersion} is not supported. Supported: ${SUPPORTED.join(", ")}.`)), { status: 400, headers });
+  if (headerVersion) headers["Mcp-Protocol-Version"] = headerVersion;
   if (req.method === "GET" || req.method === "DELETE") return new Response(JSON.stringify(rpcError(null, -32000, "This server answers POST only: one JSON-RPC message, one JSON answer.")), { status: 405, headers: { ...headers, Allow: "POST" } });
   let msg: Json;
   try {
@@ -244,7 +274,12 @@ export async function handleMcp(req: Request, deps: McpDeps): Promise<Response> 
       const tool = toolByName(name);
       if (!tool) return reply(rpcError(id, -32602, `No tool named ${name}.`));
       if (!offered(tool)) return reply(rpc(id, textResult({ status: "not_offered", detail: readOnly && !tool.hints.readOnlyHint ? "This server address is read only (read_only=true). The tool changes something, so it is not offered here." : "This tool's group is not in the server address's groups." }, true)));
-      if (secret && !agent && tool.access !== "public") return reply(rpc(id, textResult({ status: "unauthorized", detail: "The agent key is unknown, revoked or expired. A person makes a new one in Semanto settings on trooth.co." }, true)));
+      // A key that is sent but no longer works is an HTTP 401 with WWW-Authenticate (RFC 9110, MCP authorization), so the
+      // client knows to ask the person for a new key rather than retry.
+      if (secret && !agent && tool.access !== "public") return new Response(JSON.stringify(rpc(id, textResult({ status: "unauthorized", detail: "The agent key is unknown, revoked or expired. A person makes a new one in Semanto settings on trooth.co.", url: "https://trooth.co/dashboard/semanto/company" }, true))), { status: 401, headers: { ...headers, "WWW-Authenticate": 'Bearer realm="semanto", error="invalid_token"' } });
+      // Arguments the tool does not name are refused, not passed on (MCP tools: input errors are tool errors).
+      const unknown = Object.keys(args).filter((k) => k !== "trooth_id" && !(k in tool.params));
+      if (unknown.length > 0) return reply(rpc(id, textResult({ status: "invalid_request", detail: `${tool.name} takes no ${unknown.join(", ")}. It takes ${Object.keys(tool.params).join(", ") || "no arguments"}.` }, true)));
       if ((tool.access === "read" || tool.access === "write") && !agent) return reply(rpc(id, textResult({ status: "agent_key_required", detail: "This tool acts in a company's workspace. Send the company's agent key as Authorization: Bearer followed by the tsk_ key on the MCP request. A person makes one in Semanto settings on trooth.co.", url: "https://trooth.co/dashboard/semanto/company" }, true)));
       if (tool.access === "write" && agent && agent.role === "viewer") return reply(rpc(id, textResult({ status: "forbidden", detail: "This agent key has read scope. This tool changes something; it needs a key with write scope." }, true)));
       const troothId = String(args.trooth_id ?? agent?.trooth_id ?? "") || null;

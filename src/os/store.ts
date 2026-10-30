@@ -202,7 +202,8 @@ export interface CredentialRow {
 
 export interface OsStore {
   appendAudit(row: AuditRow): Promise<void>;
-  recentAudit(trooth_id: string, limit: number): Promise<AuditRow[]>;
+  /** Newest first; with before, only rows older than that time (the next page). */
+  recentAudit(trooth_id: string, limit: number, before?: string): Promise<AuditRow[]>;
   /** The newest audit row of one action for a company, or null. */
   lastAudit(trooth_id: string, action: string): Promise<AuditRow | null>;
 
@@ -312,8 +313,8 @@ export class MemoryOsStore implements OsStore {
   async appendAudit(row: AuditRow): Promise<void> {
     this.audit.push(clone(row));
   }
-  async recentAudit(trooth_id: string, limit: number): Promise<AuditRow[]> {
-    return this.audit.filter((r) => r.trooth_id === trooth_id).reverse().slice(0, limit).map(clone);
+  async recentAudit(trooth_id: string, limit: number, before?: string): Promise<AuditRow[]> {
+    return this.audit.filter((r) => r.trooth_id === trooth_id && (!before || r.at < before)).reverse().slice(0, limit).map(clone);
   }
   async lastAudit(trooth_id: string, action: string): Promise<AuditRow | null> {
     const r = this.audit.filter((x) => x.trooth_id === trooth_id && x.action === action).pop();

@@ -189,12 +189,21 @@ async function sendConfirmation(s: OsService, trooth_id: string, address: string
   return sent.ok;
 }
 
-/** POST /os/semanto/{id}/company/alerts: { add } | { remove, confirm } | { resend }. */
+/** GET /os/semanto/{id}/company/changes?before=: the audit trail 50 at a time, newest first, as GitHub's audit log pages. */
+export async function changesPage(s: OsService, trooth_id: string, q: Record<string, string>): Promise<WorkspaceResult> {
+  const before = q.before;
+  if (before !== undefined && Number.isNaN(Date.parse(before))) return problem("invalid_request", "before is a time from the previous page's next_before.");
+  const rows = await s.store.recentAudit(trooth_id, 51, before);
+  const page = rows.slice(0, 50);
+  return ok(200, { object: "semanto.changes", data: page.map((r) => ({ who: r.who, role: r.role, action: r.action, target: r.target, at: r.at, request_id: r.request_id, before_hash: r.before_hash, after_hash: r.after_hash })), next_before: rows.length > 50 ? page[page.length - 1]!.at : null });
+}
+
+/** POST /os/semanto/{id}/company/alerts: { add } | { remove, confirm } | { resend } | { test }. */
 export async function editAlerts(s: OsService, ws: WorkspaceAuth, trooth_id: string, body: Record<string, unknown>, ctx: RequestContext): Promise<WorkspaceResult> {
   if (!mayAdminister(ws.role)) return ADMIN_ONLY("change the alert addresses");
   if (!(await s.company(trooth_id))) return problem("conflict", "This company has no record yet.");
-  const ops = ["add", "remove", "resend"].filter((k) => body[k] !== undefined);
-  if (ops.length !== 1) return problem("invalid_request", "Send one of add, remove (with confirm) or resend, each an email address.");
+  const ops = ["add", "remove", "resend", "test"].filter((k) => body[k] !== undefined);
+  if (ops.length !== 1) return problem("invalid_request", "Send one of add, remove (with confirm), resend or test, each an email address.");
   const op = ops[0]!;
   const address = cleanEmail(body[op]);
   if (!address) return problem("invalid_request", `${op} is an email address.`);
@@ -210,6 +219,23 @@ export async function editAlerts(s: OsService, ws: WorkspaceAuth, trooth_id: str
     return companySettings(s, trooth_id);
   }
   if (!s.d.email || !s.d.from) return problem("conflict", "Alert emails are not set up on this deployment yet (RESEND_API_KEY and ALERT_FROM), so no confirmation email can be sent. Nothing was changed.");
+  // A test alert, as Stripe sends a test event to an endpoint: the same sender and wording an alert uses, to a confirmed
+  // address, so a person sees where alerts land before one matters.
+  if (op === "test") {
+    if (!existing || existing.state !== "confirmed") return problem("conflict", `${address} is not a confirmed alert address. Confirm it first.`);
+    if (existing.last_sent_at && now.getTime() - Date.parse(existing.last_sent_at) < RESEND_INTERVAL_MS) {
+      const wait = Math.ceil((RESEND_INTERVAL_MS - (now.getTime() - Date.parse(existing.last_sent_at))) / 1000);
+      return { status: 0, problem: { code: "rate_limited", detail: `An email went to ${address} less than a minute ago. Try again in ${wait} seconds.` }, headers: { "Retry-After": String(wait) } };
+    }
+    const company = await s.company(trooth_id);
+    const domain = company?.domain ?? trooth_id;
+    const text = `This is a test alert from Semanto for ${domain}.\n\nAlerts like this one come to this address when something about your signed copy needs you: a signing key to rotate, an install check that stopped passing, or a version that changed.\n\nNothing needs doing now.\n`;
+    const sent = await s.d.email.send({ from: s.d.from, to: [address], subject: `Test alert for ${domain}`, text, html: `<p>${text.replace(/\n/g, "<br>")}</p>` });
+    if (!sent.ok) return problem("upstream_unavailable", `The test alert to ${address} did not go out. Try again in a few minutes.`);
+    await s.store.putAlertAddress({ ...existing, last_sent_at: iso(now) });
+    await audit(s.store, { trooth_id, ws, action: "company.alerts.test", target: address, after: { address }, ctx, at: now });
+    return companySettings(s, trooth_id);
+  }
   if (op === "add") {
     if (existing) return problem("conflict", existing.state === "confirmed" ? `${address} is already confirmed.` : `${address} is waiting for its confirmation. Send it again with resend.`);
     if (list.length >= MAX_ALERT_ADDRESSES) return problem("conflict", `A company keeps at most ${MAX_ALERT_ADDRESSES} alert addresses. Remove one first.`);

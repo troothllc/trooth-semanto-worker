@@ -728,6 +728,13 @@ describe("2. company settings", () => {
     expect(confirmed.headers.get("location")).toBe("https://trooth.co/dashboard/semanto/settings?alerts=confirmed");
     expect((await w.store.getConfig("acme")).alert_emails).toEqual(["ops@acme.com"]);
     expect((await pub(w, `/alerts/confirm?token=${fresh}`)).headers.get("location")).toBe("https://trooth.co/dashboard/semanto/settings?alerts=error&reason=link_invalid");
+    // A test alert goes to a confirmed address only, once a minute, and is in the audit trail.
+    w.clock.now = new Date(w.clock.now.getTime() + 61_000);
+    expect((await post(w, "/acme/company/alerts", { test: "ops@acme.com" })).status).toBe(200);
+    expect(w.emails.at(-1)!.subject).toMatch(/^Test alert for /);
+    expect((await post(w, "/acme/company/alerts", { test: "ops@acme.com" })).status).toBe(429);
+    expect((await post(w, "/acme/company/alerts", { test: "nobody@acme.com" })).status).toBe(409);
+    expect(w.osStore.audit.at(-1)).toMatchObject({ action: "company.alerts.test" });
     expect((await post(w, "/acme/company/alerts", { remove: "ops@acme.com" })).status).toBe(400);
     expect((await json(await post(w, "/acme/company/alerts", { remove: "ops@acme.com", confirm: "ops@acme.com" }))).alert_addresses).toEqual([]);
     expect((await w.store.getConfig("acme")).alert_emails).toEqual([]);

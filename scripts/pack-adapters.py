@@ -19,15 +19,14 @@ PKG = {
   "netlify-edge": ["netlify"],
   "fastly-compute": ["fastly-compute"],
   "akamai-edgeworkers": ["akamai-edgeworkers"],
-  "gcore-fastedge": ["gcore-fastedge"],
   "nginx-config": ["nginx"],
   "apache-config": ["apache"],
   "wordpress-plugin": ["wordpress-plugin"],
   "head-tag": ["head-tag"],
 }
-HOST = {"cloudflare-worker":"Cloudflare","vercel-middleware":"Vercel","netlify-edge":"Netlify","fastly-compute":"Fastly","akamai-edgeworkers":"Akamai","gcore-fastedge":"Gcore","nginx-config":"nginx","apache-config":"Apache","head-tag":"any host"}
+HOST = {"cloudflare-worker":"Cloudflare","vercel-middleware":"Vercel","netlify-edge":"Netlify","fastly-compute":"Fastly","akamai-edgeworkers":"Akamai","nginx-config":"nginx","apache-config":"Apache","head-tag":"any host"}
 TYPES = {"vercel-middleware"}
-SHARED = {"cloudflare-worker","vercel-middleware","netlify-edge","fastly-compute","akamai-edgeworkers","gcore-fastedge"}
+SHARED = {"cloudflare-worker","vercel-middleware","netlify-edge","fastly-compute","akamai-edgeworkers"}
 manifest = {}
 for gid, dirs in PKG.items():
     files = []

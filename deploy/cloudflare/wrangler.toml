@@ -3,7 +3,7 @@
 #
 # Built by scripts/build-deploy.mjs from adapters/cloudflare-worker. Do not edit here.
 # The Deploy to Cloudflare button asks for TROOTH_ID. After it deploys, add a route for
-# your domain on the Worker's Domains tab (Add Route). Until TROOTH_ID is set, every
+# your domain under the Worker's Settings, Domains & Routes (Add, Route). Until TROOTH_ID is set, every
 # request goes to your site unchanged.
 
 name = "trooth-semanto"

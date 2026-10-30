@@ -119,11 +119,11 @@ export class D1OsStore implements OsStore {
       .bind(r.trooth_id, r.actor, r.who, r.role, r.action, r.target, r.before_hash, r.after_hash, r.request_id, r.at)
       .run();
   }
-  async recentAudit(trooth_id: string, limit: number): Promise<AuditRow[]> {
-    const { results } = await this.db
-      .prepare(`SELECT trooth_id, actor, who, role, action, target, before_hash, after_hash, request_id, at FROM semanto_audit WHERE trooth_id = ?1 ORDER BY id DESC LIMIT ?2`)
-      .bind(trooth_id, limit)
-      .all<AuditRow>();
+  async recentAudit(trooth_id: string, limit: number, before?: string): Promise<AuditRow[]> {
+    const { results } = await (before
+      ? this.db.prepare(`SELECT trooth_id, actor, who, role, action, target, before_hash, after_hash, request_id, at FROM semanto_audit WHERE trooth_id = ?1 AND at < ?3 ORDER BY id DESC LIMIT ?2`).bind(trooth_id, limit, before)
+      : this.db.prepare(`SELECT trooth_id, actor, who, role, action, target, before_hash, after_hash, request_id, at FROM semanto_audit WHERE trooth_id = ?1 ORDER BY id DESC LIMIT ?2`).bind(trooth_id, limit)
+    ).all<AuditRow>();
     return results;
   }
 

@@ -47,7 +47,7 @@ import type { CommerceStore } from "../commerce/ports";
 import { feedResponse, offerResponse, offersResponse, problemMarkdown, productResponse, productsResponse, ucpManifestResponse, type PlainResponse as CommerceResponse } from "../commerce/routes";
 import { resolve as resolveDelivery, validateSettings, withDefaults, DEFAULT_SETTINGS, type DeliverySettings } from "../settings/delivery";
 import { authorizeAgentKey, bearerAgentKey, type AgentKeyStore } from "../os/agent-keys";
-import { handleMcp } from "../mcp/server";
+import { handleMcp, originAllowed } from "../mcp/server";
 import { registerOsRoutes } from "./os-routes";
 import type { OsService } from "../os/service";
 import type { LimitGroup } from "../readers/rate-limit";
@@ -300,7 +300,7 @@ export function createApp(deps: RouteDeps): ServeApp {
     const p: Problem = problem(code, { ...opts, instance: new URL(c.req.url).pathname });
     const { rep, body } = renderProblem(p, hints.accept);
     const settings = company ? await settingsFor(company.trooth_id) : null;
-    return send(c, {
+    const res = await send(c, {
       status: p.status,
       rep,
       body,
@@ -310,6 +310,15 @@ export function createApp(deps: RouteDeps): ServeApp {
       signer: await signerFor(company, { trooth: true }),
       retry_after_seconds: p.retry_after ?? null,
     });
+    // RFC 9110 15.5.2: a 401 names how to authenticate. The workspace takes a session or a Bearer agent key.
+    if (p.status === 401) {
+      try {
+        res.headers.set("WWW-Authenticate", 'Bearer realm="semanto"' + (c.req.header("authorization") ? ', error="invalid_token"' : ""));
+      } catch {
+        // Immutable headers (a fetched response): the problem body still says what to do.
+      }
+    }
+    return res;
   }
 
   /** Load the company and its current signed file, answering the right problem when either is missing. */
@@ -382,10 +391,12 @@ export function createApp(deps: RouteDeps): ServeApp {
       return new Response(null, {
         status: 204,
         headers: {
-          "Access-Control-Allow-Origin": path.startsWith(`${osPrefix}/`) ? dashboardOriginFor(c.req.header("origin"), deps.dashboardOrigins) : "*",
+          // The MCP server answers a browser MCP client the Origin check allows (src/mcp/server.ts originAllowed), with the
+          // headers the Streamable HTTP transport sends; the rest of /os answers the dashboard only.
+          "Access-Control-Allow-Origin": path === `${osPrefix}/mcp` ? (originAllowed(c.req.header("origin") ?? null) ? (c.req.header("origin") ?? "*") : "null") : path.startsWith(`${osPrefix}/`) ? dashboardOriginFor(c.req.header("origin"), deps.dashboardOrigins) : "*",
           ...(path.startsWith(`${osPrefix}/`) ? { Vary: "Origin" } : {}),
           "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Accept, Authorization, Content-Type, Content-Digest, If-None-Match, Signature, Signature-Input, Signature-Agent, Trooth-Contract",
+          "Access-Control-Allow-Headers": "Accept, Authorization, Content-Type, Content-Digest, If-None-Match, Signature, Signature-Input, Signature-Agent, Trooth-Contract, Mcp-Protocol-Version, Mcp-Session-Id, Last-Event-ID",
           "Access-Control-Max-Age": "86400",
           [REQUEST_ID_HEADER]: requestIdOf(c),
         },
@@ -878,6 +889,7 @@ export function createApp(deps: RouteDeps): ServeApp {
   // ------------------------------------------------------------ workspace: settings (section D)
 
   /** Deny by default: no hook, no session or a refused session is a 401 problem; a session for another company is a 403 problem. */
+  const PEOPLE_ONLY_ROUTES = /^(sign|sign\/options|passkeys|passkeys\/options|keys\/rotate|keys\/rotation\/(start|confirm|options)|keys\/[^/]+\/revoke|company\/signing-policy|google\/connect|sellers\/lists|recalls|connect\/[^/]+\/(approve|deny)|erase|agent-keys(\/.*)?)$/;
   async function workspaceFor(c: Context<Vars>, trooth_id: string): Promise<WorkspaceAuth | Response> {
     const agentSecret = bearerAgentKey(c.req.raw);
     if (agentSecret) {
@@ -885,6 +897,11 @@ export function createApp(deps: RouteDeps): ServeApp {
       const agent = deps.agentKeys ? await authorizeAgentKey(deps.agentKeys, agentSecret, deps.ports.now()) : null;
       if (!agent) return sendProblem(c, null, null, "unauthorized", { detail: "The agent key is unknown, revoked or expired. A person makes a new one in Semanto settings on trooth.co." });
       if (agent.trooth_id !== trooth_id) return sendProblem(c, null, null, "forbidden", { detail: `This agent key belongs to ${agent.trooth_id}, not ${trooth_id}.` });
+      // What only a person may do, refused to every agent key whatever its scope (OWASP API5:2023): signing and the
+      // passkeys that sign, the signing keys and their rotation, the signing policy, publishing signed seller lists and
+      // recalls, connecting Google or another app, erasing, and agent keys themselves.
+      const rest = new URL(c.req.url).pathname.split(`/${trooth_id}/`)[1] ?? "";
+      if (c.req.method !== "GET" && PEOPLE_ONLY_ROUTES.test(rest)) return sendProblem(c, null, null, "forbidden", { detail: "Only a person can do this, on trooth.co. An agent key cannot sign, change signing keys or the signing policy, publish a seller list or recall, connect an app or Google, erase, or manage agent keys." });
       return agent;
     }
     if (!deps.authorize) return sendProblem(c, null, null, "unauthorized");

@@ -554,7 +554,8 @@ export async function setupAction(p: Pipeline, action: WorkspaceAction, ws: Work
     }
     case "setup/install-check": {
       if (!mayOperate(ws)) return problem("forbidden", VIEWER_ONLY);
-      const result = await installCheck(p, company);
+      const settingsNow = (await p.d.settings.get(trooth_id)) ?? DEFAULT_SETTINGS;
+      const result = await installCheck(p, company, setup.host_override ?? setup.detection?.host ?? settingsNow.host);
       const fresh = (await p.d.store.getSetup(trooth_id))!;
       const allPass = result.checks.markdown === "pass" && result.checks.signature === "pass" && result.checks.well_known === "pass";
       await p.d.store.putSetup({ ...fresh, install: result, steps: { ...fresh.steps, install: fresh.steps.install ?? now, ...(allPass ? { check: fresh.steps.check ?? now } : {}) } });
@@ -600,7 +601,10 @@ export async function setupAction(p: Pipeline, action: WorkspaceAction, ws: Work
 }
 
 /** The three checks against the company's own site, with the signed copy and keys the Trooth-hosted routes serve. */
-export async function installCheck(p: Pipeline, company: CompanyRecord): Promise<InstallCheckResult> {
+/** The hosts where Semanto is the head code, not an adapter: the install check reads the home page's head there. */
+export const HEAD_CODE_HOSTS: ReadonlySet<HostKind> = new Set<HostKind>(["shopify", "webflow", "squarespace", "wix", "gcore", "head_tag"]);
+
+export async function installCheck(p: Pipeline, company: CompanyRecord, host?: HostKind): Promise<InstallCheckResult> {
   const file = await p.d.versions.getCurrent(company.trooth_id);
   const home = file?.header.pages_manifest.find((x) => x.url === `https://${company.domain}/` && (!x.part || x.part.n === 1)) ?? null;
   const companyJwks = await p.d.keys.getCompanyJwks(company.trooth_id);
@@ -614,6 +618,7 @@ export async function installCheck(p: Pipeline, company: CompanyRecord): Promise
       networkCopy: await p.networkCopy(company),
       resolveKey: (kid) => companyJwks.keys.find((k) => k.kid === kid) ?? trooth.keys.find((k) => k.kid === kid) ?? null,
       now: p.d.now(),
+      ...(host && HEAD_CODE_HOSTS.has(host) ? { headCode: { troothId: company.trooth_id } } : {}),
     },
     { fetch: (url, headers) => p.siteProbe(url, headers) },
   );

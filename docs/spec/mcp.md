@@ -3,11 +3,13 @@
 
 # The Semanto MCP server
 
-`https://api.trooth.co/os/semanto/mcp`, Model Context Protocol over Streamable HTTP: one JSON-RPC message per POST, one JSON answer, no session and no server-sent stream (GET answers 405). Protocol versions 2026-07-28, 2025-11-25, 2025-06-18 and 2025-03-26; the asked version when supported, else the newest.
+`https://api.trooth.co/os/semanto/mcp`, Model Context Protocol over Streamable HTTP: one JSON-RPC message per POST, one JSON answer, no session and no server-sent stream (GET answers 405). Protocol versions 2025-11-25, 2025-06-18 and 2025-03-26; the asked version when supported, else 2025-11-25. 2026-07-28 replaces initialize with server/discover and changes every result's shape, so it is offered once that is built. An `Origin` header from a web page other than trooth.co or localhost is refused with 403, as the transport asks of every server; no Origin (a desktop or server client) and app schemes are allowed. An `MCP-Protocol-Version` header the server does not support is a 400.
 
 ## Auth
 
-The company's agent key, `Authorization: Bearer` followed by the `tsk_` secret, on the MCP request. A person makes it in Semanto settings on trooth.co (`POST /os/semanto/{id}/agent-keys` with `{ name, scope: "read" | "write", expires_in_days? }`; the secret is in that answer only), lists them (`GET /os/semanto/{id}/agent-keys`) and revokes them (`POST /os/semanto/{id}/agent-keys/{kid}/revoke`). Only the SHA-256 is stored (`semanto_agent_keys`, migration 0013). A read key acts as a viewer, a write key as an admin. An agent key can never make, list or revoke agent keys. Without a key the public tools still answer.
+The company's agent key, `Authorization: Bearer` followed by the `tsk_` secret, on the MCP request. A person makes it in Semanto settings on trooth.co (`POST /os/semanto/{id}/agent-keys` with `{ name, scope: "read" | "write", expires_in_days? }`; the secret is in that answer only), lists them (`GET /os/semanto/{id}/agent-keys`) and revokes them (`POST /os/semanto/{id}/agent-keys/{kid}/revoke`). Only the SHA-256 is stored (`semanto_agent_keys`, migration 0013). A read key acts as a viewer, a write key as an admin. An agent key can never make, list or revoke agent keys. Whatever its scope, an agent key is refused (403) on what only a person may do: signing and its passkeys, the signing keys (rotate, start or confirm a rotation, revoke), the signing policy, publishing a seller list or a recall, connecting Google, approving or denying an app, and erasing (src/serve/routes.ts `PEOPLE_ONLY_ROUTES`); the matching tools are person tools that answer the page. A key that is sent but no longer works answers HTTP 401 with `WWW-Authenticate: Bearer realm="semanto", error="invalid_token"`. Without a key the public tools still answer. Every workspace write, through MCP or the dashboard, is counted in the `os_write` rate limit and leaves an audit row naming who made it; an agent key shows as itself.
+
+Arguments a tool does not name are refused as a tool error, and a `path` or id with a `.` or `..` segment is refused.
 
 ## Scoping
 

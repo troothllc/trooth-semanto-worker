@@ -19,6 +19,11 @@
 //   well_known  /.well-known/trooth.semanto and /.well-known/trooth-keys.json
 //               answer the same bytes as the Network copy
 //
+// On a host where Semanto is two tags in the page's head (Shopify, Webflow, Squarespace, Wix, any other host), the
+// site cannot answer markdown or serve /.well-known files, so the same three checks would never pass. There the check
+// reads the home page instead, as Google Search Console's HTML tag method does: the Semanto link is in the head, it
+// points at this company's signed copy on the Trooth Network, and the well-known files are not needed.
+//
 // Network calls go through the port, which the Worker builds over the shared
 // SSRF guard (src/core/ssrf.ts).
 
@@ -54,6 +59,8 @@ export interface InstallCheckInput {
   /** Resolves a response signature's keyid: the company's keys and Trooth's witness keys. */
   resolveKey(kid: string): Promise<PublicJwk | null> | PublicJwk | null;
   now: Date;
+  /** Set on a host where Semanto is the head code: the company's Trooth ID, which the link must name. */
+  headCode?: { troothId: string };
 }
 
 export interface InstallCheckResult {
@@ -69,7 +76,7 @@ export interface InstallCheckResult {
 export const INSTALL_OK = "Your site answers in markdown and the signature checks out.";
 export const INSTALL_MESSAGES = {
   unreachable: (d: string) => `Trooth could not reach ${d}. Is the site online?`,
-  html: "Your site sent a web page, not markdown. The app or code is not live yet. On Webflow and Squarespace, publish the site; on WordPress, clear the cache; then check again.",
+  html: "Your site sent a web page, not markdown. The app or code is not live yet. On WordPress, clear the cache; then check again.",
   cloudflare: `Cloudflare's converter answered instead of Semanto. In the Worker settings, make Semanto run first. ${DOUBLE_MARKDOWN_MESSAGE}`,
   markdownOk: "Your site answers markdown when asked (Accept: text/markdown).",
   noSignature: "Your site's markdown carries no Semanto signature. The app or code is not serving Semanto's answer; check the install steps for your host.",
@@ -80,9 +87,44 @@ export const INSTALL_MESSAGES = {
   wellKnownMissing: "Your site does not serve /.well-known/trooth.semanto and /.well-known/trooth-keys.json yet. The app or code serves both; check that it is live.",
   wellKnownDiffers: "Your site's /.well-known files differ from the copy on the Trooth Network. Make sure the app or code passes them through unchanged.",
   wellKnownOk: "Your site serves the two /.well-known files exactly as Trooth holds them.",
+  headMissing: "Your home page does not carry the Semanto link yet. Paste the head code, publish the site, then check again.",
+  headOk: "Your home page carries the Semanto link in its head.",
+  headElsewhere: "The Semanto link on your home page points at another company's copy. Paste the head code from your dashboard again, then publish.",
+  headTarget: "The link points at your signed copy on the Trooth Network.",
+  headNoWellKnown: "Not needed on this host: agents reach your signed copy through the link.",
 } as const;
+export const INSTALL_OK_HEAD = "Your home page links agents to your signed copy.";
+
+/** The href of the Semanto link in a page's HTML, or null. */
+export function semantoLinkHref(html: string): string | null {
+  for (const tag of html.match(/<link\b[^>]*>/gi) ?? []) {
+    const rel = /\brel\s*=\s*["']?([^"'\s>]+)/i.exec(tag)?.[1];
+    if (rel !== "https://trooth.co/rel/semanto") continue;
+    return /\bhref\s*=\s*["']?([^"'\s>]+)/i.exec(tag)?.[1] ?? null;
+  }
+  return null;
+}
+
+async function runHeadCodeCheck(input: InstallCheckInput, ports: InstallCheckPorts, troothId: string): Promise<InstallCheckResult> {
+  const url = `https://${input.domain}/`;
+  const checked_at = input.now.toISOString();
+  const page = await ports.fetch(url, { accept: "text/html" });
+  if (!page) {
+    const m = INSTALL_MESSAGES.unreachable(input.domain);
+    return { url, reached: false, checks: { markdown: "fail", signature: "fail", well_known: "fail" }, messages: { markdown: m, signature: m, well_known: m }, message: m, checked_at };
+  }
+  const href = page.status === 200 ? semantoLinkHref(new TextDecoder().decode(page.body)) : null;
+  const ours = href !== null && href.replace(/\/+$/, "") === `https://api.trooth.co/public/semanto/${troothId}`;
+  const markdown: CheckState = href ? "pass" : "fail";
+  const signature: CheckState = ours ? "pass" : "fail";
+  const markdownMsg = href ? INSTALL_MESSAGES.headOk : INSTALL_MESSAGES.headMissing;
+  const signatureMsg = ours ? INSTALL_MESSAGES.headTarget : href ? INSTALL_MESSAGES.headElsewhere : INSTALL_MESSAGES.headMissing;
+  const message = ours ? INSTALL_OK_HEAD : href ? signatureMsg : markdownMsg;
+  return { url, reached: true, checks: { markdown, signature, well_known: "pass" }, messages: { markdown: markdownMsg, signature: signatureMsg, well_known: INSTALL_MESSAGES.headNoWellKnown }, message, checked_at };
+}
 
 export async function runInstallCheck(input: InstallCheckInput, ports: InstallCheckPorts): Promise<InstallCheckResult> {
+  if (input.headCode) return runHeadCodeCheck(input, ports, input.headCode.troothId);
   const origin = `https://${input.domain}`;
   const url = `${origin}/`;
   const checked_at = input.now.toISOString();

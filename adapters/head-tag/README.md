@@ -10,7 +10,7 @@ Site-wide, on every page (paste once in the site header):
 
 ```html
 <link rel="https://trooth.co/rel/semanto" href="https://api.trooth.co/public/semanto/example-inc">
-<script type="application/ld+json" src="https://api.trooth.co/public/semanto/example-inc/facts.jsonld"></script>
+<link rel="alternate" type="application/ld+json" href="https://api.trooth.co/public/semanto/example-inc/facts.jsonld">
 ```
 
 Per page, pointing at that page's signed markdown (optional; the site-wide tags already lead to every page through the Semanto file):
@@ -19,7 +19,7 @@ Per page, pointing at that page's signed markdown (optional; the site-wide tags 
 <link rel="alternate" type="text/markdown" href="https://api.trooth.co/public/semanto/example-inc/pages/PAGE_ID">
 ```
 
-A note on the script tag: browsers do not fetch `<script type="application/ld+json" src>`, and Google reads JSON-LD only when it is inline. The tag above is a pointer for agents that read the head; if you want search engines to read the facts, paste the contents of `facts.jsonld` inline instead (the dashboard has a "copy inline block" button) and refresh it when Trooth publishes a new version.
+The second tag points agents at the facts as JSON-LD. A `<script type="application/ld+json">` with `src` is never fetched (the HTML standard requires data blocks to be inline), so the pointer is a `link` with `rel="alternate"`. If you also want search engines to read the facts, paste the contents of `facts.jsonld` inline in a script tag and refresh it when Trooth publishes a new version.
 
 ## Webflow
 
