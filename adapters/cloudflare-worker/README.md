@@ -14,13 +14,9 @@ Your site stays where it is. This Worker sits on your Cloudflare zone and does o
 
 The decision is made only on the `Accept` header and the path. The Worker never looks at `User-Agent`.
 
-## Install in one click
+## Download
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/trooth-llc/semanto-adapters/tree/main/cloudflare-worker)
-
-The button asks for your Trooth ID and the mode, then deploys the Worker to your account. After it deploys, open the Worker, go to Settings, Domains and Routes, and add the route `yourdomain.com/*` on your zone.
-
-(The button URL points at the public adapters repository Trooth publishes on launch day. Until then, use the command below.)
+The package with this folder and `shared/` is at https://trooth.co/docs/semanto/install/cloudflare-worker, with the steps.
 
 ## Install from the command line
 
