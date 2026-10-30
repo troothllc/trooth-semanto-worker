@@ -1,5 +1,9 @@
 # Semanto adapter for Cloudflare
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/troothllc/trooth-semanto-worker/tree/main/deploy/cloudflare)
+
+The button deploys `deploy/cloudflare`, this folder and `shared/` in one, built by `scripts/build-deploy.mjs`.
+
 Your site stays where it is. This Worker sits on your Cloudflare zone and does one thing: when a reader asks for a page as markdown or JSON-LD, or asks for one of the Trooth files, it answers with the signed copy Trooth holds for you, byte for byte, with the signature headers. Every other request goes to your site untouched.
 
 ## What it serves

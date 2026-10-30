@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: LicenseRef-Trooth-Proprietary
+# Copyright (c) 2026 Trooth, LLC
+#
+# Built by scripts/build-deploy.mjs from adapters/cloudflare-worker. Do not edit here.
+# The Deploy to Cloudflare button asks for TROOTH_ID. After it deploys, add a route for
+# your domain in the Worker's Settings, Domains & Routes. Until TROOTH_ID is set, every
+# request goes to your site unchanged.
+
+name = "trooth-semanto"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+workers_dev = false
+preview_urls = false
+
+[vars]
+TROOTH_ID = ""
+TROOTH_API_BASE = "https://api.trooth.co"
+MODE = "semanto_only"
+
+[observability]
+enabled = true
