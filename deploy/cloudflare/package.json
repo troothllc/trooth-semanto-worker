@@ -15,12 +15,6 @@
     "bindings": {
       "TROOTH_ID": {
         "description": "Your Trooth ID. Copy it from **Put it on your site** in your [Trooth dashboard](https://trooth.co/dashboard/semanto/install)."
-      },
-      "TROOTH_API_BASE": {
-        "description": "Leave as it is."
-      },
-      "MODE": {
-        "description": "Leave as `semanto_only`."
       }
     }
   }

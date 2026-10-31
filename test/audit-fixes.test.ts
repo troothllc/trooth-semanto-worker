@@ -509,6 +509,10 @@ describe("setup: the six-screen backend over docs/spec/setup-api.md", () => {
     expect(await json(refused)).toMatchObject({ code: "feature_unavailable", retryable: false });
     expect((await call(w, "GET", "/acme/reports", "Bearer ada")).status).toBe(410);
     expect((await w.store.getSetup("acme"))!.monitoring ?? null).toBeNull();
+    // Picking another host's guide is a choice, not a finding: the page keeps what Trooth found apart, and that guide
+    // starts unchecked instead of showing the last guide's results.
+    const picked = await json(await call(w, "POST", "/acme/setup/host", "Bearer ada", { host: "fastly" }));
+    expect(picked.install).toMatchObject({ host: "fastly", chosen: true, checks: { markdown: "pending", signature: "pending", well_known: "pending" } });
   });
 
   it("GET reports answers the newest gap report for the Watch page, and null before the first", async () => {

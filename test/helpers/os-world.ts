@@ -15,7 +15,7 @@ import { generateKeyPair, type PrivateJwk, type PublicJwk } from "@/core/keys";
 import { MemoryHttp as SiteHttp } from "@/compiler/ports";
 import { MemoryVersionStore, memoryPorts, TEST_CONFIG } from "@/serve/memory-ports";
 import { SessionUnavailable } from "@/serve/errors";
-import { createApp } from "@/serve/routes";
+import { createApp, type RouteDeps } from "@/serve/routes";
 import type { WorkspaceAuth, WorkspaceSession } from "@/serve/ports";
 import { MemoryHttp as IdentityHttp, DOH_URL } from "@/identity/ports";
 import { MemoryNonceStore, MemoryReceiptStore } from "@/readers/ports";
@@ -139,7 +139,7 @@ export class MemoryAgentKeys implements AgentKeyStore {
   }
 }
 
-export async function osWorld(opts: { custody?: "hosted" | "customer"; queue?: boolean; email?: boolean; google?: boolean; workerF?: boolean } = {}): Promise<OsWorld> {
+export async function osWorld(opts: { custody?: "hosted" | "customer"; queue?: boolean; email?: boolean; google?: boolean; workerF?: boolean; mcpOAuth?: RouteDeps["mcpOAuth"]; mcpOAuthIssuer?: string } = {}): Promise<OsWorld> {
   const clock = { now: new Date(NOW) };
   const now = () => new Date(clock.now);
   const w = await generateKeyPair();
@@ -209,6 +209,7 @@ export async function osWorld(opts: { custody?: "hosted" | "customer"; queue?: b
   const limiter = new MemoryRateLimiter(() => clock.now.getTime());
   const agentKeys = new MemoryAgentKeys();
   const app = createApp({
+    ...(opts.mcpOAuth ? { mcpOAuth: opts.mcpOAuth, mcpOAuthIssuer: opts.mcpOAuthIssuer ?? "" } : {}),
     ports: { ...ports, jobs: pipeline.jobs() },
     // "Bearer session-down": the session service does not answer (QA-12).
     authorize: async (req) => (req.headers.get("authorization") === "Bearer session-down" ? sessionDown() : (WORKSPACES[req.headers.get("authorization") ?? ""] ?? null)),

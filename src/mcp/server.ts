@@ -5,7 +5,7 @@
 // basic/transports): a client POSTs one JSON-RPC message and gets one JSON answer. Stateless: no session id,
 // no server-sent stream, so GET is 405, as the transport allows for a server that sends no stream.
 //
-// Auth is the company's agent key, sent as Authorization: Bearer followed by the tsk_ key on the MCP request (src/os/agent-keys.ts),
+// Auth is a person's Trooth sign-in (OAuth, src/mcp/oauth.ts) or the company's agent key, sent as Authorization: Bearer followed by the tsk_ key on the MCP request (src/os/agent-keys.ts),
 // as Vercel's and Cloudflare's servers take an API token. Without one, the public tools still answer. Every tool
 // runs the same route the dashboard uses, through this Worker's own app, so roles, rate limits, the audit trail
 // and the signed answers are the same for an agent as for a person.
@@ -14,6 +14,8 @@ import { GROUP_ICONS, SERVER_ICONS } from "./icons.generated";
 import { SEMANTO_TOOLS, toolByName, type SemantoTool } from "./catalog";
 import { CLOUDFLARE_COMPATIBILITY_DATE, CLOUDFLARE_WORKER_JS, CLOUDFLARE_WORKER_SHA256 } from "./cloudflare-worker.generated";
 import { authorizeAgentKey, bearerAgentKey, type AgentKeyStore } from "../os/agent-keys";
+import type { WorkspaceAuth } from "../serve/ports";
+import { looksLikeJwt, semantoRole, wwwAuthenticate, type OAuthVerifier, type SubjectLinks } from "./oauth";
 
 export const MCP_URL = "https://api.trooth.co/os/semanto/mcp";
 const ORIGIN = "https://api.trooth.co";
@@ -36,6 +38,17 @@ export interface McpDeps {
   call(req: Request): Promise<Response>;
   agentKeys?: AgentKeyStore;
   now(): Date;
+  /**
+   * Sign-in (src/mcp/oauth.ts). When set, a request with no credential answers 401 with the challenge that starts the
+   * client's sign-in, and an AuthKit access token for this server acts as the person it names, through a grant the
+   * Worker's own routes accept for one minute (src/serve/routes.ts mcpGrant).
+   */
+  oauth?: {
+    verifier: OAuthVerifier;
+    links: SubjectLinks;
+    troothIdFor(os_company_id: string): Promise<string | null>;
+    grant(auth: WorkspaceAuth): string;
+  };
 }
 
 type Json = Record<string, unknown>;
@@ -158,7 +171,7 @@ export function installGuide(host: string, troothId: string, domain: string | nu
                 method: "PUT",
                 path: "/accounts/{account_id}/workers/scripts/trooth-semanto",
                 body: "multipart/form-data: part metadata (application/json) and part worker.js (application/javascript+module)",
-                metadata: { main_module: "worker.js", compatibility_date: CLOUDFLARE_COMPATIBILITY_DATE, bindings: [{ type: "plain_text", name: "TROOTH_ID", text: troothId }, { type: "plain_text", name: "TROOTH_API_BASE", text: ORIGIN }, { type: "plain_text", name: "MODE", text: "semanto_only" }], observability: { enabled: true, head_sampling_rate: 1 } },
+                metadata: { main_module: "worker.js", compatibility_date: CLOUDFLARE_COMPATIBILITY_DATE, bindings: [{ type: "plain_text", name: "TROOTH_ID", text: troothId }], observability: { enabled: true, head_sampling_rate: 1 } },
                 worker_js: CLOUDFLARE_WORKER_JS,
                 worker_js_sha256: CLOUDFLARE_WORKER_SHA256,
               },
@@ -225,6 +238,11 @@ export async function handleMcp(req: Request, deps: McpDeps): Promise<Response> 
   const headerVersion = req.headers.get("mcp-protocol-version");
   if (headerVersion && !SUPPORTED.includes(headerVersion)) return new Response(JSON.stringify(rpcError(null, -32600, `MCP-Protocol-Version ${headerVersion} is not supported. Supported: ${SUPPORTED.join(", ")}.`)), { status: 400, headers });
   if (headerVersion) headers["Mcp-Protocol-Version"] = headerVersion;
+  // No credential at all: the challenge that starts sign-in, as Stripe's, Supabase's and GitHub's servers answer.
+  const authz = req.headers.get("authorization") ?? "";
+  if (deps.oauth && !/^Bearer\s+\S+$/i.test(authz) && req.method === "POST") {
+    return new Response(JSON.stringify(rpcError(null, -32001, "Sign in to Trooth to use the Semanto MCP server, or send an agent key as Authorization: Bearer.")), { status: 401, headers: { ...headers, "WWW-Authenticate": wwwAuthenticate() } });
+  }
   if (req.method === "GET" || req.method === "DELETE") return new Response(JSON.stringify(rpcError(null, -32000, "This server answers POST only: one JSON-RPC message, one JSON answer.")), { status: 405, headers: { ...headers, Allow: "POST" } });
   let msg: Json;
   try {
@@ -246,7 +264,26 @@ export async function handleMcp(req: Request, deps: McpDeps): Promise<Response> 
   const groups = (q.get("groups") ?? "").split(",").map((g) => g.trim()).filter(Boolean);
   const offered = (t: SemantoTool) => (!readOnly || t.hints.readOnlyHint) && (groups.length === 0 || t.category === "Start here" || groups.includes(groupSlug(t.category)));
   const secret = bearerAgentKey(req);
-  const agent = secret && deps.agentKeys ? await authorizeAgentKey(deps.agentKeys, secret, deps.now()) : null;
+  let agent: WorkspaceAuth | null = secret && deps.agentKeys ? await authorizeAgentKey(deps.agentKeys, secret, deps.now()) : null;
+  // A signed-in person's AI tool: the token is checked first, then the workspace trooth.co linked to that person.
+  let viaSignIn: { grant: string } | null = null;
+  let signInProblem: { status: string; detail: string; url: string } | null = null;
+  const token = /^Bearer\s+(\S+)$/i.exec(authz)?.[1] ?? "";
+  if (!secret && deps.oauth && looksLikeJwt(token)) {
+    const v = await deps.oauth.verifier.verify(token);
+    if (!v.ok) return new Response(JSON.stringify(rpcError(msg.id ?? null, -32001, v.description)), { status: v.status, headers: { ...headers, ...(v.status === 401 ? { "WWW-Authenticate": wwwAuthenticate("invalid_token", v.description) } : { "Retry-After": "30" }) } });
+    const link = await deps.oauth.links.find(v.principal.issuer, v.principal.subject);
+    const troothId = link ? await deps.oauth.troothIdFor(link.os_company_id) : null;
+    if (!link) signInProblem = { status: "not_linked", detail: "This sign-in is not linked to a Trooth workspace yet. Sign in to trooth.co once with the same account, then try again.", url: "https://trooth.co/login" };
+    else if (!troothId) signInProblem = { status: "semanto_not_set_up", detail: "Your Trooth workspace has no Semanto record yet. Start Semanto on trooth.co, then try again.", url: "https://trooth.co/dashboard/semanto" };
+    else {
+      // The AI tool acts as the person but is still an agent: "agent:" keeps it from what only a person may do.
+      agent = { trooth_id: troothId, role: semantoRole(link.role), user_id: `agent:oauth:${link.user_id}`, name: `${link.email ?? "A Trooth member"} with an AI tool` };
+      viaSignIn = { grant: deps.oauth.grant(agent) };
+    }
+  }
+  /** The credential an internal call carries: the agent key as sent, or the one-minute grant for a signed-in AI tool. */
+  const credential = (): Record<string, string> => (viaSignIn ? { "semanto-mcp-grant": viaSignIn.grant } : authz ? { authorization: authz } : {});
   const reply = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers });
 
   switch (msg.method) {
@@ -280,15 +317,16 @@ export async function handleMcp(req: Request, deps: McpDeps): Promise<Response> 
       // Arguments the tool does not name are refused, not passed on (MCP tools: input errors are tool errors).
       const unknown = Object.keys(args).filter((k) => k !== "trooth_id" && !(k in tool.params));
       if (unknown.length > 0) return reply(rpc(id, textResult({ status: "invalid_request", detail: `${tool.name} takes no ${unknown.join(", ")}. It takes ${Object.keys(tool.params).join(", ") || "no arguments"}.` }, true)));
+      if ((tool.access === "read" || tool.access === "write") && !agent && signInProblem) return reply(rpc(id, textResult(signInProblem, true)));
       if ((tool.access === "read" || tool.access === "write") && !agent) return reply(rpc(id, textResult({ status: "agent_key_required", detail: "This tool acts in a company's workspace. Send the company's agent key as Authorization: Bearer followed by the tsk_ key on the MCP request. A person makes one in Semanto settings on trooth.co.", url: "https://trooth.co/dashboard/semanto/company" }, true)));
-      if (tool.access === "write" && agent && agent.role === "viewer") return reply(rpc(id, textResult({ status: "forbidden", detail: "This agent key has read scope. This tool changes something; it needs a key with write scope." }, true)));
+      if (tool.access === "write" && agent && agent.role === "viewer") return reply(rpc(id, textResult({ status: "forbidden", detail: viaSignIn ? "You can view this workspace on trooth.co but not change it. Ask an owner or admin for the editor role." : "This agent key has read scope. This tool changes something; it needs a key with write scope." }, true)));
       const troothId = String(args.trooth_id ?? agent?.trooth_id ?? "") || null;
-      if (tool.name === "semanto_whoami") return reply(rpc(id, textResult({ object: "semanto.whoami", trooth_id: agent!.trooth_id, scope: agent!.role === "admin" ? "write" : "read", acts_as: agent!.name, mcp_url: MCP_URL })));
+      if (tool.name === "semanto_whoami") return reply(rpc(id, textResult({ object: "semanto.whoami", trooth_id: agent!.trooth_id, scope: agent!.role === "viewer" ? "read" : "write", acts_as: agent!.name, signed_in: viaSignIn !== null, mcp_url: MCP_URL })));
       if (tool.name === "semanto_guide") return reply(rpc(id, textResult(GUIDE)));
       if (tool.access === "person") return reply(rpc(id, textResult({ status: "human_action_required", detail: tool.description, url: tool.page, trooth_id: troothId })));
       if (tool.name === "semanto_install_guide") {
         if (!troothId) return reply(rpc(id, textResult({ status: "invalid_request", detail: "trooth_id is needed." }, true)));
-        const s = await deps.call(new Request(`${ORIGIN}/os/semanto/${encodeURIComponent(troothId)}/setup`, { headers: { authorization: req.headers.get("authorization") ?? "", accept: "application/json" } }));
+        const s = await deps.call(new Request(`${ORIGIN}/os/semanto/${encodeURIComponent(troothId)}/setup`, { headers: { ...credential(), accept: "application/json" } }));
         const setup = s.ok ? ((await s.json()) as Json) : null;
         const install = (setup?.install ?? {}) as Json;
         const host = String(args.host ?? install.host ?? "head_tag");
@@ -299,7 +337,7 @@ export async function handleMcp(req: Request, deps: McpDeps): Promise<Response> 
       const url = new URL(ORIGIN + filled.path);
       // The caller's address goes along, so the public rate limit counts this caller, not every MCP call together.
       const ip = req.headers.get("cf-connecting-ip");
-      const init: RequestInit = { method: tool.method, headers: { accept: tool.name === "semanto_page" ? "text/markdown" : "application/json", ...(ip ? { "cf-connecting-ip": ip } : {}), ...(req.headers.get("authorization") && tool.access !== "public" ? { authorization: req.headers.get("authorization")! } : {}) } };
+      const init: RequestInit = { method: tool.method, headers: { accept: tool.name === "semanto_page" ? "text/markdown" : "application/json", ...(ip ? { "cf-connecting-ip": ip } : {}), ...(tool.access !== "public" ? credential() : {}) } };
       if (tool.method === "GET") {
         for (const [k, v] of Object.entries(filled.rest)) if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
       } else {

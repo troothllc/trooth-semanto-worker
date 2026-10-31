@@ -35,10 +35,10 @@ compatibility_date = "2026-10-01"
 workers_dev = false
 preview_urls = false
 
+# One value to fill in on Cloudflare's Deploy page: the Trooth ID. The API address and the mode have defaults in the
+# code (adapters/shared/semanto-adapter.mjs configFromEnv), so the page asks for nothing else.
 [vars]
 TROOTH_ID = ""
-TROOTH_API_BASE = "https://api.trooth.co"
-MODE = "semanto_only"
 
 [observability]
 enabled = true
@@ -55,8 +55,6 @@ enabled = true
     cloudflare: {
       bindings: {
         TROOTH_ID: { description: "Your Trooth ID. Copy it from **Put it on your site** in your [Trooth dashboard](https://trooth.co/dashboard/semanto/install)." },
-        TROOTH_API_BASE: { description: "Leave as it is." },
-        MODE: { description: "Leave as `semanto_only`." },
       },
     },
   }, null, 2) + "\n",

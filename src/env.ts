@@ -46,6 +46,10 @@ export interface Env {
   HOSTED_KEY_SEAL_SECRET?: string;
   /** Service binding to trooth-os-worker-f, whose session check accepts workspace bearer tokens for /os routes. Without it, every /os call is refused. */
   TROOTH_OS?: Fetcher;
+  /** The authorization server that signs people in to the MCP server (src/mcp/oauth.ts), WorkOS AuthKit. */
+  SEMANTO_OAUTH_ISSUER?: string;
+  /** worker-f's database, read only: the person-to-workspace links trooth.co records at sign-in. */
+  OS_DB?: D1Database;
   /** Durable Object NonceDO (src/readers/nonce-do.ts): atomic nonce claims for Web Bot Auth and the connector routes. Without it, the KV fallback (not atomic) is used. */
   NONCES?: DurableObjectNamespace;
   /** Durable Object LogDO (src/ledger/log-do.ts): the one writer for the public log, so appends are serialized. */

@@ -110,7 +110,7 @@ export interface SetupDoc {
   } | null;
   review: { version: number | null; root_hash: string | null; changed_since_read: boolean; changed_urls: string[]; facts_count: number; pages_count: number; saved_for_later: boolean; confirmed_at: string | null } | null;
   sign: { custody: "hosted" | "customer"; passkey_required: boolean; /** The signed-in person has a passkey on file (hosted signing needs one). */ has_passkey: boolean; two_officer: boolean; approvals: { name: string; role: string; at: string; passkey: boolean }[]; signed_version: number | null; signed_at: string | null } | null;
-  install: { host: HostKind; guide_id: string; detected_at: string | null; checks: InstallCheckResult["checks"]; message: string; checked_at: string | null } | null;
+  install: { host: HostKind; guide_id: string; detected_at: string | null; detected_host: HostKind | null; chosen: boolean; checks: InstallCheckResult["checks"]; message: string; checked_at: string | null } | null;
   monitoring: { started_at: string | null; questions: string[]; competitors: { name: string; domain: string }[]; suggested_questions: string[] } | null;
   timings: ReturnType<typeof measureSetup>;
   next_action: NextAction | null;
@@ -442,6 +442,9 @@ export async function setupState(p: Pipeline, trooth_id: string, opts: { live: b
     host,
     guide_id: HOST_GUIDES[host],
     detected_at: setup.detection?.at ?? null,
+    // What Trooth found apart from what the person picked, so the page never says a site runs where it does not.
+    detected_host: setup.detection?.host ?? null,
+    chosen: setup.host_override !== null,
     checks: last?.checks ?? { markdown: "pending", signature: "pending", well_known: "pending" },
     message: last?.message ?? (host === "unknown" ? "We could not tell where your site runs. Pick it from the list." : "Put Semanto on your site, then Trooth checks it."),
     checked_at: last?.checked_at ?? null,
@@ -549,7 +552,8 @@ export async function setupAction(p: Pipeline, action: WorkspaceAction, ws: Work
       if (!mayAdminister(ws)) return problem("forbidden", "Only an owner or admin can choose the host.");
       const host = HOST_KINDS.find((h) => h === body.host);
       if (!host) return problem("invalid_request", `host is one of ${HOST_KINDS.join(", ")}.`);
-      await p.d.store.putSetup({ ...setup, host_override: host });
+      // Another host's guide starts unchecked: the last check answered for the guide shown before it.
+      await p.d.store.putSetup({ ...setup, host_override: host, ...(host !== (setup.host_override ?? setup.detection?.host) ? { install: null } : {}) });
       return state();
     }
     case "setup/install-check": {

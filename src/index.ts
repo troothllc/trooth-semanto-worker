@@ -67,6 +67,11 @@ import { withRecallEvents } from "./os/recalls";
 import { credentialsForVersion } from "./os/credentials";
 import { consumeOs, consumeOsFailed } from "./os/jobs";
 import { devDashboardBase, devUpstreamBase, devUpstreamFetch } from "./dev-upstream";
+import { D1SubjectLinks, OAuthVerifier } from "./mcp/oauth";
+
+// One token checker per isolate, so the issuer's metadata and keys are read once every ten minutes, not per request.
+let verifier: OAuthVerifier | null = null;
+const oauthVerifier = (issuer: string): OAuthVerifier => (verifier ??= new OAuthVerifier({ issuer }));
 
 // The Durable Object classes wrangler.toml binds as NONCES, LOG and RATE.
 export { NonceDO, LogDO, RateLimitDO };
@@ -203,6 +208,12 @@ export function wire(env: Env): Wired {
       forwardingFromStore(store),
     ),
     agentKeys: new D1AgentKeys(env.DB),
+    ...(env.SEMANTO_OAUTH_ISSUER && env.OS_DB
+      ? {
+          mcpOAuth: { verifier: oauthVerifier(env.SEMANTO_OAUTH_ISSUER), links: new D1SubjectLinks(env.OS_DB), troothIdFor: async (os_company_id: string) => (await store.getCompanyByOsCompany(os_company_id))?.trooth_id ?? null },
+          mcpOAuthIssuer: env.SEMANTO_OAUTH_ISSUER,
+        }
+      : {}),
     authorize: troothOsAuthorize(env.TROOTH_OS, async (os_company_id) => (await store.getCompanyByOsCompany(os_company_id))?.trooth_id ?? null, (trooth_id) => store.ownerUserId(trooth_id)),
     session: troothOsSession(env.TROOTH_OS),
     workspace: pipeline,

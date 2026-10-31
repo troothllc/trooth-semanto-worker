@@ -48,6 +48,7 @@ import { feedResponse, offerResponse, offersResponse, problemMarkdown, productRe
 import { resolve as resolveDelivery, validateSettings, withDefaults, DEFAULT_SETTINGS, type DeliverySettings } from "../settings/delivery";
 import { authorizeAgentKey, bearerAgentKey, type AgentKeyStore } from "../os/agent-keys";
 import { handleMcp, originAllowed } from "../mcp/server";
+import { protectedResourceMetadata, type OAuthVerifier, type SubjectLinks } from "../mcp/oauth";
 import { registerOsRoutes } from "./os-routes";
 import type { OsService } from "../os/service";
 import type { LimitGroup } from "../readers/rate-limit";
@@ -122,6 +123,10 @@ export interface RouteDeps {
   authorize?: (req: Request, trooth_id: string) => Promise<boolean | WorkspaceAuth | null>;
   /** Agent keys (secrets starting tsk_): a company's credential for an AI agent, checked here before the session (src/os/agent-keys.ts). */
   agentKeys?: AgentKeyStore;
+  /** Sign-in for the MCP server (src/mcp/oauth.ts): the token checker, the person-to-workspace links and the company lookup. */
+  mcpOAuth?: { verifier: OAuthVerifier; links: SubjectLinks; troothIdFor(os_company_id: string): Promise<string | null> };
+  /** The authorization server named in the protected resource metadata. */
+  mcpOAuthIssuer?: string;
   /** The pipeline behind the /os actions (src/pipeline.ts). */
   workspace?: WorkspaceHandlers;
   /** Product records, offers and feeds for the commerce public routes. */
@@ -419,7 +424,14 @@ export function createApp(deps: RouteDeps): ServeApp {
     } catch {
       ctx = undefined;
     }
-    return handleMcp(c.req.raw, { call: (r) => Promise.resolve(app.fetch(r, c.env, ctx)), ...(deps.agentKeys ? { agentKeys: deps.agentKeys } : {}), now: () => ports.now() });
+    return handleMcp(c.req.raw, { call: (r) => Promise.resolve(app.fetch(r, c.env, ctx)), ...(deps.agentKeys ? { agentKeys: deps.agentKeys } : {}), ...(deps.mcpOAuth ? { oauth: { ...deps.mcpOAuth, grant: mcpGrant } } : {}), now: () => ports.now() });
+  });
+
+  // RFC 9728: where an AI tool learns which authorization server signs people in for the MCP server.
+  app.get("/.well-known/oauth-protected-resource/os/semanto/mcp", (c) => {
+    const doc = deps.mcpOAuth ? protectedResourceMetadata(deps.mcpOAuthIssuer ?? null) : null;
+    if (!doc) return c.json({ error: "not_configured" }, 404);
+    return c.json(doc, 200, { "Cache-Control": "public, max-age=3600", "Access-Control-Allow-Origin": "*" });
   });
 
   if (deps.os) {
@@ -889,8 +901,28 @@ export function createApp(deps: RouteDeps): ServeApp {
   // ------------------------------------------------------------ workspace: settings (section D)
 
   /** Deny by default: no hook, no session or a refused session is a 401 problem; a session for another company is a 403 problem. */
+  // The one-minute grant a signed-in AI tool's MCP call carries to this app's own routes (src/mcp/server.ts): the token
+  // was checked by the MCP server, so the routes trust the grant, which no one outside this isolate can know.
+  const grants = new Map<string, { auth: WorkspaceAuth; until: number }>();
+  const mcpGrant = (auth: WorkspaceAuth): string => {
+    const bytes = crypto.getRandomValues(new Uint8Array(24));
+    const id = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    const now = Date.now();
+    for (const [k, v] of grants) if (v.until < now) grants.delete(k);
+    grants.set(id, { auth, until: now + 60_000 });
+    return id;
+  };
   const PEOPLE_ONLY_ROUTES = /^(sign|sign\/options|passkeys|passkeys\/options|keys\/rotate|keys\/rotation\/(start|confirm|options)|keys\/[^/]+\/revoke|company\/signing-policy|google\/connect|sellers\/lists|recalls|connect\/[^/]+\/(approve|deny)|erase|agent-keys(\/.*)?)$/;
   async function workspaceFor(c: Context<Vars>, trooth_id: string): Promise<WorkspaceAuth | Response> {
+    const grantId = c.req.header("semanto-mcp-grant");
+    if (grantId) {
+      const g = grants.get(grantId);
+      if (!g || g.until < Date.now()) return sendProblem(c, null, null, "unauthorized", { detail: "The sign-in for this AI tool has run out. Sign in again." });
+      if (g.auth.trooth_id !== trooth_id) return sendProblem(c, null, null, "forbidden", { detail: `This sign-in belongs to ${g.auth.trooth_id}, not ${trooth_id}.` });
+      const rest = new URL(c.req.url).pathname.split(`/${trooth_id}/`)[1] ?? "";
+      if (c.req.method !== "GET" && PEOPLE_ONLY_ROUTES.test(rest)) return sendProblem(c, null, null, "forbidden", { detail: "Only a person can do this, on trooth.co. An AI tool cannot sign, change signing keys or the signing policy, publish a seller list or recall, connect an app or Google, erase, or manage agent keys." });
+      return g.auth;
+    }
     const agentSecret = bearerAgentKey(c.req.raw);
     if (agentSecret) {
       // An agent key answers for itself: it is never sent on to the session service.

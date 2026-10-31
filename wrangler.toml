@@ -115,6 +115,8 @@ routes = [
   { pattern = "api.trooth.co/public/semanto", zone_name = "trooth.co" },
   { pattern = "api.trooth.co/public/semanto/*", zone_name = "trooth.co" },
   { pattern = "api.trooth.co/os/semanto/*", zone_name = "trooth.co" },
+  # RFC 9728 metadata for the MCP server's sign-in; more specific than worker-f's api.trooth.co routes, so it wins.
+  { pattern = "api.trooth.co/.well-known/oauth-protected-resource/os/semanto/mcp", zone_name = "trooth.co" },
 ]
 
 # Workers Logs: request outcomes and exceptions for this Worker, so a slow or failed sign can be traced.
@@ -131,6 +133,9 @@ LEDGER_URL = "https://api.trooth.co/public/semanto/log"
 # authority over HTTPS. Chosen 2026-10-25 after real requests built by src/ledger/timestamp.ts: Sectigo and FreeTSA
 # returned valid tokens over HTTPS; DigiCert answered only over plain HTTP.
 TSA_URL = "https://timestamp.sectigo.com"
+# Sign-in for the Semanto MCP server (src/mcp/oauth.ts): WorkOS AuthKit, the same authorization server trooth.co and
+# the Trooth Network MCP server use. https://api.trooth.co/os/semanto/mcp is registered there as a resource (2026-10-30).
+SEMANTO_OAUTH_ISSUER = "https://special-chimney-41.authkit.app"
 
 [[env.production.d1_databases]]
 binding = "DB"
@@ -158,6 +163,13 @@ dead_letter_queue = "trooth-semanto-compile-dlq"
 [[env.production.services]]
 binding = "TROOTH_OS"
 service = "trooth-os-worker-f"
+
+# Read only: trooth_os_prod, worker-f's database, for the link trooth.co records when a person signs in
+# (oauth_subject_links) and their role in the workspace (app_memberships). Semanto never writes to it.
+[[env.production.d1_databases]]
+binding = "OS_DB"
+database_name = "trooth_os_prod"
+database_id = "5adff959-2d6b-4791-b168-4cf3bfe4b2f4"
 
 [[env.production.durable_objects.bindings]]
 name = "NONCES"
