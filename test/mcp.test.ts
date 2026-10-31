@@ -195,6 +195,21 @@ describe("agent keys", () => {
     }
   });
 
+  it("cannot reach a person's action with a percent-encoded or doubled-slash path (semanto29: found by review)", async () => {
+    const w = await osWorld();
+    const key = await makeKey(w);
+    for (const path of ["/acme/%73ign", "/acme/%73ign/options", "/acme/%61gent-keys", "/ac%6De/sign", "/acme/keys/k1/%72evoke", "/acme/%65rase", "/acme//sign", "/acme/sign/", "/acme/%2573ign"]) {
+      const r = await post(w, path, { custody: "customer" }, `Bearer ${key}`);
+      expect([400, 403, 404], path).toContain(r.status);
+      if (r.status === 403) expect((await json(r)).detail, path).toMatch(/Only a person can do this|belongs to/);
+    }
+    // A workspace read spelled with an encoded letter is refused before it can be served with public cache headers.
+    const enc = await w.app.request(`/os/sem%61nto/acme/settings`, { headers: { authorization: `Bearer ${key}` } });
+    expect(enc.status).toBe(400);
+    // An ordinary write an agent may make still works.
+    expect((await post(w, "/acme/setup/save-for-later", {}, `Bearer ${key}`)).status).toBe(200);
+  });
+
   it("leave an audit row naming the key for every pipeline write, and are rate limited", async () => {
     const w = await osWorld();
     const key = await makeKey(w);

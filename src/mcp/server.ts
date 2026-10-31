@@ -275,10 +275,11 @@ export async function handleMcp(req: Request, deps: McpDeps): Promise<Response> 
     const link = await deps.oauth.links.find(v.principal.issuer, v.principal.subject);
     const troothId = link ? await deps.oauth.troothIdFor(link.os_company_id) : null;
     if (!link) signInProblem = { status: "not_linked", detail: "This sign-in is not linked to a Trooth workspace yet. Sign in to trooth.co once with the same account, then try again.", url: "https://trooth.co/login" };
+    else if (!semantoRole(link.role)) signInProblem = { status: "not_linked", detail: "This sign-in is no longer a member of a Trooth workspace. Ask the workspace owner to add you again on trooth.co.", url: "https://trooth.co/dashboard/team" };
     else if (!troothId) signInProblem = { status: "semanto_not_set_up", detail: "Your Trooth workspace has no Semanto record yet. Start Semanto on trooth.co, then try again.", url: "https://trooth.co/dashboard/semanto" };
     else {
       // The AI tool acts as the person but is still an agent: "agent:" keeps it from what only a person may do.
-      agent = { trooth_id: troothId, role: semantoRole(link.role), user_id: `agent:oauth:${link.user_id}`, name: `${link.email ?? "A Trooth member"} with an AI tool` };
+      agent = { trooth_id: troothId, role: semantoRole(link.role)!, user_id: `agent:oauth:${link.user_id}`, name: `${link.email ?? "A Trooth member"} with an AI tool` };
       viaSignIn = { grant: deps.oauth.grant(agent) };
     }
   }

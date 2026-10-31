@@ -199,8 +199,8 @@ export class D1SubjectLinks implements SubjectLinks {
         .prepare(
           `SELECT l.company_id AS os_company_id, l.user_id AS user_id, u.email AS email, m.role AS role
              FROM oauth_subject_links l
-             LEFT JOIN app_users u ON u.user_id = l.user_id
-             LEFT JOIN app_memberships m ON m.company_id = l.company_id AND lower(m.email) = lower(u.email)
+             JOIN app_users u ON u.user_id = l.user_id
+             JOIN app_memberships m ON m.company_id = l.company_id AND lower(m.email) = lower(u.email)
             WHERE l.issuer = ?1 AND l.subject = ?2`,
         )
         .bind(issuer, subject.slice(0, 200))
@@ -219,7 +219,8 @@ export class MemorySubjectLinks implements SubjectLinks {
   }
 }
 
-/** The Semanto workspace role for a trooth.co role: editors run things, viewers only read, anyone else reads. */
-export function semantoRole(role: string | null): "owner" | "admin" | "member" | "viewer" {
-  return role === "owner" ? "owner" : role === "admin" ? "admin" : role === "editor" ? "member" : "viewer";
+/** The Semanto workspace role for a trooth.co role: editors run things, viewers only read. A person with no
+ *  membership now (removed from the workspace) has no role at all: null, and the sign-in opens nothing (semanto29). */
+export function semantoRole(role: string | null): "owner" | "admin" | "member" | "viewer" | null {
+  return role === "owner" ? "owner" : role === "admin" ? "admin" : role === "editor" ? "member" : role === "viewer" ? "viewer" : null;
 }

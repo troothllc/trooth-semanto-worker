@@ -106,7 +106,20 @@ describe("the MCP server with sign-in", () => {
     const { sign, mcp } = await server(true, "viewer");
     const r = (await (await mcp({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "semanto_setup_resume", arguments: {} } }, `Bearer ${await sign(good)}`)).json()) as Record<string, any>;
     expect(r.result.structuredContent.status).toBe("forbidden");
-    expect([semantoRole("owner"), semantoRole("admin"), semantoRole("editor"), semantoRole("viewer"), semantoRole(null)]).toEqual(["owner", "admin", "member", "viewer", "viewer"]);
+    expect([semantoRole("owner"), semantoRole("admin"), semantoRole("editor"), semantoRole("viewer"), semantoRole(null), semantoRole("something")]).toEqual(["owner", "admin", "member", "viewer", null, null]);
+  });
+});
+
+describe("a person removed from the workspace (semanto29, found by review)", () => {
+  it("opens nothing with a sign-in that has no membership now", async () => {
+    const { fetchDoc, sign } = await issuer();
+    const links = new MemorySubjectLinks();
+    links.rows.set(`${ISSUER} user_01`, { os_company_id: "co-acme", user_id: "u-ada", email: "ada@acme.com", role: null });
+    const calls: Request[] = [];
+    const deps = { now: () => new Date(now * 1000), call: async (r: Request) => (calls.push(r), new Response("{}")), oauth: { verifier: new OAuthVerifier({ issuer: ISSUER, fetch: fetchDoc, now: () => now * 1000 }), links, troothIdFor: async () => "acme", grant: () => "g1" } };
+    const r = (await (await handleMcp(new Request("https://api.trooth.co/os/semanto/mcp", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await sign(good)}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "semanto_keys_get", arguments: {} } }) }), deps as any)).json()) as Record<string, any>;
+    expect(r.result.structuredContent.status).toBe("not_linked");
+    expect(calls).toHaveLength(0);
   });
 });
 

@@ -256,7 +256,7 @@ export function createApp(deps: RouteDeps): ServeApp {
 
   async function send(c: Context<Vars>, spec: Omit<ResponseSpec, "now">): Promise<Response> {
     // A workspace answer is for one session: never stored by a shared cache.
-    const workspace = new URL(c.req.url).pathname.startsWith(`${osPrefix}/`);
+    const workspace = new URL(c.req.url).pathname.startsWith(`${osPrefix}/`) || c.req.path.startsWith(`${osPrefix}/`) || (c.req.routePath || "").startsWith(`${osPrefix}/`);
     // Every response names its request id; a handler that logged an exception under its own id keeps that one.
     const withId = { [REQUEST_ID_HEADER]: requestIdOf(c), ...(spec.extra ?? {}) };
     const extra = workspace ? { ...withId, "Cache-Control": "private, no-store", "Access-Control-Allow-Origin": dashboardOriginFor(c.req.header("origin"), deps.dashboardOrigins), Vary: "Accept, Origin" } : withId;
@@ -384,6 +384,11 @@ export function createApp(deps: RouteDeps): ServeApp {
     const path = new URL(c.req.url).pathname;
     // Malformed percent-encoding anywhere in the path: a signed 400, never a thrown 500.
     if (path.split("/").some((seg) => safeDecode(seg) === null)) return sendProblem(c, null, null, "invalid_request", { detail: "The address has a malformed percent-encoding." });
+    // One spelling per address (semanto29, found by review): a percent-encoded letter, digit or -._~ is the same
+    // address spelled another way, and every decision below (people-only actions, the workspace cache rule, the
+    // rate-limit group) reads the path as text. RFC 3986 section 6.2.2.2 says such octets should be decoded, so a
+    // client never needs them; they are refused, as is a doubled slash.
+    if (/%(?:[46][1-9A-Fa-f]|[57][0-9Aa]|3[0-9]|2[Dd]|2[Ee]|5[Ff]|7[Ee])/.test(path) || path.includes("//")) return sendProblem(c, null, null, "invalid_request", { detail: "Write the address without percent-encoding letters, digits or -._~, and without a doubled slash." });
     if (c.req.method === "POST" && Number(c.req.header("content-length") ?? "0") > MAX_BODY_BYTES) return sendProblem(c, null, null, "payload_too_large", { detail: "The body is larger than 5 MB. Send it in smaller parts." });
     // The connect poll and the uninstall are limited by session id and by key id in src/serve/os-routes.ts: app servers share egress addresses.
     const keyedConnect = path.startsWith(`${apiPrefix}/connect/`) && !(c.req.method === "POST" && path === `${apiPrefix}/connect/sessions`);
@@ -913,14 +918,29 @@ export function createApp(deps: RouteDeps): ServeApp {
     return id;
   };
   const PEOPLE_ONLY_ROUTES = /^(sign|sign\/options|passkeys|passkeys\/options|keys\/rotate|keys\/rotation\/(start|confirm|options)|keys\/[^/]+\/revoke|company\/signing-policy|google\/connect|sellers\/lists|recalls|connect\/[^/]+\/(approve|deny)|erase|agent-keys(\/.*)?)$/;
+  // Which action a request names, read three ways, any one of which marks it people-only (semanto29). The raw path
+  // alone was not enough: Hono decodes the path before it picks a route, so /os/semanto/acme/%73ign reached the sign
+  // handler while the raw text "%73ign" did not match (an independent review found it on 2026-10-30). So: the route
+  // pattern the handler was registered under (immune to encoding), the decoded path, and, failing closed, any
+  // percent sign or doubled slash at all in a write an agent sends.
+  const peopleOnly = (c: Context<Vars>, trooth_id: string): boolean => {
+    const raw = new URL(c.req.url).pathname;
+    if (raw.includes("%") || raw.includes("//")) return true;
+    const pattern = c.req.routePath || "";
+    const at = pattern.indexOf("/:trooth_id/");
+    if (at >= 0 && PEOPLE_ONLY_ROUTES.test(pattern.slice(at + "/:trooth_id/".length))) return true;
+    let decoded = raw;
+    try { decoded = decodeURIComponent(raw); } catch { return true; }
+    const rest = decoded.split(`/${trooth_id}/`)[1] ?? "";
+    return PEOPLE_ONLY_ROUTES.test(rest.replace(/\/+$/, ""));
+  };
   async function workspaceFor(c: Context<Vars>, trooth_id: string): Promise<WorkspaceAuth | Response> {
     const grantId = c.req.header("semanto-mcp-grant");
     if (grantId) {
       const g = grants.get(grantId);
       if (!g || g.until < Date.now()) return sendProblem(c, null, null, "unauthorized", { detail: "The sign-in for this AI tool has run out. Sign in again." });
       if (g.auth.trooth_id !== trooth_id) return sendProblem(c, null, null, "forbidden", { detail: `This sign-in belongs to ${g.auth.trooth_id}, not ${trooth_id}.` });
-      const rest = new URL(c.req.url).pathname.split(`/${trooth_id}/`)[1] ?? "";
-      if (c.req.method !== "GET" && PEOPLE_ONLY_ROUTES.test(rest)) return sendProblem(c, null, null, "forbidden", { detail: "Only a person can do this, on trooth.co. An AI tool cannot sign, change signing keys or the signing policy, publish a seller list or recall, connect an app or Google, erase, or manage agent keys." });
+      if (c.req.method !== "GET" && peopleOnly(c, trooth_id)) return sendProblem(c, null, null, "forbidden", { detail: "Only a person can do this, on trooth.co. An AI tool cannot sign, change signing keys or the signing policy, publish a seller list or recall, connect an app or Google, erase, or manage agent keys." });
       return g.auth;
     }
     const agentSecret = bearerAgentKey(c.req.raw);
@@ -932,8 +952,7 @@ export function createApp(deps: RouteDeps): ServeApp {
       // What only a person may do, refused to every agent key whatever its scope (OWASP API5:2023): signing and the
       // passkeys that sign, the signing keys and their rotation, the signing policy, publishing signed seller lists and
       // recalls, connecting Google or another app, erasing, and agent keys themselves.
-      const rest = new URL(c.req.url).pathname.split(`/${trooth_id}/`)[1] ?? "";
-      if (c.req.method !== "GET" && PEOPLE_ONLY_ROUTES.test(rest)) return sendProblem(c, null, null, "forbidden", { detail: "Only a person can do this, on trooth.co. An agent key cannot sign, change signing keys or the signing policy, publish a seller list or recall, connect an app or Google, erase, or manage agent keys." });
+      if (c.req.method !== "GET" && peopleOnly(c, trooth_id)) return sendProblem(c, null, null, "forbidden", { detail: "Only a person can do this, on trooth.co. An agent key cannot sign, change signing keys or the signing policy, publish a seller list or recall, connect an app or Google, erase, or manage agent keys." });
       return agent;
     }
     if (!deps.authorize) return sendProblem(c, null, null, "unauthorized");
